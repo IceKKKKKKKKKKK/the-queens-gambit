@@ -316,6 +316,24 @@ summary:focus-visible {
   font-size: 18px;
 }
 
+.header-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.rules-trigger,
+.rules-close {
+  height: 38px;
+  padding: 0 13px;
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  background: var(--white);
+  cursor: pointer;
+  font-size: 10px;
+  font-weight: 650;
+}
+
 .game-shell {
   display: grid;
   width: min(1320px, 100%);
@@ -1038,6 +1056,91 @@ summary:focus-visible {
   color: var(--black);
 }
 
+.rules-dialog {
+  width: min(680px, calc(100vw - 28px));
+  max-width: none;
+  max-height: min(82dvh, 720px);
+  margin: auto;
+  padding: 0;
+  overflow: auto;
+  overscroll-behavior: contain;
+  border: 1px solid var(--black);
+  border-radius: 20px;
+  background: var(--white);
+  color: var(--black);
+  box-shadow: 0 24px 80px rgba(0, 0, 0, 0.16);
+}
+
+.rules-dialog::backdrop {
+  background: rgba(255, 255, 255, 0.84);
+  backdrop-filter: blur(5px);
+}
+
+.rules-dialog-header {
+  position: sticky;
+  z-index: 1;
+  top: 0;
+  display: flex;
+  min-height: 70px;
+  padding: 15px 18px;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  border-bottom: 1px solid var(--line);
+  background: var(--white);
+}
+
+.rules-dialog-header h2 {
+  margin: 0;
+  font-family: "Songti SC", STSong, serif;
+  font-size: 24px;
+  font-weight: 600;
+  letter-spacing: -0.04em;
+}
+
+.rules-dialog-header h2:focus {
+  outline: none;
+}
+
+.rules-dialog-header form {
+  margin: 0;
+}
+
+.rules-close {
+  height: 34px;
+  padding: 0 11px;
+}
+
+.rules-list {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 1px;
+  background: var(--line);
+}
+
+.rules-list section {
+  min-width: 0;
+  padding: 15px 17px 17px;
+  background: var(--white);
+}
+
+.rules-list section:last-child {
+  grid-column: 1 / -1;
+}
+
+.rules-list h3 {
+  margin: 0 0 6px;
+  font-size: 11px;
+  font-weight: 750;
+}
+
+.rules-list p {
+  margin: 0;
+  color: var(--muted);
+  font-size: 10px;
+  line-height: 1.7;
+}
+
 @media (max-width: 1050px) {
   .game-shell {
     grid-template-columns: minmax(250px, 280px) minmax(340px, 420px);
@@ -1124,6 +1227,19 @@ summary:focus-visible {
 
   .piece-name {
     font-size: clamp(7px, 2.5vw, 10px);
+  }
+
+  .rules-dialog {
+    width: calc(100vw - 28px);
+    max-height: calc(100dvh - 28px);
+  }
+
+  .rules-list {
+    grid-template-columns: 1fr;
+  }
+
+  .rules-list section:last-child {
+    grid-column: auto;
   }
 }
 

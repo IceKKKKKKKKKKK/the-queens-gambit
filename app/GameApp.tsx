@@ -560,6 +560,7 @@ export default function GameApp({ hasRoom = false }: { hasRoom?: boolean }) {
   const [creating, setCreating] = useState(false);
   const [fatalError, setFatalError] = useState<string | null>(null);
   const [toast, setToast] = useState<string | null>(null);
+  const [rulesOpen, setRulesOpen] = useState(false);
   const [connection, setConnection] = useState<"live" | "syncing" | "offline">("live");
   const roomRef = useRef<RoomEnvelope | null>(null);
   const roomSessionRef = useRef(0);
@@ -568,6 +569,9 @@ export default function GameApp({ hasRoom = false }: { hasRoom?: boolean }) {
   const toastTimerRef = useRef<number | null>(null);
   const suppressClickUntilRef = useRef(0);
   const dragDroppedRef = useRef(false);
+  const rulesDialogRef = useRef<HTMLDialogElement>(null);
+  const rulesTitleRef = useRef<HTMLHeadingElement>(null);
+  const rulesTriggerRef = useRef<HTMLButtonElement>(null);
 
   const setupSide = room && isPlayer(room.viewer) ? room.viewer : null;
   const setupSnapshotPieces = useMemo(
@@ -591,11 +595,22 @@ export default function GameApp({ hasRoom = false }: { hasRoom?: boolean }) {
 
   useEffect(() => {
     const cancelSelection = (event: KeyboardEvent) => {
-      if (event.key === "Escape") setSelectedPieceId(null);
+      if (event.key === "Escape" && !rulesDialogRef.current?.open) setSelectedPieceId(null);
     };
     window.addEventListener("keydown", cancelSelection);
     return () => window.removeEventListener("keydown", cancelSelection);
   }, []);
+
+  useEffect(() => {
+    const dialog = rulesDialogRef.current;
+    if (!dialog) return;
+    if (rulesOpen && !dialog.open) {
+      dialog.showModal();
+      rulesTitleRef.current?.focus();
+    } else if (!rulesOpen && dialog.open) {
+      dialog.close();
+    }
+  }, [rulesOpen]);
 
   function showToast(message: string) {
     if (toastTimerRef.current !== null) window.clearTimeout(toastTimerRef.current);
@@ -667,6 +682,7 @@ export default function GameApp({ hasRoom = false }: { hasRoom?: boolean }) {
     setBusy(false);
     setSelectedPieceId(null);
     setSetupDraftState(null);
+    setRulesOpen(false);
     roomRef.current = null;
     setRoom(null);
   }
@@ -1288,7 +1304,21 @@ export default function GameApp({ hasRoom = false }: { hasRoom?: boolean }) {
           <span className="room-code">{displayCode(room.code)}</span>
           <span className={`connection ${connection}`}>{connection === "offline" ? "正在重连" : room.viewer === "spectator" ? "观战模式" : sideName(room.viewer)}</span>
         </div>
-        <button className="icon-button" type="button" onClick={() => setFlipped((value) => !value)} aria-label="旋转棋盘">↻</button>
+        <div className="header-actions">
+          <button
+            className="rules-trigger"
+            type="button"
+            ref={rulesTriggerRef}
+            onClick={() => setRulesOpen(true)}
+            aria-haspopup="dialog"
+            aria-controls="game-rules-dialog"
+            aria-expanded={rulesOpen}
+            aria-label="查看游戏规则"
+          >
+            规则
+          </button>
+          <button className="icon-button" type="button" onClick={() => setFlipped((value) => !value)} aria-label="旋转棋盘">↻</button>
+        </div>
       </header>
 
       <section className={`game-shell ${game.phase === "setup" ? "is-setup" : ""}`}>
@@ -1377,6 +1407,61 @@ export default function GameApp({ hasRoom = false }: { hasRoom?: boolean }) {
           </div>
         </aside>
       </section>
+      <dialog
+        className="rules-dialog"
+        id="game-rules-dialog"
+        ref={rulesDialogRef}
+        aria-labelledby="game-rules-title"
+        onClose={() => {
+          setRulesOpen(false);
+          rulesTriggerRef.current?.focus();
+        }}
+      >
+        <div className="rules-dialog-header">
+          <h2 id="game-rules-title" ref={rulesTitleRef} tabIndex={-1}>暗军棋规则</h2>
+          <form method="dialog">
+            <button className="rules-close" type="submit">关闭</button>
+          </form>
+        </div>
+        <div className="rules-list">
+          <section>
+            <h3>目标</h3>
+            <p>夺取对方军旗、使对方无合法着法，或对方认输即可获胜。没有自动和棋或回合上限。</p>
+          </section>
+          <section>
+            <h3>暗棋</h3>
+            <p>对手棋型在本局结束前保持隐藏，已经暴露的军旗除外。</p>
+          </section>
+          <section>
+            <h3>布阵</h3>
+            <p>棋子只能放在本方兵站或大本营，行营必须留空。军旗只能在大本营；地雷只能在最后两排；炸弹不能在第一排。双方确认后随机决定先手。</p>
+          </section>
+          <section>
+            <h3>移动</h3>
+            <p>公路每次沿连接线走一格。铁路可直线行走任意格，但不能越子；只有工兵可以在铁路上转弯。</p>
+          </section>
+          <section>
+            <h3>行营</h3>
+            <p>空行营双方均可进入。行营内的棋子不能被攻击，离开后不再受保护。</p>
+          </section>
+          <section>
+            <h3>大本营</h3>
+            <p>任何棋子进入大本营后都不能再移动。军旗和地雷始终不能移动。</p>
+          </section>
+          <section>
+            <h3>交战</h3>
+            <p>司令、军长、师长、旅长、团长、营长、连长、排长、工兵依次由高到低；高阶获胜，同级同归于尽。炸弹与任何敌棋相遇都会同归于尽。</p>
+          </section>
+          <section>
+            <h3>地雷</h3>
+            <p>工兵可以挖雷并存活；其他棋子碰到地雷会被消灭，地雷保留；炸弹与地雷同时移除。</p>
+          </section>
+          <section>
+            <h3>军旗暴露</h3>
+            <p>司令阵亡后，己方军旗公开。若被进攻的大本营内不是军旗，另一座大本营中的军旗也会公开。</p>
+          </section>
+        </div>
+      </dialog>
       {toast ? <div className="toast" role="alert" aria-live="assertive">{toast}</div> : null}
     </main>
   );
