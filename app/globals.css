@@ -71,7 +71,7 @@ summary:focus-visible {
   border-radius: 10px;
   background: var(--black);
   color: var(--white);
-  font-family: "Songti SC", SimSun, serif;
+  font-family: "Iowan Old Style", Baskerville, "Times New Roman", serif;
   font-size: 16px;
 }
 
@@ -83,17 +83,21 @@ summary:focus-visible {
 }
 
 .landing-core {
-  width: min(320px, 100%);
+  width: min(520px, 100%);
   text-align: center;
 }
 
 .landing-core h1 {
   margin: 0;
-  font-family: "Songti SC", STSong, SimSun, serif;
-  font-size: clamp(64px, 13vw, 92px);
+  font-family: "Iowan Old Style", Baskerville, "Times New Roman", serif;
+  font-size: clamp(48px, 9vw, 76px);
   font-weight: 500;
-  letter-spacing: -0.08em;
-  line-height: 1;
+  letter-spacing: -0.065em;
+  line-height: 0.92;
+}
+
+.landing-core h1 span {
+  display: block;
 }
 
 .landing-core > p {

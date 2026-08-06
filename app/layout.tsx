@@ -7,7 +7,7 @@ export async function generateMetadata(): Promise<Metadata> {
   const host = requestHeaders.get("x-forwarded-host") ?? requestHeaders.get("host") ?? "localhost:3000";
   const protocol = requestHeaders.get("x-forwarded-proto") ?? (host.startsWith("localhost") ? "http" : "https");
   const imageUrl = `${protocol}://${host}/og.png`;
-  const title = "弈阵";
+  const title = "The Queen's Gambit";
   const description = "在线二人暗军棋";
   return {
     title,
@@ -16,7 +16,7 @@ export async function generateMetadata(): Promise<Metadata> {
       title,
       description,
       type: "website",
-      images: [{ url: imageUrl, width: 1792, height: 1024, alt: "弈阵二人暗军棋" }],
+      images: [{ url: imageUrl, width: 1792, height: 1024, alt: "The Queen's Gambit 暗军棋" }],
     },
     twitter: {
       card: "summary_large_image",

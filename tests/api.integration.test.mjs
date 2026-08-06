@@ -12,6 +12,11 @@ function opaqueToken() {
   return randomBytes(32).toString("base64url");
 }
 
+function uniqueTestIp() {
+  const words = Array.from({ length: 6 }, () => randomBytes(2).toString("hex"));
+  return `2001:db8:${words.join(":")}`;
+}
+
 async function openPort() {
   return new Promise((resolve, reject) => {
     const listener = net.createServer();
@@ -74,14 +79,14 @@ test("room API preserves hidden information, identity, concurrency, and limits",
   let useExistingServer = false;
   try {
     const existing = await fetch(origin);
-    useExistingServer = existing.ok && (await existing.text()).includes("弈阵");
+    useExistingServer = existing.ok && (await existing.text()).includes("The Queen&#x27;s Gambit");
   } catch {
     // Start an isolated server below.
   }
   const logs = { value: "" };
   if (!useExistingServer) {
     const port = await openPort();
-    origin = `http://127.0.0.1:${port}`;
+    origin = `http://localhost:${port}`;
     const child = spawn(
       process.execPath,
       [path.join(root, "node_modules", "vinext", "dist", "cli.js"), "dev", "--host", "127.0.0.1", "--port", String(port)],
@@ -99,7 +104,7 @@ test("room API preserves hidden information, identity, concurrency, and limits",
 
   const create = await requestJson(`${origin}/api/rooms`, {
     method: "POST",
-    headers: { "CF-Connecting-IP": `198.51.100.${Math.floor(Math.random() * 200) + 1}` },
+    headers: { "CF-Connecting-IP": uniqueTestIp() },
   });
   assert.equal(create.status, 201);
   const { code, playerToken: blackToken, opponentInviteToken: inviteToken } = create.body;
@@ -156,7 +161,7 @@ test("room API preserves hidden information, identity, concurrency, and limits",
 
   const raceRoom = await requestJson(`${origin}/api/rooms`, {
     method: "POST",
-    headers: { "CF-Connecting-IP": `203.0.113.${Math.floor(Math.random() * 200) + 1}` },
+    headers: { "CF-Connecting-IP": uniqueTestIp() },
   });
   assert.equal(raceRoom.status, 201);
   const raceCandidate = opaqueToken();
@@ -200,7 +205,7 @@ test("room API preserves hidden information, identity, concurrency, and limits",
     204,
   );
 
-  const rateKey = `192.0.2.${Math.floor(Math.random() * 200) + 1}`;
+  const rateKey = uniqueTestIp();
   const rateStatuses = [];
   for (let attempt = 0; attempt < 21; attempt += 1) {
     rateStatuses.push(

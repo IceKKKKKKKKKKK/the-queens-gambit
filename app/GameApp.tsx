@@ -268,7 +268,10 @@ function Landing({ onCreate, creating, onOpen }: { onCreate: () => void; creatin
   return (
     <main className="landing">
       <section className="landing-core">
-        <h1>弈阵</h1>
+        <h1>
+          <span>The Queen&apos;s</span>
+          <span>Gambit</span>
+        </h1>
         <p>暗军棋</p>
         <div className="landing-actions">
           <button className="button primary" type="button" onClick={onCreate} disabled={creating}>
@@ -568,7 +571,7 @@ export default function GameApp({ hasRoom = false }: { hasRoom?: boolean }) {
   if (loading) {
     return (
       <main className="loading-screen">
-        <span className="loading-mark">阵</span>
+        <span className="loading-mark">Q</span>
         <p>正在展开棋盘</p>
       </main>
     );
@@ -595,8 +598,8 @@ export default function GameApp({ hasRoom = false }: { hasRoom?: boolean }) {
     <main className="room-page">
       <header className="room-header">
         <button className="wordmark wordmark-button" type="button" onClick={leaveRoom}>
-          <span className="wordmark-mark">阵</span>
-          <span>弈阵</span>
+          <span className="wordmark-mark">Q</span>
+          <span>The Queen&apos;s Gambit</span>
         </button>
         <div className="room-identity">
           <span className="room-code">{displayCode(room.code)}</span>

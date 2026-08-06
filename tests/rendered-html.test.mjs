@@ -20,7 +20,7 @@ test("server-renders the minimal game entrance", async () => {
   assert.equal(response.status, 200);
   assert.match(response.headers.get("content-type") ?? "", /^text\/html\b/i);
   const html = await response.text();
-  assert.match(html, /<title>弈阵<\/title>/i);
+  assert.match(html, /<title>The Queen's Gambit<\/title>/i);
   assert.match(html, /创建棋局/);
   assert.match(html, /房间码/);
   assert.doesNotMatch(html, /把战场|PRIVATE ROOMS|codex-preview|react-loading-skeleton/i);
