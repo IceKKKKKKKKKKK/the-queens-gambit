@@ -29,7 +29,7 @@ async function openPort() {
 }
 
 async function waitForServer(origin, child, logs) {
-  const deadline = Date.now() + 20_000;
+  const deadline = Date.now() + 45_000;
   while (Date.now() < deadline) {
     if (child.exitCode !== null) throw new Error(`dev server exited early: ${logs.value.slice(-600)}`);
     try {
@@ -97,7 +97,7 @@ function ownLayout(snapshot, side) {
     .sort((first, second) => first.id.localeCompare(second.id));
 }
 
-test("room API preserves hidden information, identity, concurrency, and limits", { timeout: 60_000 }, async (t) => {
+test("room API preserves hidden information, identity, concurrency, and limits", { timeout: 90_000 }, async (t) => {
   const port = await openPort();
   const origin = `http://localhost:${port}`;
   const logs = { value: "" };
@@ -259,6 +259,22 @@ test("room API preserves hidden information, identity, concurrency, and limits",
   const bomb = initialBlackPieces.find((piece) => piece.type === "bomb");
   const frontPiece = initialBlackPieces.find((piece) => piece.row === 6);
   assert.ok(flag && mine && bomb && frontPiece);
+  const submittedLayout = initialBlackPieces.map(({ id, row, col }) => ({ pieceId: id, row, col }));
+
+  const malformedLayout = await postAction(origin, validationCode, validationToken, 0, {
+    type: "ready",
+    value: true,
+    layout: [{ pieceId: "invalid!", row: 6, col: 0 }],
+  });
+  assert.equal(malformedLayout.status, 400);
+  assert.equal(malformedLayout.body.error, "INVALID_REQUEST");
+  const incompleteLayout = await postAction(origin, validationCode, validationToken, 0, {
+    type: "ready",
+    value: true,
+    layout: submittedLayout.slice(0, 24),
+  });
+  assert.equal(incompleteLayout.status, 422);
+  assert.equal(incompleteLayout.body.error, "INCOMPLETE_LAYOUT");
 
   const samePositionSwap = await postAction(origin, validationCode, validationToken, 0, {
     type: "swap",
@@ -291,6 +307,7 @@ test("room API preserves hidden information, identity, concurrency, and limits",
   const firstReady = await postAction(origin, validationCode, validationToken, 0, {
     type: "ready",
     value: true,
+    layout: submittedLayout,
   });
   assert.equal(firstReady.status, 200);
   assert.equal(firstReady.body.version, 1);

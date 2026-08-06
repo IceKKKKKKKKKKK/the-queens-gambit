@@ -1,24 +1,32 @@
 "use client";
 
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState, type DragEvent } from "react";
 import {
   CAMPS,
   HEADQUARTERS,
   PIECE_INFO,
+  applySetupDraftPlacement,
+  createSetupDraft,
   getProjectedLegalTargets,
   getProjectedMoveViolation,
-  getProjectedSetupSwapViolation,
+  getSetupDraftPlacementViolation,
   isCamp,
   isHeadquarters,
+  isInsideBoard,
   isRailEdge,
   isRoadEdge,
+  isValidSetupDraft,
   positionKey,
+  randomizeSetupDraft,
   samePosition,
+  setupDraftToLayout,
+  setupSlots,
   type PlayerAction,
   type Position,
   type ProjectedGame,
   type PublicEvent,
   type PublicPiece,
+  type SetupDraft,
   type Side,
   type Viewer,
 } from "../lib/game";
@@ -38,6 +46,14 @@ interface CreateRoomEnvelope extends RoomEnvelope {
 interface ClaimRoomEnvelope extends RoomEnvelope {
   playerToken: string;
 }
+
+interface SetupDraftState {
+  roomCode: string;
+  side: Side;
+  locations: SetupDraft;
+}
+
+const PIECE_DRAG_TYPE = "application/x-queens-gambit-piece";
 
 class RequestError extends Error {
   constructor(
@@ -59,7 +75,9 @@ const ERROR_TEXT: Record<string, string> = {
   INVALID_REQUEST: "操作内容无效，已被服务器拒绝。",
   REQUEST_TOO_LARGE: "操作内容过长，已被服务器拒绝。",
   INVALID_LAYOUT: "这个位置不属于可用的布阵位置。",
+  INCOMPLETE_LAYOUT: "请先将棋盒里的 25 枚棋子全部放入棋盘。",
   INVALID_SWAP: "请选择两枚自己的棋子。",
+  PIECE_NOT_AVAILABLE: "这枚棋子当前不可用，请重新选择。",
   SAME_POSITION: "起点和终点相同，没有发生移动。",
   NO_STATE_CHANGE: "当前已经是这个状态，无需重复操作。",
   FLAG_MUST_BE_HEADQUARTERS: "军旗只能放在本方两个大本营之一。",
@@ -72,7 +90,7 @@ const ERROR_TEXT: Record<string, string> = {
   GAME_FINISHED: "本局已经结束。",
   NOT_YOUR_TURN: "现在是对手回合，不能移动棋子。",
   POSITION_OUT_OF_BOUNDS: "目标位置不在棋盘内。",
-  NO_PIECE_AT_SOURCE: "请先选择一枚自己的棋子。",
+  NO_PIECE_AT_SOURCE: "请先从棋盒或棋盘选择一枚自己的棋子。",
   NOT_YOUR_PIECE: "只能选择自己的棋子。",
   FLAG_CANNOT_MOVE: "军旗不能移动。",
   MINE_CANNOT_MOVE: "地雷不能移动。",
@@ -122,6 +140,10 @@ function pendingTokenKey(code: string) {
   return `yizhen:${code}:pending-player-token`;
 }
 
+function setupDraftKey(code: string, side: Side) {
+  return `yizhen:${code}:${side}:setup-draft`;
+}
+
 function readLocalValue(key: string) {
   try {
     return localStorage.getItem(key);
@@ -144,6 +166,33 @@ function removeLocalValue(key: string) {
     localStorage.removeItem(key);
   } catch {
     // The in-memory identity remains usable for this page session.
+  }
+}
+
+function restoreSetupDraft(
+  raw: string | null,
+  pieces: PublicPiece[],
+  side: Side,
+  requireComplete = false,
+) {
+  if (!raw) return null;
+  try {
+    const parsed = JSON.parse(raw) as unknown;
+    if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) return null;
+    const candidate: SetupDraft = {};
+    for (const [pieceId, value] of Object.entries(parsed as Record<string, unknown>)) {
+      if (value === null) {
+        candidate[pieceId] = null;
+        continue;
+      }
+      if (!value || typeof value !== "object" || Array.isArray(value)) return null;
+      const position = value as Record<string, unknown>;
+      if (!Number.isInteger(position.row) || !Number.isInteger(position.col)) return null;
+      candidate[pieceId] = { row: position.row as number, col: position.col as number };
+    }
+    return isValidSetupDraft(pieces, side, candidate, requireComplete) ? candidate : null;
+  } catch {
+    return null;
   }
 }
 
@@ -219,12 +268,13 @@ function finishReasonText(reason: ProjectedGame["finishReason"]) {
   return "和棋";
 }
 
-function statusText(room: RoomEnvelope) {
+function statusText(room: RoomEnvelope, placedCount?: number) {
   const { snapshot, viewer } = room;
   if (snapshot.phase === "setup") {
     if (viewer === "spectator") return "双方正在秘密布阵";
     if (snapshot.ready[viewer]) return "阵型已锁定，等待对手";
-    return "点击两枚棋子交换位置";
+    if (placedCount !== undefined && placedCount < 25) return `还需放置 ${25 - placedCount} 枚棋子`;
+    return "拖动或点选棋子调整阵型";
   }
   if (snapshot.phase === "finished") {
     if (!snapshot.winner) return "本局和棋";
@@ -255,20 +305,36 @@ function PieceModel({ piece }: { piece: PublicPiece }) {
 
 interface BoardProps {
   game: ProjectedGame;
+  pieces: PublicPiece[];
   viewer: Viewer;
   selected: Position | null;
   targets: Set<string>;
   flipped: boolean;
   busy: boolean;
   onCell: (position: Position) => void;
+  onPieceDragStart: (pieceId: string, position: Position) => boolean;
+  onPieceDrop: (pieceId: string, position: Position) => void;
+  onPieceDragEnd: () => void;
 }
 
-function Board({ game, viewer, selected, targets, flipped, busy, onCell }: BoardProps) {
+function Board({
+  game,
+  pieces,
+  viewer,
+  selected,
+  targets,
+  flipped,
+  busy,
+  onCell,
+  onPieceDragStart,
+  onPieceDrop,
+  onPieceDragEnd,
+}: BoardProps) {
   const cells = [];
   for (let row = 0; row < 12; row += 1) {
     for (let col = 0; col < 5; col += 1) cells.push({ row, col });
   }
-  const alivePieces = game.pieces.filter((piece) => piece.alive);
+  const alivePieces = pieces.filter((piece) => piece.alive && isInsideBoard(piece));
 
   return (
     <div className={`board-grid ${flipped ? "is-flipped" : ""}`} aria-label="军棋棋盘">
@@ -289,6 +355,21 @@ function Board({ game, viewer, selected, targets, flipped, busy, onCell }: Board
         const downLeft = { row: row + 1, col: col - 1 };
         const hasVertical = row < 11 && isRoadEdge(position, down);
         const pieceLabel = piece?.type ? PIECE_INFO[piece.type].label : piece ? "暗子" : "空位";
+        const targetLabel = targetHere
+          ? game.phase === "setup"
+            ? piece
+              ? "，可交换"
+              : "，可放置"
+            : piece
+              ? "，可攻击"
+              : "，可移动"
+          : "";
+        const draggable = Boolean(
+          piece &&
+            piece.side === viewer &&
+            game.phase !== "finished" &&
+            !busy,
+        );
         return (
           <div
             className="board-cell"
@@ -313,8 +394,36 @@ function Board({ game, viewer, selected, targets, flipped, busy, onCell }: Board
               className={`station-hit ${selectedHere ? "is-selected" : ""} ${targetHere ? "is-target" : ""} ${targetAttack ? "is-attack" : ""}`}
               type="button"
               onClick={() => onCell(position)}
+              draggable={draggable}
+              onDragStart={(event) => {
+                if (!piece || !draggable) {
+                  event.preventDefault();
+                  return;
+                }
+                if (!onPieceDragStart(piece.id, position)) {
+                  event.preventDefault();
+                  return;
+                }
+                event.dataTransfer.effectAllowed = "move";
+                event.dataTransfer.setData(PIECE_DRAG_TYPE, piece.id);
+                event.dataTransfer.setData("text/plain", piece.id);
+              }}
+              onDragOver={(event) => {
+                if (viewer === "spectator" || busy) return;
+                event.preventDefault();
+                event.dataTransfer.dropEffect = "move";
+              }}
+              onDrop={(event) => {
+                if (viewer === "spectator" || busy) return;
+                event.preventDefault();
+                const pieceId =
+                  event.dataTransfer.getData(PIECE_DRAG_TYPE) || event.dataTransfer.getData("text/plain");
+                if (pieceId) onPieceDrop(pieceId, position);
+              }}
+              onDragEnd={onPieceDragEnd}
               disabled={viewer === "spectator" || busy}
-              aria-label={`${coordinates(position)}，${pieceLabel}`}
+              aria-pressed={piece?.side === viewer ? selectedHere : undefined}
+              aria-label={`${coordinates(position)}，${pieceLabel}${targetLabel}`}
             >
               <span className={`station ${camp ? "camp" : headquarters ? "headquarters" : "post"}`} />
               {targetHere && !piece ? <span className="target-dot" /> : null}
@@ -324,6 +433,63 @@ function Board({ game, viewer, selected, targets, flipped, busy, onCell }: Board
         );
       })}
     </div>
+  );
+}
+
+function PieceTray({
+  pieces,
+  selectedPieceId,
+  disabled,
+  onSelect,
+  onDragStartPiece,
+  onDragEnd,
+}: {
+  pieces: PublicPiece[];
+  selectedPieceId: string | null;
+  disabled: boolean;
+  onSelect: (pieceId: string) => void;
+  onDragStartPiece: (pieceId: string) => boolean;
+  onDragEnd: () => void;
+}) {
+  const ordered = [...pieces].sort((first, second) => {
+    const firstIndex = first.type ? Object.keys(PIECE_INFO).indexOf(first.type) : Number.MAX_SAFE_INTEGER;
+    const secondIndex = second.type ? Object.keys(PIECE_INFO).indexOf(second.type) : Number.MAX_SAFE_INTEGER;
+    return firstIndex - secondIndex || first.id.localeCompare(second.id);
+  });
+  return (
+    <section className="piece-box" aria-label={`棋盒，剩余 ${pieces.length} 枚棋子`}>
+      <div className="piece-box-title">
+        <strong>棋盒</strong>
+        <span role="status">{pieces.length}</span>
+      </div>
+      <div className="piece-tray" role="group" aria-label="待布阵棋子">
+        {ordered.map((piece) => (
+          <button
+            className={`tray-piece ${selectedPieceId === piece.id ? "is-selected" : ""}`}
+            type="button"
+            key={piece.id}
+            disabled={disabled}
+            draggable={!disabled}
+            aria-pressed={selectedPieceId === piece.id}
+            aria-label={`${piece.type ? PIECE_INFO[piece.type].label : "棋子"}，选择后放入棋盘`}
+            onClick={() => onSelect(piece.id)}
+            onDragStart={(event: DragEvent<HTMLButtonElement>) => {
+              if (!onDragStartPiece(piece.id)) {
+                event.preventDefault();
+                return;
+              }
+              event.dataTransfer.effectAllowed = "move";
+              event.dataTransfer.setData(PIECE_DRAG_TYPE, piece.id);
+              event.dataTransfer.setData("text/plain", piece.id);
+            }}
+            onDragEnd={onDragEnd}
+          >
+            <PieceModel piece={piece} />
+          </button>
+        ))}
+      </div>
+      <p className="piece-box-hint">拖到棋盘，或先点棋子再点位置</p>
+    </section>
   );
 }
 
@@ -367,7 +533,8 @@ export default function GameApp({ hasRoom = false }: { hasRoom?: boolean }) {
   const [room, setRoom] = useState<RoomEnvelope | null>(null);
   const [token, setToken] = useState<string | null>(null);
   const [inviteToken, setInviteToken] = useState<string | null>(null);
-  const [selected, setSelected] = useState<Position | null>(null);
+  const [selectedPieceId, setSelectedPieceId] = useState<string | null>(null);
+  const [setupDraftState, setSetupDraftState] = useState<SetupDraftState | null>(null);
   const [flipped, setFlipped] = useState(false);
   const [busy, setBusy] = useState(false);
   const [loading, setLoading] = useState(hasRoom);
@@ -380,10 +547,36 @@ export default function GameApp({ hasRoom = false }: { hasRoom?: boolean }) {
   const busyRef = useRef(false);
   const creatingRef = useRef(false);
   const toastTimerRef = useRef<number | null>(null);
+  const suppressClickUntilRef = useRef(0);
+  const dragDroppedRef = useRef(false);
 
+  const setupSide = room && isPlayer(room.viewer) ? room.viewer : null;
+  const setupSnapshotPieces = useMemo(
+    () =>
+      room && setupSide
+        ? room.snapshot.pieces.filter((piece) => piece.alive && piece.side === setupSide && piece.type)
+        : [],
+    [room, setupSide],
+  );
   useEffect(() => {
     roomRef.current = room;
   }, [room]);
+
+  useEffect(() => {
+    if (!setupDraftState) return;
+    writeLocalValue(
+      setupDraftKey(setupDraftState.roomCode, setupDraftState.side),
+      JSON.stringify(setupDraftState.locations),
+    );
+  }, [setupDraftState]);
+
+  useEffect(() => {
+    const cancelSelection = (event: KeyboardEvent) => {
+      if (event.key === "Escape") setSelectedPieceId(null);
+    };
+    window.addEventListener("keydown", cancelSelection);
+    return () => window.removeEventListener("keydown", cancelSelection);
+  }, []);
 
   function showToast(message: string) {
     if (toastTimerRef.current !== null) window.clearTimeout(toastTimerRef.current);
@@ -398,7 +591,52 @@ export default function GameApp({ hasRoom = false }: { hasRoom?: boolean }) {
     const current = roomRef.current;
     if (current && current.code !== next.code && !allowRoomChange) return false;
     if (current && current.code === next.code && next.version < current.version) return false;
-    if (!current || current.code !== next.code || current.version !== next.version) setSelected(null);
+    if (
+      !current ||
+      current.code !== next.code ||
+      current.snapshot.phase !== next.snapshot.phase ||
+      (current.snapshot.phase === "setup" &&
+        isPlayer(next.viewer) &&
+        current.snapshot.ready[next.viewer] !== next.snapshot.ready[next.viewer]) ||
+      (next.snapshot.phase !== "setup" && current.version !== next.version)
+    ) {
+      setSelectedPieceId(null);
+    }
+    if (isPlayer(next.viewer) && next.snapshot.phase === "setup") {
+      const side = next.viewer;
+      const hasSetupHistory = next.snapshot.events.some(
+        (event) => event.actor === side && (event.result === "ready" || event.result === "unready"),
+      );
+      setSetupDraftState((draftState) => {
+        if (next.snapshot.ready[side]) {
+          return {
+            roomCode: next.code,
+            side,
+            locations: createSetupDraft(next.snapshot.pieces, side, true),
+          };
+        }
+        if (
+          draftState?.roomCode === next.code &&
+          draftState.side === side &&
+          isValidSetupDraft(next.snapshot.pieces, side, draftState.locations)
+        ) {
+          return draftState;
+        }
+        const restored = restoreSetupDraft(
+          readLocalValue(setupDraftKey(next.code, side)),
+          next.snapshot.pieces,
+          side,
+        );
+        return {
+          roomCode: next.code,
+          side,
+          locations:
+            restored ?? createSetupDraft(next.snapshot.pieces, side, hasSetupHistory),
+        };
+      });
+    } else {
+      setSetupDraftState(null);
+    }
     roomRef.current = next;
     setRoom(next);
     return true;
@@ -408,6 +646,8 @@ export default function GameApp({ hasRoom = false }: { hasRoom?: boolean }) {
     roomSessionRef.current += 1;
     busyRef.current = false;
     setBusy(false);
+    setSelectedPieceId(null);
+    setSetupDraftState(null);
     roomRef.current = null;
     setRoom(null);
   }
@@ -653,11 +893,11 @@ export default function GameApp({ hasRoom = false }: { hasRoom?: boolean }) {
       if (session !== roomSessionRef.current || roomRef.current?.code !== current.code) return;
       acceptRoom(next);
       setConnection("live");
-      setSelected(null);
+      setSelectedPieceId(null);
     } catch (error) {
       if (session !== roomSessionRef.current || roomRef.current?.code !== current.code) return;
       if (error instanceof RequestError && error.status === 409) {
-        setSelected(null);
+        setSelectedPieceId(null);
         showToast(ERROR_TEXT.VERSION_CONFLICT);
         try {
           const latest = await fetchRoom(current.code, token);
@@ -679,7 +919,7 @@ export default function GameApp({ hasRoom = false }: { hasRoom?: boolean }) {
         setFatalError(ERROR_TEXT[error.code] ?? "这个房间已经不可用。");
         removeLocalValue(roomTokenKey(current.code));
         setToken(null);
-        setSelected(null);
+        setSelectedPieceId(null);
         clearRoom();
       } else {
         const errorCode = error instanceof RequestError ? error.code : "ACTION_FAILED";
@@ -694,45 +934,196 @@ export default function GameApp({ hasRoom = false }: { hasRoom?: boolean }) {
     }
   }
 
-  const legalTargets = useMemo(() => {
-    if (!room || !selected || !isPlayer(room.viewer)) return [] as Position[];
-    if (room.snapshot.phase === "playing") {
-      return getProjectedLegalTargets(room.snapshot, room.viewer, selected);
+  const activeSetupDraft =
+    room &&
+    setupSide &&
+    setupDraftState?.roomCode === room.code &&
+    setupDraftState.side === setupSide
+      ? setupDraftState.locations
+      : null;
+  const renderPieces = useMemo(() => {
+    if (!room || !setupSide || room.snapshot.phase !== "setup" || !activeSetupDraft) {
+      return room?.snapshot.pieces ?? [];
     }
-    if (room.snapshot.phase === "setup" && !room.snapshot.ready[room.viewer]) {
-      const selectedPiece = room.snapshot.pieces.find((piece) => piece.alive && samePosition(piece, selected));
-      if (!selectedPiece?.type) return [];
-      return room.snapshot.pieces
-        .filter((piece) => piece.alive && piece.side === room.viewer && piece.type)
-        .filter((piece) => !getProjectedSetupSwapViolation(room.snapshot, room.viewer as Side, selected, piece))
-        .map(({ row, col }) => ({ row, col }));
+    return room.snapshot.pieces.flatMap((piece) => {
+      if (piece.side !== setupSide) return [piece];
+      const position = activeSetupDraft[piece.id];
+      return position ? [{ ...piece, ...position }] : [];
+    });
+  }, [activeSetupDraft, room, setupSide]);
+  const trayPieces = useMemo(
+    () =>
+      activeSetupDraft
+        ? setupSnapshotPieces.filter((piece) => activeSetupDraft[piece.id] === null)
+        : [],
+    [activeSetupDraft, setupSnapshotPieces],
+  );
+  const placedSetupCount = activeSetupDraft
+    ? setupSnapshotPieces.filter((piece) => activeSetupDraft[piece.id] !== null).length
+    : undefined;
+  const selectedPiece = room?.snapshot.pieces.find(
+    (piece) => piece.alive && piece.id === selectedPieceId,
+  );
+  const selectedPosition = (() => {
+    if (!selectedPiece || !room) return null;
+    if (room.snapshot.phase === "setup" && activeSetupDraft) {
+      return activeSetupDraft[selectedPiece.id] ?? null;
+    }
+    return isInsideBoard(selectedPiece) ? { row: selectedPiece.row, col: selectedPiece.col } : null;
+  })();
+
+  const legalTargets = useMemo(() => {
+    if (!room || !selectedPieceId || !isPlayer(room.viewer)) return [] as Position[];
+    if (room.snapshot.phase === "playing" && selectedPosition) {
+      return getProjectedLegalTargets(room.snapshot, room.viewer, selectedPosition);
+    }
+    if (room.snapshot.phase === "setup" && !room.snapshot.ready[room.viewer] && activeSetupDraft) {
+      return setupSlots(room.viewer).filter(
+        (position) =>
+          !getSetupDraftPlacementViolation(
+            room.snapshot.pieces,
+            room.viewer as Side,
+            activeSetupDraft,
+            selectedPieceId,
+            position,
+          ),
+      );
     }
     return [] as Position[];
-  }, [room, selected]);
+  }, [activeSetupDraft, room, selectedPieceId, selectedPosition]);
 
   const targetKeys = useMemo(() => new Set(legalTargets.map(positionKey)), [legalTargets]);
 
+  function placeSetupPiece(pieceId: string, position: Position) {
+    if (!room || !setupSide || !activeSetupDraft || busy) return;
+    if (room.snapshot.ready[setupSide]) {
+      showToast(ERROR_TEXT.LAYOUT_LOCKED);
+      return;
+    }
+    const violation = getSetupDraftPlacementViolation(
+      room.snapshot.pieces,
+      setupSide,
+      activeSetupDraft,
+      pieceId,
+      position,
+    );
+    if (violation) {
+      showToast(ERROR_TEXT[violation] ?? ERROR_TEXT.INVALID_LAYOUT);
+      return;
+    }
+    const locations = applySetupDraftPlacement(
+      room.snapshot.pieces,
+      setupSide,
+      activeSetupDraft,
+      pieceId,
+      position,
+    );
+    setSetupDraftState({ roomCode: room.code, side: setupSide, locations });
+    setSelectedPieceId(null);
+  }
+
+  function movePlayingPiece(pieceId: string, position: Position) {
+    if (!room || !isPlayer(room.viewer) || room.snapshot.phase !== "playing") return;
+    if (room.snapshot.turn !== room.viewer) {
+      showToast(ERROR_TEXT.NOT_YOUR_TURN);
+      return;
+    }
+    const piece = room.snapshot.pieces.find(
+      (candidate) => candidate.alive && candidate.id === pieceId && candidate.side === room.viewer,
+    );
+    if (!piece || !isInsideBoard(piece)) {
+      showToast(ERROR_TEXT.NO_PIECE_AT_SOURCE);
+      return;
+    }
+    const from = { row: piece.row, col: piece.col };
+    const violation = getProjectedMoveViolation(room.snapshot, room.viewer, from, position);
+    if (violation) showToast(ERROR_TEXT[violation] ?? ERROR_TEXT.ACTION_FAILED);
+    else void performAction({ type: "move", from, to: position });
+  }
+
+  function selectPlayingPiece(pieceId: string, position: Position) {
+    if (!room || !isPlayer(room.viewer) || room.snapshot.phase !== "playing") return false;
+    if (room.snapshot.turn !== room.viewer) {
+      showToast(ERROR_TEXT.NOT_YOUR_TURN);
+      return false;
+    }
+    const piece = room.snapshot.pieces.find(
+      (candidate) => candidate.alive && candidate.id === pieceId && candidate.side === room.viewer,
+    );
+    if (!piece) {
+      showToast(ERROR_TEXT.NOT_YOUR_PIECE);
+      return false;
+    }
+    if (piece.type === "flag") {
+      showToast(ERROR_TEXT.FLAG_CANNOT_MOVE);
+      return false;
+    }
+    if (piece.type === "mine") {
+      showToast(ERROR_TEXT.MINE_CANNOT_MOVE);
+      return false;
+    }
+    if (isHeadquarters(position)) {
+      showToast(ERROR_TEXT.HEADQUARTERS_LOCKED);
+      return false;
+    }
+    setSelectedPieceId(piece.id);
+    return true;
+  }
+
+  function beginTrayPieceDrag(pieceId: string) {
+    dragDroppedRef.current = false;
+    if (!room || !setupSide || !activeSetupDraft || room.snapshot.phase !== "setup") return false;
+    if (room.snapshot.ready[setupSide]) {
+      showToast(ERROR_TEXT.LAYOUT_LOCKED);
+      return false;
+    }
+    if (activeSetupDraft[pieceId] !== null) {
+      showToast(ERROR_TEXT.PIECE_NOT_AVAILABLE);
+      return false;
+    }
+    setSelectedPieceId(pieceId);
+    return true;
+  }
+
+  function beginBoardPieceDrag(pieceId: string, position: Position) {
+    dragDroppedRef.current = false;
+    if (!room || !isPlayer(room.viewer)) return false;
+    if (room.snapshot.phase === "setup") {
+      if (room.snapshot.ready[room.viewer]) {
+        showToast(ERROR_TEXT.LAYOUT_LOCKED);
+        return false;
+      }
+      const draftPosition = activeSetupDraft?.[pieceId];
+      if (!draftPosition || !samePosition(draftPosition, position)) {
+        showToast(ERROR_TEXT.PIECE_NOT_AVAILABLE);
+        return false;
+      }
+      setSelectedPieceId(pieceId);
+      return true;
+    }
+    return selectPlayingPiece(pieceId, position);
+  }
+
   function handleCell(position: Position) {
+    if (Date.now() < suppressClickUntilRef.current) return;
     if (!room || busy || !isPlayer(room.viewer)) return;
-    const piece = room.snapshot.pieces.find((candidate) => candidate.alive && samePosition(candidate, position));
+    const piece = renderPieces.find((candidate) => candidate.alive && samePosition(candidate, position));
     if (room.snapshot.phase === "setup") {
       if (room.snapshot.ready[room.viewer]) {
         showToast(ERROR_TEXT.LAYOUT_LOCKED);
         return;
       }
-      if (!selected) {
+      if (!selectedPieceId) {
         if (isCamp(position)) showToast(ERROR_TEXT.CAMP_MUST_BE_EMPTY);
-        else if (piece?.side === room.viewer) setSelected(position);
-        else showToast(ERROR_TEXT.INVALID_SWAP);
+        else if (piece?.side === room.viewer) setSelectedPieceId(piece.id);
+        else showToast(ERROR_TEXT.NO_PIECE_AT_SOURCE);
         return;
       }
-      if (samePosition(selected, position)) {
-        setSelected(null);
+      if (piece?.id === selectedPieceId) {
+        setSelectedPieceId(null);
         return;
       }
-      const violation = getProjectedSetupSwapViolation(room.snapshot, room.viewer, selected, position);
-      if (violation) showToast(ERROR_TEXT[violation] ?? ERROR_TEXT.INVALID_LAYOUT);
-      else void performAction({ type: "swap", from: selected, to: position });
+      placeSetupPiece(selectedPieceId, position);
       return;
     }
     if (room.snapshot.phase === "finished") {
@@ -748,26 +1139,68 @@ export default function GameApp({ hasRoom = false }: { hasRoom?: boolean }) {
       return;
     }
     if (piece?.side === room.viewer) {
-      if (selected && samePosition(selected, position)) {
-        setSelected(null);
-      } else if (piece.type === "flag") {
-        showToast(ERROR_TEXT.FLAG_CANNOT_MOVE);
-      } else if (piece.type === "mine") {
-        showToast(ERROR_TEXT.MINE_CANNOT_MOVE);
-      } else if (isHeadquarters(position)) {
-        showToast(ERROR_TEXT.HEADQUARTERS_LOCKED);
+      if (piece.id === selectedPieceId) {
+        setSelectedPieceId(null);
       } else {
-        setSelected(position);
+        selectPlayingPiece(piece.id, position);
       }
       return;
     }
-    if (!selected) {
+    if (!selectedPieceId) {
       showToast(ERROR_TEXT.NO_PIECE_AT_SOURCE);
       return;
     }
-    const violation = getProjectedMoveViolation(room.snapshot, room.viewer, selected, position);
-    if (violation) showToast(ERROR_TEXT[violation] ?? ERROR_TEXT.ACTION_FAILED);
-    else void performAction({ type: "move", from: selected, to: position });
+    movePlayingPiece(selectedPieceId, position);
+  }
+
+  function handlePieceDrop(pieceId: string, position: Position) {
+    dragDroppedRef.current = true;
+    suppressClickUntilRef.current = Date.now() + 350;
+    if (!room || !isPlayer(room.viewer)) return;
+    const origin =
+      room.snapshot.phase === "setup"
+        ? activeSetupDraft?.[pieceId]
+        : room.snapshot.pieces.find((piece) => piece.alive && piece.id === pieceId);
+    if (origin && samePosition(origin, position)) {
+      setSelectedPieceId(null);
+      return;
+    }
+    if (room.snapshot.phase === "setup") placeSetupPiece(pieceId, position);
+    else if (room.snapshot.phase === "playing") movePlayingPiece(pieceId, position);
+  }
+
+  function handlePieceDragEnd() {
+    if (!dragDroppedRef.current) setSelectedPieceId(null);
+    dragDroppedRef.current = false;
+  }
+
+  function randomizeLocalSetup() {
+    if (!room || !setupSide || !activeSetupDraft || busy) return;
+    if (room.snapshot.ready[setupSide]) {
+      showToast(ERROR_TEXT.LAYOUT_LOCKED);
+      return;
+    }
+    const locations = randomizeSetupDraft(room.snapshot.pieces, setupSide);
+    setSetupDraftState({ roomCode: room.code, side: setupSide, locations });
+    setSelectedPieceId(null);
+  }
+
+  function toggleSetupReady() {
+    if (!room || !setupSide || !activeSetupDraft || busy) return;
+    if (room.snapshot.ready[setupSide]) {
+      void performAction({ type: "ready", value: false });
+      return;
+    }
+    if (!isValidSetupDraft(room.snapshot.pieces, setupSide, activeSetupDraft, true)) {
+      showToast(
+        placedSetupCount !== undefined && placedSetupCount < 25
+          ? `还需放置 ${25 - placedSetupCount} 枚棋子。`
+          : ERROR_TEXT.INVALID_LAYOUT,
+      );
+      return;
+    }
+    const layout = setupDraftToLayout(room.snapshot.pieces, setupSide, activeSetupDraft);
+    void performAction({ type: "ready", value: true, layout });
   }
 
   async function copyLink(kind: "player" | "spectator") {
@@ -784,7 +1217,6 @@ export default function GameApp({ hasRoom = false }: { hasRoom?: boolean }) {
 
   function leaveRoom() {
     clearRoom();
-    setSelected(null);
     setFatalError(null);
     setToken(null);
     setInviteToken(null);
@@ -815,6 +1247,10 @@ export default function GameApp({ hasRoom = false }: { hasRoom?: boolean }) {
   const topSide: Side = orientationFlipped ? "black" : "white";
   const bottomSide: Side = topSide === "black" ? "white" : "black";
   const aliveCount = (side: Side) => game.pieces.filter((piece) => piece.alive && piece.side === side).length;
+  const visiblePieceCount = (side: Side) =>
+    game.phase === "setup" && viewerSide === side && placedSetupCount !== undefined
+      ? placedSetupCount
+      : aliveCount(side);
   const seatState = (side: Side) => {
     if (game.phase === "setup") return game.ready[side] ? "已锁定" : game.joined[side] ? "布阵中" : "未进入";
     if (game.phase === "finished") return !game.winner ? "和棋" : game.winner === side ? "获胜" : "落败";
@@ -836,22 +1272,34 @@ export default function GameApp({ hasRoom = false }: { hasRoom?: boolean }) {
         <button className="icon-button" type="button" onClick={() => setFlipped((value) => !value)} aria-label="旋转棋盘">↻</button>
       </header>
 
-      <section className="game-shell">
+      <section className={`game-shell ${game.phase === "setup" ? "is-setup" : ""}`}>
         <aside className="side-panel setup-panel">
-          <h2>{statusText(room)}</h2>
+          <h2>{statusText(room, placedSetupCount)}</h2>
+          {viewerSide && game.phase === "setup" ? (
+            <PieceTray
+              pieces={trayPieces}
+              selectedPieceId={selectedPieceId}
+              disabled={busy || game.ready[viewerSide]}
+              onSelect={(pieceId) =>
+                setSelectedPieceId((current) => (current === pieceId ? null : pieceId))
+              }
+              onDragStartPiece={beginTrayPieceDrag}
+              onDragEnd={handlePieceDragEnd}
+            />
+          ) : null}
           <div className="seat-list">
             {(["black", "white"] as Side[]).map((side) => (
               <div className={`seat ${game.turn === side && game.phase === "playing" ? "active" : ""}`} key={side}>
                 <span className={`seat-stone ${side}`} />
-                <div><strong>{sideName(side)}</strong><small>{aliveCount(side)} 枚棋子</small></div>
+                <div><strong>{sideName(side)}</strong><small>{visiblePieceCount(side)} 枚棋子</small></div>
                 <span className="seat-state">{seatState(side)}</span>
               </div>
             ))}
           </div>
           {viewerSide && game.phase === "setup" ? (
             <div className="setup-actions">
-              <button className="button secondary" type="button" disabled={busy || game.ready[viewerSide]} onClick={() => void performAction({ type: "randomize" })}>随机布阵</button>
-              <button className="button primary" type="button" disabled={busy} onClick={() => void performAction({ type: "ready", value: !game.ready[viewerSide] })}>
+              <button className="button secondary" type="button" disabled={busy || game.ready[viewerSide]} onClick={randomizeLocalSetup}>随机布阵</button>
+              <button className="button primary" type="button" disabled={busy} onClick={toggleSetupReady}>
                 {game.ready[viewerSide] ? "撤销确认" : "完成布阵"}
               </button>
             </div>
@@ -873,11 +1321,23 @@ export default function GameApp({ hasRoom = false }: { hasRoom?: boolean }) {
 
         <section className="board-column">
           <div className={`player-strip ${game.turn === topSide && game.phase === "playing" ? "active" : ""}`}>
-            <span>{sideName(topSide)}</span><span>{aliveCount(topSide)} / 25</span>
+            <span>{sideName(topSide)}</span><span>{visiblePieceCount(topSide)} / 25</span>
           </div>
-          <Board game={game} viewer={room.viewer} selected={selected} targets={targetKeys} flipped={orientationFlipped} busy={busy} onCell={handleCell} />
+          <Board
+            game={game}
+            pieces={renderPieces}
+            viewer={room.viewer}
+            selected={selectedPosition}
+            targets={targetKeys}
+            flipped={orientationFlipped}
+            busy={busy}
+            onCell={handleCell}
+            onPieceDragStart={beginBoardPieceDrag}
+            onPieceDrop={handlePieceDrop}
+            onPieceDragEnd={handlePieceDragEnd}
+          />
           <div className={`player-strip ${game.turn === bottomSide && game.phase === "playing" ? "active" : ""}`}>
-            <span>{sideName(bottomSide)}</span><span>{aliveCount(bottomSide)} / 25</span>
+            <span>{sideName(bottomSide)}</span><span>{visiblePieceCount(bottomSide)} / 25</span>
           </div>
         </section>
 

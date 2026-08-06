@@ -4,13 +4,19 @@ import {
   GameRuleError,
   PIECE_INFO,
   applyPlayerAction,
+  applySetupDraftPlacement,
+  createSetupDraft,
   createInitialGame,
   getMoveViolation,
+  getSetupDraftPlacementViolation,
   getSetupSwapViolation,
   isAllowedSetupPosition,
   isRailEdge,
   isRoadEdge,
+  isValidSetupDraft,
   projectGame,
+  randomizeSetupDraft,
+  setupDraftToLayout,
   validateSideSetup,
   type GameState,
   type Piece,
@@ -238,6 +244,136 @@ test("setup swaps report every placement violation and reject no-op actions", ()
     "SAME_POSITION",
   );
   expectRuleError(locked, "black", { type: "ready", value: true }, "NO_STATE_CHANGE");
+});
+
+test("setup tray supports placement, movement, replacement, and swapping through one rule path", () => {
+  const initial = createInitialGame();
+  const projected = projectGame(initial, "black");
+  const own = projected.pieces.filter((candidate) => candidate.side === "black");
+  const engineer = own.find((candidate) => candidate.type === "engineer")!;
+  const general = own.find((candidate) => candidate.type === "general")!;
+  const platoon = own.find((candidate) => candidate.type === "platoon")!;
+  const flag = own.find((candidate) => candidate.type === "flag")!;
+  const mine = own.find((candidate) => candidate.type === "mine")!;
+  const bomb = own.find((candidate) => candidate.type === "bomb")!;
+
+  let draft = createSetupDraft(projected.pieces, "black");
+  assert.equal(Object.keys(draft).length, 25);
+  assert.equal(Object.values(draft).every((position) => position === null), true);
+  assert.equal(isValidSetupDraft(projected.pieces, "black", draft), true);
+  assert.equal(isValidSetupDraft(projected.pieces, "black", draft, true), false);
+
+  draft = applySetupDraftPlacement(projected.pieces, "black", draft, engineer.id, { row: 6, col: 0 });
+  draft = applySetupDraftPlacement(projected.pieces, "black", draft, general.id, { row: 6, col: 1 });
+  draft = applySetupDraftPlacement(projected.pieces, "black", draft, engineer.id, { row: 6, col: 2 });
+  assert.deepEqual(draft[engineer.id], { row: 6, col: 2 });
+
+  draft = applySetupDraftPlacement(projected.pieces, "black", draft, engineer.id, { row: 6, col: 1 });
+  assert.deepEqual(draft[engineer.id], { row: 6, col: 1 });
+  assert.deepEqual(draft[general.id], { row: 6, col: 2 });
+
+  draft = applySetupDraftPlacement(projected.pieces, "black", draft, platoon.id, { row: 6, col: 1 });
+  assert.deepEqual(draft[platoon.id], { row: 6, col: 1 });
+  assert.equal(draft[engineer.id], null);
+  assert.equal(isValidSetupDraft(projected.pieces, "black", draft), true);
+
+  assert.equal(
+    getSetupDraftPlacementViolation(projected.pieces, "black", draft, platoon.id, { row: 6, col: 1 }),
+    "SAME_POSITION",
+  );
+  assert.equal(
+    getSetupDraftPlacementViolation(projected.pieces, "black", draft, engineer.id, { row: 7, col: 1 }),
+    "CAMP_MUST_BE_EMPTY",
+  );
+  assert.equal(
+    getSetupDraftPlacementViolation(projected.pieces, "black", draft, engineer.id, { row: 5, col: 0 }),
+    "INVALID_LAYOUT",
+  );
+  assert.equal(
+    getSetupDraftPlacementViolation(projected.pieces, "black", draft, flag.id, { row: 10, col: 1 }),
+    "FLAG_MUST_BE_HEADQUARTERS",
+  );
+  assert.equal(
+    getSetupDraftPlacementViolation(projected.pieces, "black", draft, mine.id, { row: 9, col: 0 }),
+    "MINE_BACK_TWO_ROWS",
+  );
+  assert.equal(
+    getSetupDraftPlacementViolation(projected.pieces, "black", draft, bomb.id, { row: 6, col: 4 }),
+    "BOMB_NOT_FRONT_ROW",
+  );
+
+  let displacement = createSetupDraft(projected.pieces, "black");
+  displacement = applySetupDraftPlacement(
+    projected.pieces,
+    "black",
+    displacement,
+    bomb.id,
+    { row: 7, col: 0 },
+  );
+  displacement = applySetupDraftPlacement(
+    projected.pieces,
+    "black",
+    displacement,
+    platoon.id,
+    { row: 6, col: 0 },
+  );
+  assert.throws(
+    () =>
+      applySetupDraftPlacement(
+        projected.pieces,
+        "black",
+        displacement,
+        platoon.id,
+        { row: 7, col: 0 },
+      ),
+    (error: unknown) => error instanceof GameRuleError && error.code === "BOMB_NOT_FRONT_ROW",
+  );
+});
+
+test("a complete local setup is validated and committed atomically without changing piece IDs", () => {
+  const initial = createInitialGame();
+  const projected = projectGame(initial, "black");
+  const draft = randomizeSetupDraft(projected.pieces, "black");
+  assert.equal(isValidSetupDraft(projected.pieces, "black", draft, true), true);
+  const layout = setupDraftToLayout(projected.pieces, "black", draft);
+  assert.equal(layout.length, 25);
+
+  expectRuleError(
+    initial,
+    "black",
+    { type: "ready", value: true, layout: layout.slice(0, 24) },
+    "INCOMPLETE_LAYOUT",
+  );
+  assert.equal(initial.ready.black, false);
+
+  const opponentBefore = initial.pieces
+    .filter((candidate) => candidate.side === "white")
+    .map(({ id, row, col }) => ({ id, row, col }));
+  const submitted = applyPlayerAction(initial, "black", { type: "ready", value: true, layout });
+  assert.equal(submitted.ready.black, true);
+  assert.equal(validateSideSetup(submitted.pieces, "black"), true);
+  for (const placement of layout) {
+    const after = submitted.pieces.find((candidate) => candidate.id === placement.pieceId)!;
+    assert.deepEqual({ row: after.row, col: after.col }, { row: placement.row, col: placement.col });
+  }
+  assert.deepEqual(
+    submitted.pieces
+      .filter((candidate) => candidate.side === "white")
+      .map(({ id, row, col }) => ({ id, row, col })),
+    opponentBefore,
+  );
+
+  const idsBefore = initial.pieces
+    .filter((candidate) => candidate.side === "black")
+    .map((candidate) => candidate.id)
+    .sort();
+  const randomized = applyPlayerAction(initial, "black", { type: "randomize" });
+  const idsAfter = randomized.pieces
+    .filter((candidate) => candidate.side === "black")
+    .map((candidate) => candidate.id)
+    .sort();
+  assert.deepEqual(idsAfter, idsBefore);
+  assert.equal(validateSideSetup(randomized.pieces, "black"), true);
 });
 
 test("setup projections cannot track swapped hidden pieces into the match", () => {

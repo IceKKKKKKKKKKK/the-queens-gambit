@@ -81,10 +81,16 @@ export interface ProjectedGame {
   moveNumber: number;
 }
 
+export type SetupDraft = Record<string, Position | null>;
+
+export interface SetupPlacement extends Position {
+  pieceId: string;
+}
+
 export type PlayerAction =
   | { type: "randomize" }
   | { type: "swap"; from: Position; to: Position }
-  | { type: "ready"; value: boolean }
+  | { type: "ready"; value: boolean; layout?: SetupPlacement[] }
   | { type: "move"; from: Position; to: Position }
   | { type: "resign" };
 
@@ -329,6 +335,179 @@ function setupPositionViolation(type: PieceType, side: Side, position: Position)
   if (type === "bomb" && !isAllowedSetupPosition(type, side, position)) {
     return "BOMB_NOT_FRONT_ROW";
   }
+  return null;
+}
+
+type SetupPieceLike = Pick<PublicPiece, "id" | "side" | "type" | "row" | "col" | "alive">;
+
+function ownSetupPieces(pieces: readonly SetupPieceLike[], side: Side) {
+  return pieces.filter(
+    (piece): piece is SetupPieceLike & { type: PieceType } =>
+      piece.alive && piece.side === side && Boolean(piece.type),
+  );
+}
+
+export function createSetupDraft(
+  pieces: readonly SetupPieceLike[],
+  side: Side,
+  useCurrentLayout = false,
+): SetupDraft {
+  return Object.fromEntries(
+    ownSetupPieces(pieces, side).map((piece) => [
+      piece.id,
+      useCurrentLayout && isAllowedSetupPosition(piece.type, side, piece)
+        ? { row: piece.row, col: piece.col }
+        : null,
+    ]),
+  );
+}
+
+export function isValidSetupDraft(
+  pieces: readonly SetupPieceLike[],
+  side: Side,
+  draft: SetupDraft,
+  requireComplete = false,
+) {
+  const ownPieces = ownSetupPieces(pieces, side);
+  const expectedIds = new Set(ownPieces.map((piece) => piece.id));
+  const draftIds = Object.keys(draft);
+  if (draftIds.length !== ownPieces.length || draftIds.some((id) => !expectedIds.has(id))) return false;
+
+  const occupied = new Set<string>();
+  for (const piece of ownPieces) {
+    const position = draft[piece.id];
+    if (position === null) {
+      if (requireComplete) return false;
+      continue;
+    }
+    if (!position || setupPositionViolation(piece.type, side, position)) return false;
+    const key = positionKey(position);
+    if (occupied.has(key)) return false;
+    occupied.add(key);
+  }
+  return true;
+}
+
+export function getSetupDraftPlacementViolation(
+  pieces: readonly SetupPieceLike[],
+  side: Side,
+  draft: SetupDraft,
+  pieceId: string,
+  to: Position,
+): string | null {
+  if (!isInsideBoard(to)) return "POSITION_OUT_OF_BOUNDS";
+  if (!isSetupPosition(side, to)) return "INVALID_LAYOUT";
+  if (isCamp(to)) return "CAMP_MUST_BE_EMPTY";
+
+  const ownPieces = ownSetupPieces(pieces, side);
+  const piece = ownPieces.find((candidate) => candidate.id === pieceId);
+  if (!piece) return "PIECE_NOT_AVAILABLE";
+  const from = draft[piece.id];
+  if (from && samePosition(from, to)) return "SAME_POSITION";
+
+  const target = ownPieces.find((candidate) => {
+    const position = draft[candidate.id];
+    return Boolean(position && samePosition(position, to));
+  });
+  const activeViolation = setupPositionViolation(piece.type, side, to);
+  if (activeViolation) return activeViolation;
+  if (from && target) {
+    const displacedViolation = setupPositionViolation(target.type, side, from);
+    if (displacedViolation) return displacedViolation;
+  }
+  return null;
+}
+
+export function applySetupDraftPlacement(
+  pieces: readonly SetupPieceLike[],
+  side: Side,
+  draft: SetupDraft,
+  pieceId: string,
+  to: Position,
+) {
+  const violation = getSetupDraftPlacementViolation(pieces, side, draft, pieceId, to);
+  if (violation) throw new GameRuleError(violation);
+  const ownPieces = ownSetupPieces(pieces, side);
+  const from = draft[pieceId];
+  const target = ownPieces.find((candidate) => {
+    const position = draft[candidate.id];
+    return Boolean(position && samePosition(position, to));
+  });
+  const next = { ...draft, [pieceId]: { row: to.row, col: to.col } };
+  if (target) next[target.id] = from ? { ...from } : null;
+  return next;
+}
+
+export function randomizeSetupDraft(pieces: readonly SetupPieceLike[], side: Side) {
+  const ownPieces = ownSetupPieces(pieces, side);
+  if (ownPieces.length !== 25) throw new GameRuleError("INVALID_LAYOUT");
+  for (const type of PIECE_TYPES) {
+    if (ownPieces.filter((piece) => piece.type === type).length !== PIECE_INFO[type].count) {
+      throw new GameRuleError("INVALID_LAYOUT");
+    }
+  }
+
+  const available = setupSlots(side);
+  const draft = createSetupDraft(pieces, side);
+  const placePiece = (piece: SetupPieceLike & { type: PieceType }) => {
+    const choices = available.filter((position) => isAllowedSetupPosition(piece.type, side, position));
+    if (!choices.length) throw new GameRuleError("INVALID_LAYOUT");
+    const chosen = choices[randomIndex(choices.length)];
+    available.splice(available.findIndex((position) => samePosition(position, chosen)), 1);
+    draft[piece.id] = { ...chosen };
+  };
+
+  for (const type of ["flag", "mine", "bomb"] as PieceType[]) {
+    for (const piece of shuffle(ownPieces.filter((candidate) => candidate.type === type))) placePiece(piece);
+  }
+  const regularPieces = shuffle(
+    ownPieces.filter((piece) => !["flag", "mine", "bomb"].includes(piece.type)),
+  );
+  const regularPositions = shuffle(available);
+  regularPieces.forEach((piece, index) => {
+    draft[piece.id] = { ...regularPositions[index] };
+  });
+  return draft;
+}
+
+export function setupDraftToLayout(
+  pieces: readonly SetupPieceLike[],
+  side: Side,
+  draft: SetupDraft,
+) {
+  if (!isValidSetupDraft(pieces, side, draft, true)) {
+    const incomplete = ownSetupPieces(pieces, side).some((piece) => draft[piece.id] === null);
+    throw new GameRuleError(incomplete ? "INCOMPLETE_LAYOUT" : "INVALID_LAYOUT");
+  }
+  return ownSetupPieces(pieces, side).map((piece) => ({
+    pieceId: piece.id,
+    ...draft[piece.id]!,
+  }));
+}
+
+export function getSubmittedSetupLayoutViolation(
+  pieces: readonly Piece[],
+  side: Side,
+  layout: readonly SetupPlacement[],
+) {
+  const ownPieces = pieces.filter((piece) => piece.alive && piece.side === side);
+  if (layout.length !== ownPieces.length) return "INCOMPLETE_LAYOUT";
+  const byId = new Map<string, SetupPlacement>();
+  for (const placement of layout) {
+    if (byId.has(placement.pieceId)) return "INVALID_LAYOUT";
+    byId.set(placement.pieceId, placement);
+  }
+  const occupied = new Set<string>();
+  for (const piece of ownPieces) {
+    const placement = byId.get(piece.id);
+    if (!placement) return "PIECE_NOT_AVAILABLE";
+    const violation = setupPositionViolation(piece.type, side, placement);
+    if (violation) return violation;
+    const key = positionKey(placement);
+    if (occupied.has(key)) return "INVALID_LAYOUT";
+    occupied.add(key);
+  }
+  if (byId.size !== ownPieces.length) return "PIECE_NOT_AVAILABLE";
   return null;
 }
 
@@ -609,7 +788,13 @@ export function applyPlayerAction(current: GameState, side: Side, action: Player
   if (action.type === "randomize") {
     if (state.phase !== "setup") throw new GameRuleError("GAME_ALREADY_STARTED");
     if (state.ready[side]) throw new GameRuleError("LAYOUT_LOCKED");
-    state.pieces = [...state.pieces.filter((piece) => piece.side !== side), ...makeSidePieces(side)];
+    const draft = randomizeSetupDraft(state.pieces, side);
+    for (const piece of state.pieces.filter((candidate) => candidate.alive && candidate.side === side)) {
+      const position = draft[piece.id];
+      if (!position) throw new GameRuleError("INVALID_LAYOUT");
+      piece.row = position.row;
+      piece.col = position.col;
+    }
     return state;
   }
 
@@ -628,6 +813,16 @@ export function applyPlayerAction(current: GameState, side: Side, action: Player
   if (action.type === "ready") {
     if (state.phase !== "setup") throw new GameRuleError("GAME_ALREADY_STARTED");
     if (state.ready[side] === action.value) throw new GameRuleError("NO_STATE_CHANGE");
+    if (action.value && action.layout) {
+      const violation = getSubmittedSetupLayoutViolation(state.pieces, side, action.layout);
+      if (violation) throw new GameRuleError(violation);
+      const placements = new Map(action.layout.map((placement) => [placement.pieceId, placement]));
+      for (const piece of state.pieces.filter((candidate) => candidate.alive && candidate.side === side)) {
+        const placement = placements.get(piece.id)!;
+        piece.row = placement.row;
+        piece.col = placement.col;
+      }
+    }
     if (action.value && !validateSideSetup(state.pieces, side)) throw new GameRuleError("INVALID_LAYOUT");
     state.joined[side] = true;
     state.ready[side] = action.value;

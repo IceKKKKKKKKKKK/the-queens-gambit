@@ -4,6 +4,7 @@ import {
   projectGame,
   type PlayerAction,
   type Position,
+  type SetupPlacement,
 } from "../../../../../lib/game";
 import { RequestBodyTooLargeError, readBoundedJson } from "../../../../../lib/request";
 import {
@@ -28,6 +29,17 @@ function isPosition(value: unknown): value is Position {
   return Number.isInteger(position.row) && Number.isInteger(position.col);
 }
 
+function isSetupPlacement(value: unknown): value is SetupPlacement {
+  if (!isPosition(value)) return false;
+  const pieceId = (value as Position & { pieceId?: unknown }).pieceId;
+  return (
+    typeof pieceId === "string" &&
+    pieceId.length >= 1 &&
+    pieceId.length <= 96 &&
+    /^[A-Za-z0-9_-]+$/.test(pieceId)
+  );
+}
+
 function parseAction(value: unknown): PlayerAction | null {
   if (!value || typeof value !== "object") return null;
   const action = value as Record<string, unknown>;
@@ -35,7 +47,10 @@ function parseAction(value: unknown): PlayerAction | null {
     return { type: action.type };
   }
   if (action.type === "ready" && typeof action.value === "boolean") {
-    return { type: "ready", value: action.value };
+    if (action.layout === undefined) return { type: "ready", value: action.value };
+    if (!action.value || !Array.isArray(action.layout) || action.layout.length > 25) return null;
+    if (!action.layout.every(isSetupPlacement)) return null;
+    return { type: "ready", value: true, layout: action.layout };
   }
   if ((action.type === "swap" || action.type === "move") && isPosition(action.from) && isPosition(action.to)) {
     return { type: action.type, from: action.from, to: action.to };
