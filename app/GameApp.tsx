@@ -360,6 +360,20 @@ function Board({
         const targetAttack = Boolean(targetHere && piece && piece.side !== viewer);
         const camp = CAMPS.some((candidate) => samePosition(candidate, position));
         const headquarters = HEADQUARTERS.some((candidate) => samePosition(candidate, position));
+        const headquartersSide: Side | null = headquarters ? (row < 6 ? "white" : "black") : null;
+        const headquartersRelation = headquartersSide
+          ? viewer === "spectator"
+            ? `${sideName(headquartersSide)}方`
+            : headquartersSide === viewer
+              ? "本方"
+              : "对方"
+          : null;
+        const headquartersOwnershipClass =
+          headquartersSide && viewer !== "spectator"
+            ? headquartersSide === viewer
+              ? "is-home-headquarters"
+              : "is-opponent-headquarters"
+            : "";
         const campMotion = getCampMotionForPosition(recentMovement, position, piece);
         const right = { row, col: col + 1 };
         const down = { row: row + 1, col };
@@ -367,7 +381,13 @@ function Board({
         const downLeft = { row: row + 1, col: col - 1 };
         const hasVertical = row < 11 && isRoadEdge(position, down);
         const pieceLabel = piece?.type ? PIECE_INFO[piece.type].label : piece ? "暗子" : "空位";
-        const stationLabel = camp ? "行营" : headquarters ? "大本营" : "兵站";
+        const stationLabel = camp
+          ? "行营"
+          : headquarters
+            ? headquartersRelation
+              ? `${headquartersRelation}大本营`
+              : "大本营"
+            : "兵站";
         const coverLabel = camp && piece ? "，半隐蔽" : "";
         const targetLabel = targetHere
           ? game.phase === "setup"
@@ -405,7 +425,7 @@ function Board({
               <span className="road road-diagonal down-left" />
             ) : null}
             <button
-              className={`station-hit ${selectedHere ? "is-selected" : ""} ${targetHere ? "is-target" : ""} ${targetAttack ? "is-attack" : ""}`}
+              className={`station-hit ${selectedHere ? "is-selected" : ""} ${targetHere ? "is-target" : ""} ${targetAttack ? "is-attack" : ""} ${headquarters ? "is-headquarters" : ""} ${headquartersOwnershipClass}`}
               type="button"
               onClick={() => onCell(position)}
               draggable={draggable}
@@ -445,6 +465,9 @@ function Board({
               >
                 {headquarters ? <span className="headquarters-mark">本</span> : null}
               </span>
+              {headquartersRelation ? (
+                <span className="headquarters-badge" aria-hidden="true">{headquartersRelation}</span>
+              ) : null}
               {targetHere && !piece ? <span className="target-dot" /> : null}
               {piece ? <PieceModel key={piece.id} piece={piece} inCamp={camp} campMotion={campMotion.piece} /> : null}
             </button>

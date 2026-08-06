@@ -751,10 +751,19 @@ summary:focus-visible {
 }
 
 .station.headquarters {
-  width: 86%;
-  height: 66%;
-  border: 2px double var(--black);
+  width: 88%;
+  height: 70%;
+  border: 3px double var(--black);
   border-radius: 11px 11px 4px 4px;
+}
+
+.station-hit.is-headquarters .piece-model {
+  width: 68%;
+  height: 80%;
+}
+
+.station-hit.is-opponent-headquarters .station.headquarters {
+  box-shadow: 0 0 0 2px var(--white), 0 0 0 3px var(--black);
 }
 
 .station.headquarters::before,
@@ -789,8 +798,35 @@ summary:focus-visible {
   transform: translate(-50%, -50%);
 }
 
+.headquarters-badge {
+  position: absolute;
+  z-index: 5;
+  right: 0;
+  bottom: 0;
+  min-width: 30px;
+  padding: 3px 5px;
+  border: 1px solid var(--black);
+  border-radius: 999px;
+  background: var(--white);
+  color: var(--black);
+  font-size: clamp(8px, 1.4vw, 10px);
+  font-weight: 750;
+  line-height: 1;
+  letter-spacing: 0.08em;
+  pointer-events: none;
+}
+
+.station-hit.is-opponent-headquarters .headquarters-badge {
+  background: var(--black);
+  color: var(--white);
+}
+
 .is-flipped .headquarters-mark {
   transform: translate(-50%, -50%) rotate(180deg);
+}
+
+.is-flipped .headquarters-badge {
+  transform: rotate(180deg);
 }
 
 .station.camp.camp-motion-enter {
