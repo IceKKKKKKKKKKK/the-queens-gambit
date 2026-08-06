@@ -763,7 +763,22 @@ summary:focus-visible {
 }
 
 .station-hit.is-opponent-headquarters .station.headquarters {
-  box-shadow: 0 0 0 2px var(--white), 0 0 0 3px var(--black);
+  width: 82%;
+  height: auto;
+  aspect-ratio: 1;
+  border: 2px solid var(--black);
+  border-radius: 2px;
+  outline: 1px solid var(--black);
+  outline-offset: 3px;
+  background: var(--white);
+  box-shadow: none;
+}
+
+.station-hit.is-opponent-headquarters .station.headquarters::before,
+.station-hit.is-opponent-headquarters .station.headquarters::after,
+.station-hit.is-opponent-headquarters .headquarters-mark,
+.station-hit.is-opponent-headquarters .headquarters-badge {
+  display: none;
 }
 
 .station.headquarters::before,
@@ -801,10 +816,11 @@ summary:focus-visible {
 .headquarters-badge {
   position: absolute;
   z-index: 5;
+  top: 0;
   right: 0;
-  bottom: 0;
-  min-width: 30px;
-  padding: 3px 5px;
+  bottom: auto;
+  min-width: 28px;
+  padding: 2px 4px;
   border: 1px solid var(--black);
   border-radius: 999px;
   background: var(--white);
@@ -826,6 +842,8 @@ summary:focus-visible {
 }
 
 .is-flipped .headquarters-badge {
+  top: auto;
+  bottom: 0;
   transform: rotate(180deg);
 }
 
@@ -1011,6 +1029,65 @@ summary:focus-visible {
 
 .piece-model[data-piece="flag"] .piece-crest {
   left: 54%;
+}
+
+.station-hit.has-piece-label .piece-model {
+  top: 38%;
+  width: 68%;
+  height: 66%;
+}
+
+.station-hit.has-piece-label .piece-name {
+  display: none;
+}
+
+.station-hit.has-piece-label .piece-crest {
+  font-size: clamp(15px, 3vw, 28px);
+}
+
+.board-piece-label {
+  position: absolute;
+  z-index: 5;
+  right: auto;
+  bottom: 0;
+  left: 50%;
+  min-width: 46%;
+  max-width: 88%;
+  padding: 1px 5px;
+  overflow: hidden;
+  border: 1px solid var(--black);
+  border-radius: 999px;
+  background: var(--white);
+  color: var(--black);
+  font-family: "Songti SC", STSong, serif;
+  font-size: clamp(9px, 1.6vw, 12px);
+  font-weight: 750;
+  line-height: 1;
+  box-shadow: 0 0 0 2px var(--white);
+  text-align: center;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  pointer-events: none;
+  transform: translateX(-50%);
+}
+
+.board-piece-label.side-black {
+  background: var(--black);
+  color: var(--white);
+}
+
+.board-piece-label.is-in-camp {
+  border-style: dashed;
+}
+
+.is-flipped .station-hit.has-piece-label .piece-model {
+  top: 62%;
+}
+
+.is-flipped .board-piece-label {
+  top: 0;
+  bottom: auto;
+  transform: translateX(-50%) rotate(180deg);
 }
 
 .invite-block,

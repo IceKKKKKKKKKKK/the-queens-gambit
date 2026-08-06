@@ -425,7 +425,7 @@ function Board({
               <span className="road road-diagonal down-left" />
             ) : null}
             <button
-              className={`station-hit ${selectedHere ? "is-selected" : ""} ${targetHere ? "is-target" : ""} ${targetAttack ? "is-attack" : ""} ${headquarters ? "is-headquarters" : ""} ${headquartersOwnershipClass}`}
+              className={`station-hit ${selectedHere ? "is-selected" : ""} ${targetHere ? "is-target" : ""} ${targetAttack ? "is-attack" : ""} ${piece ? "has-piece-label" : ""} ${headquarters ? "is-headquarters" : ""} ${headquartersOwnershipClass}`}
               type="button"
               onClick={() => onCell(position)}
               draggable={draggable}
@@ -469,7 +469,17 @@ function Board({
                 <span className="headquarters-badge" aria-hidden="true">{headquartersRelation}</span>
               ) : null}
               {targetHere && !piece ? <span className="target-dot" /> : null}
-              {piece ? <PieceModel key={piece.id} piece={piece} inCamp={camp} campMotion={campMotion.piece} /> : null}
+              {piece ? (
+                <>
+                  <PieceModel piece={piece} inCamp={camp} campMotion={campMotion.piece} />
+                  <span
+                    className={`board-piece-label side-${piece.side} ${camp ? "is-in-camp" : ""}`}
+                    aria-hidden="true"
+                  >
+                    {pieceLabel}
+                  </span>
+                </>
+              ) : null}
             </button>
           </div>
         );
