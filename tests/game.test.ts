@@ -7,6 +7,7 @@ import {
   applySetupDraftPlacement,
   createSetupDraft,
   createInitialGame,
+  getCampMotionForPosition,
   getMoveViolation,
   getSetupDraftPlacementViolation,
   getSetupSwapViolation,
@@ -14,6 +15,7 @@ import {
   isRailEdge,
   isRoadEdge,
   isValidSetupDraft,
+  latestMovementEvent,
   projectGame,
   randomizeSetupDraft,
   setupDraftToLayout,
@@ -23,6 +25,7 @@ import {
   type PieceType,
   type PlayerAction,
   type Position,
+  type PublicEvent,
   type Side,
 } from "../lib/game.ts";
 
@@ -84,6 +87,80 @@ test("v2 board graph and random layouts satisfy the selected classic rules", () 
   assert.equal(isAllowedSetupPosition("flag", "black", { row: 10, col: 1 }), false);
   assert.equal(isAllowedSetupPosition("mine", "white", { row: 2, col: 0 }), false);
   assert.equal(isAllowedSetupPosition("bomb", "white", { row: 5, col: 0 }), false);
+});
+
+test("camp motion marks only the moving attacker and its camp station", () => {
+  const enter = {
+    id: 1,
+    actor: "black",
+    from: { row: 6, col: 1 },
+    to: { row: 7, col: 1 },
+    result: "move",
+  } satisfies PublicEvent;
+  assert.deepEqual(
+    getCampMotionForPosition(enter, { row: 7, col: 1 }, { alive: true, side: "black" }),
+    { station: "enter", piece: "enter" },
+  );
+  assert.deepEqual(
+    getCampMotionForPosition(enter, { row: 6, col: 1 }, null),
+    { station: null, piece: null },
+  );
+
+  const leave = {
+    id: 2,
+    actor: "black",
+    from: { row: 7, col: 1 },
+    to: { row: 6, col: 1 },
+    result: "attacker_survives",
+  } satisfies PublicEvent;
+  assert.deepEqual(
+    getCampMotionForPosition(leave, { row: 7, col: 1 }, null),
+    { station: "leave", piece: null },
+  );
+  assert.deepEqual(
+    getCampMotionForPosition(leave, { row: 6, col: 1 }, { alive: true, side: "black" }),
+    { station: null, piece: "leave" },
+  );
+
+  const attackerLost = { ...leave, id: 3, result: "defender_survives" } satisfies PublicEvent;
+  assert.deepEqual(
+    getCampMotionForPosition(attackerLost, { row: 6, col: 1 }, { alive: true, side: "white" }),
+    { station: null, piece: null },
+  );
+  assert.deepEqual(
+    getCampMotionForPosition(attackerLost, { row: 7, col: 1 }, null),
+    { station: "leave", piece: null },
+  );
+
+  const invalidCampAttack = {
+    ...attackerLost,
+    id: 4,
+    to: { row: 7, col: 3 },
+  } satisfies PublicEvent;
+  assert.deepEqual(
+    getCampMotionForPosition(invalidCampAttack, { row: 7, col: 3 }, { alive: true, side: "white" }),
+    { station: null, piece: null },
+  );
+
+  const campToCamp = {
+    ...enter,
+    id: 5,
+    from: { row: 7, col: 1 },
+    to: { row: 8, col: 2 },
+  } satisfies PublicEvent;
+  assert.deepEqual(
+    getCampMotionForPosition(campToCamp, { row: 7, col: 1 }, null),
+    { station: "leave", piece: null },
+  );
+  assert.deepEqual(
+    getCampMotionForPosition(campToCamp, { row: 8, col: 2 }, { alive: true, side: "black" }),
+    { station: "enter", piece: "enter" },
+  );
+
+  const ready = { id: 6, actor: "white", result: "ready" } satisfies PublicEvent;
+  assert.equal(latestMovementEvent([ready, enter]), enter);
+  assert.equal(latestMovementEvent([enter, ready]), undefined);
+  assert.equal(latestMovementEvent([ready]), undefined);
 });
 
 test("every move violation has a stable, specific rule code", () => {

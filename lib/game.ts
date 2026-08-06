@@ -169,6 +169,46 @@ export function isCamp(position: Position) {
   return CAMPS.some((camp) => samePosition(camp, position));
 }
 
+export type CampMotion = {
+  station: "enter" | "leave" | null;
+  piece: "enter" | "leave" | null;
+};
+
+export function latestMovementEvent(events: readonly PublicEvent[]) {
+  const event = events.at(-1);
+  return event?.from && event.to ? event : undefined;
+}
+
+export function getCampMotionForPosition(
+  event: PublicEvent | undefined,
+  position: Position,
+  occupant?: Pick<PublicPiece, "alive" | "side"> | null,
+): CampMotion {
+  if (!event?.from || !event.to) return { station: null, piece: null };
+
+  const attackerAtDestination = Boolean(
+    occupant?.alive &&
+      occupant.side === event.actor &&
+      samePosition(event.to, position) &&
+      ["move", "attacker_survives", "flag_captured"].includes(event.result),
+  );
+  const station =
+    isCamp(position) && samePosition(event.to, position) && attackerAtDestination
+      ? "enter"
+      : isCamp(position) && samePosition(event.from, position)
+        ? "leave"
+        : null;
+  const piece = attackerAtDestination
+    ? isCamp(event.to)
+      ? "enter"
+      : isCamp(event.from)
+        ? "leave"
+        : null
+    : null;
+
+  return { station, piece };
+}
+
 export function isHeadquarters(position: Position) {
   return HEADQUARTERS.some((headquarters) => samePosition(headquarters, position));
 }

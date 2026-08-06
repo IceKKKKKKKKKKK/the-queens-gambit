@@ -7,6 +7,7 @@ import {
   PIECE_INFO,
   applySetupDraftPlacement,
   createSetupDraft,
+  getCampMotionForPosition,
   getProjectedLegalTargets,
   getProjectedMoveViolation,
   getSetupDraftPlacementViolation,
@@ -16,6 +17,7 @@ import {
   isRailEdge,
   isRoadEdge,
   isValidSetupDraft,
+  latestMovementEvent,
   positionKey,
   randomizeSetupDraft,
   samePosition,
@@ -286,12 +288,20 @@ function statusText(room: RoomEnvelope, placedCount?: number) {
   return snapshot.turn === viewer ? "轮到你" : "等待对手落子";
 }
 
-function PieceModel({ piece }: { piece: PublicPiece }) {
+function PieceModel({
+  piece,
+  inCamp = false,
+  campMotion = null,
+}: {
+  piece: PublicPiece;
+  inCamp?: boolean;
+  campMotion?: "enter" | "leave" | null;
+}) {
   const known = Boolean(piece.type);
   const info = piece.type ? PIECE_INFO[piece.type] : null;
   return (
     <span
-      className={`piece-model side-${piece.side} ${known ? "is-known" : "is-hidden"}`}
+      className={`piece-model side-${piece.side} ${known ? "is-known" : "is-hidden"} ${inCamp ? "is-in-camp" : ""} ${campMotion ? `camp-motion-${campMotion}` : ""}`}
       data-piece={piece.type ?? "hidden"}
       aria-hidden="true"
     >
@@ -335,6 +345,7 @@ function Board({
     for (let col = 0; col < 5; col += 1) cells.push({ row, col });
   }
   const alivePieces = pieces.filter((piece) => piece.alive && isInsideBoard(piece));
+  const recentMovement = game.phase === "setup" ? undefined : latestMovementEvent(game.events);
 
   return (
     <div className={`board-grid ${flipped ? "is-flipped" : ""}`} aria-label="军棋棋盘">
@@ -349,12 +360,15 @@ function Board({
         const targetAttack = Boolean(targetHere && piece && piece.side !== viewer);
         const camp = CAMPS.some((candidate) => samePosition(candidate, position));
         const headquarters = HEADQUARTERS.some((candidate) => samePosition(candidate, position));
+        const campMotion = getCampMotionForPosition(recentMovement, position, piece);
         const right = { row, col: col + 1 };
         const down = { row: row + 1, col };
         const downRight = { row: row + 1, col: col + 1 };
         const downLeft = { row: row + 1, col: col - 1 };
         const hasVertical = row < 11 && isRoadEdge(position, down);
         const pieceLabel = piece?.type ? PIECE_INFO[piece.type].label : piece ? "暗子" : "空位";
+        const stationLabel = camp ? "行营" : headquarters ? "大本营" : "兵站";
+        const coverLabel = camp && piece ? "，半隐蔽" : "";
         const targetLabel = targetHere
           ? game.phase === "setup"
             ? piece
@@ -423,11 +437,16 @@ function Board({
               onDragEnd={onPieceDragEnd}
               disabled={viewer === "spectator" || busy}
               aria-pressed={piece?.side === viewer ? selectedHere : undefined}
-              aria-label={`${coordinates(position)}，${pieceLabel}${targetLabel}`}
+              aria-label={`${coordinates(position)}，${stationLabel}，${pieceLabel}${coverLabel}${targetLabel}`}
             >
-              <span className={`station ${camp ? "camp" : headquarters ? "headquarters" : "post"}`} />
+              <span
+                className={`station ${camp ? "camp" : headquarters ? "headquarters" : "post"} ${campMotion.station ? `camp-motion-${campMotion.station}` : ""}`}
+                aria-hidden="true"
+              >
+                {headquarters ? <span className="headquarters-mark">本</span> : null}
+              </span>
               {targetHere && !piece ? <span className="target-dot" /> : null}
-              {piece ? <PieceModel piece={piece} /> : null}
+              {piece ? <PieceModel key={piece.id} piece={piece} inCamp={camp} campMotion={campMotion.piece} /> : null}
             </button>
           </div>
         );

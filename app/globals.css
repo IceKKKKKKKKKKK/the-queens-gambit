@@ -229,6 +229,26 @@ summary:focus-visible {
   50% { transform: scale(1); opacity: 1; }
 }
 
+@keyframes camp-piece-enter {
+  from { opacity: 1; }
+  to { opacity: 0.58; }
+}
+
+@keyframes camp-piece-leave {
+  from { opacity: 0.58; }
+  to { opacity: 1; }
+}
+
+@keyframes camp-station-enter {
+  0%, 100% { opacity: 1; }
+  45% { opacity: 0.48; }
+}
+
+@keyframes camp-station-leave {
+  0% { opacity: 0.45; }
+  100% { opacity: 1; }
+}
+
 .room-page {
   min-height: 100vh;
   padding: 18px 26px 36px;
@@ -708,14 +728,59 @@ summary:focus-visible {
   width: 64%;
   height: auto;
   aspect-ratio: 1;
+  border-style: dashed;
   border-radius: 50%;
 }
 
 .station.headquarters {
-  width: 76%;
-  height: 62%;
+  width: 86%;
+  height: 66%;
   border: 2px double var(--black);
-  border-radius: 50% 50% 8px 8px;
+  border-radius: 11px 11px 4px 4px;
+}
+
+.station.headquarters::before,
+.station.headquarters::after {
+  position: absolute;
+  top: -6px;
+  width: 9px;
+  height: 6px;
+  border: 1px solid var(--black);
+  border-bottom: 0;
+  background: var(--white);
+  content: "";
+}
+
+.station.headquarters::before {
+  left: 7px;
+}
+
+.station.headquarters::after {
+  right: 7px;
+}
+
+.headquarters-mark {
+  position: absolute;
+  top: 50%;
+  left: 50%;
+  color: var(--black);
+  font-family: "Songti SC", STSong, serif;
+  font-size: clamp(11px, 2.4vw, 18px);
+  line-height: 1;
+  opacity: 0.44;
+  transform: translate(-50%, -50%);
+}
+
+.is-flipped .headquarters-mark {
+  transform: translate(-50%, -50%) rotate(180deg);
+}
+
+.station.camp.camp-motion-enter {
+  animation: camp-station-enter 190ms ease-out;
+}
+
+.station.camp.camp-motion-leave {
+  animation: camp-station-leave 180ms ease-out;
 }
 
 .station-hit.is-selected::after {
@@ -776,6 +841,33 @@ summary:focus-visible {
 .piece-model.side-white {
   --piece-fill: var(--white);
   --piece-ink: var(--black);
+}
+
+.piece-model.is-in-camp {
+  border-style: dashed;
+  box-shadow: none;
+  opacity: 0.58;
+}
+
+.piece-model.is-in-camp .piece-neck,
+.piece-model.is-in-camp .piece-base {
+  border-style: dashed;
+}
+
+.piece-model.is-in-camp .piece-neck {
+  border-bottom: 0;
+}
+
+.station-hit.is-selected .piece-model.is-in-camp {
+  opacity: 0.72;
+}
+
+.piece-model.camp-motion-enter {
+  animation: camp-piece-enter 190ms ease-out;
+}
+
+.piece-model.camp-motion-leave {
+  animation: camp-piece-leave 180ms ease-out;
 }
 
 .station-hit.is-selected .piece-model {
