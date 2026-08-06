@@ -1,5 +1,5 @@
 import { env } from "cloudflare:workers";
-import type { GameState, Side, Viewer } from "../lib/game";
+import { RULES_VERSION, type GameState, type Side, type Viewer } from "../lib/game";
 
 export interface RoomRow {
   code: string;
@@ -146,7 +146,10 @@ export async function getRoom(code: string) {
 }
 
 export function parseRoomState(row: RoomRow) {
-  return JSON.parse(row.state_json) as GameState;
+  const state = JSON.parse(row.state_json) as GameState & { noCombatPly?: number };
+  state.rulesVersion = RULES_VERSION;
+  delete state.noCombatPly;
+  return state;
 }
 
 export async function viewerForToken(row: RoomRow, token: string | null): Promise<Viewer> {
@@ -159,7 +162,7 @@ export async function viewerForToken(row: RoomRow, token: string | null): Promis
 
 export function bearerToken(request: Request) {
   const authorization = request.headers.get("authorization") ?? "";
-  const match = authorization.match(/^Bearer\s+([A-Za-z0-9_-]{20,})$/i);
+  const match = authorization.match(/^Bearer\s+([A-Za-z0-9_-]{20,128})$/i);
   return match?.[1] ?? null;
 }
 
@@ -183,6 +186,9 @@ export async function updateRoomState(
 export async function claimWhiteSeat(row: RoomRow, inviteToken: string, playerToken: string) {
   if (inviteToken === playerToken) throw new Error("INVALID_INVITE_TOKEN");
   const playerTokenHash = await hashToken(playerToken);
+  if (row.white_token_hash && row.white_token_hash === row.black_token_hash) {
+    throw new Error("ROOM_IDENTITY_CONFLICT");
+  }
   if (row.white_token_hash) {
     if (row.white_token_hash === playerTokenHash) {
       return { playerToken, state: parseRoomState(row), version: row.version };
@@ -193,6 +199,7 @@ export async function claimWhiteSeat(row: RoomRow, inviteToken: string, playerTo
   if (!row.white_invite_hash || inviteHash !== row.white_invite_hash) {
     throw new Error("INVALID_INVITE_TOKEN");
   }
+  if (playerTokenHash === row.black_token_hash) throw new Error("TOKEN_ALREADY_IN_USE");
   const state = parseRoomState(row);
   state.joined.white = true;
   const now = Date.now();

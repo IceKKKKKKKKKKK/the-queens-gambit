@@ -1,4 +1,4 @@
-export const RULES_VERSION = "classic-duel-dark-v1";
+export const RULES_VERSION = "classic-duel-dark-v2";
 
 export type Side = "black" | "white";
 export type Viewer = Side | "spectator";
@@ -49,7 +49,7 @@ export interface PublicEvent {
   actor: Side;
   from?: Position;
   to?: Position;
-  result: BattleResult | "ready" | "resigned" | "game_started";
+  result: BattleResult | "ready" | "unready" | "resigned" | "game_started";
 }
 
 export interface GameState {
@@ -65,7 +65,6 @@ export interface GameState {
   pieces: Piece[];
   events: PublicEvent[];
   moveNumber: number;
-  noCombatPly: number;
 }
 
 export interface ProjectedGame {
@@ -83,7 +82,6 @@ export interface ProjectedGame {
 }
 
 export type PlayerAction =
-  | { type: "join" }
   | { type: "randomize" }
   | { type: "swap"; from: Position; to: Position }
   | { type: "ready"; value: boolean }
@@ -287,21 +285,19 @@ function makeSidePieces(side: Side): Piece[] {
 }
 
 export function createInitialGame(): GameState {
-  const firstTurn: Side = randomIndex(2) === 0 ? "black" : "white";
   return {
     rulesVersion: RULES_VERSION,
     phase: "setup",
     joined: { black: true, white: false },
     ready: { black: false, white: false },
-    firstTurn,
-    turn: firstTurn,
+    firstTurn: "black",
+    turn: "black",
     winner: null,
     finishReason: null,
     revealedFlags: { black: false, white: false },
     pieces: [...makeSidePieces("black"), ...makeSidePieces("white")],
     events: [],
     moveNumber: 0,
-    noCombatPly: 0,
   };
 }
 
@@ -320,6 +316,52 @@ function alivePieceAt(state: GameState, position: Position) {
   return state.pieces.find((piece) => piece.alive && samePosition(piece, position));
 }
 
+function setupPositionViolation(type: PieceType, side: Side, position: Position) {
+  if (!isInsideBoard(position) || !isSetupPosition(side, position) || isCamp(position)) {
+    return "INVALID_LAYOUT";
+  }
+  if (type === "flag" && !isAllowedSetupPosition(type, side, position)) {
+    return "FLAG_MUST_BE_HEADQUARTERS";
+  }
+  if (type === "mine" && !isAllowedSetupPosition(type, side, position)) {
+    return "MINE_BACK_TWO_ROWS";
+  }
+  if (type === "bomb" && !isAllowedSetupPosition(type, side, position)) {
+    return "BOMB_NOT_FRONT_ROW";
+  }
+  return null;
+}
+
+export function getSetupSwapViolation(
+  state: GameState,
+  side: Side,
+  from: Position,
+  to: Position,
+): string | null {
+  if (state.phase !== "setup") return "GAME_ALREADY_STARTED";
+  if (state.ready[side]) return "LAYOUT_LOCKED";
+  if (!isInsideBoard(from) || !isInsideBoard(to)) return "POSITION_OUT_OF_BOUNDS";
+  if (samePosition(from, to)) return "SAME_POSITION";
+  if (isCamp(from) || isCamp(to)) return "CAMP_MUST_BE_EMPTY";
+  const first = alivePieceAt(state, from);
+  const second = alivePieceAt(state, to);
+  if (!first || !second) return "INVALID_SWAP";
+  if (first.side !== side || second.side !== side) return "NOT_YOUR_PIECE";
+  return (
+    setupPositionViolation(first.type, side, to) ??
+    setupPositionViolation(second.type, side, from)
+  );
+}
+
+export function getProjectedSetupSwapViolation(
+  game: ProjectedGame,
+  side: Side,
+  from: Position,
+  to: Position,
+) {
+  return getSetupSwapViolation(projectedMovementState(game), side, from, to);
+}
+
 function railNeighbors(position: Position) {
   return [
     { row: position.row - 1, col: position.col },
@@ -327,6 +369,23 @@ function railNeighbors(position: Position) {
     { row: position.row, col: position.col - 1 },
     { row: position.row, col: position.col + 1 },
   ].filter((neighbor) => isInsideBoard(neighbor) && isRailEdge(position, neighbor));
+}
+
+function railNetworkCanReach(from: Position, to: Position) {
+  if (samePosition(from, to)) return false;
+  const queue = [from];
+  const visited = new Set([positionKey(from)]);
+  while (queue.length > 0) {
+    const current = queue.shift()!;
+    for (const neighbor of railNeighbors(current)) {
+      const key = positionKey(neighbor);
+      if (visited.has(key)) continue;
+      if (samePosition(neighbor, to)) return true;
+      visited.add(key);
+      queue.push(neighbor);
+    }
+  }
+  return false;
 }
 
 function engineerCanReach(state: GameState, from: Position, to: Position) {
@@ -346,7 +405,21 @@ function engineerCanReach(state: GameState, from: Position, to: Position) {
   return false;
 }
 
+function straightRailRouteExists(from: Position, to: Position) {
+  if (samePosition(from, to) || (from.row !== to.row && from.col !== to.col)) return false;
+  const rowStep = Math.sign(to.row - from.row);
+  const colStep = Math.sign(to.col - from.col);
+  let current = { row: from.row, col: from.col };
+  while (!samePosition(current, to)) {
+    const next = { row: current.row + rowStep, col: current.col + colStep };
+    if (!isRailEdge(current, next)) return false;
+    current = next;
+  }
+  return true;
+}
+
 function straightRailCanReach(state: GameState, from: Position, to: Position) {
+  if (!straightRailRouteExists(from, to)) return false;
   if (from.row !== to.row && from.col !== to.col) return false;
   const rowStep = Math.sign(to.row - from.row);
   const colStep = Math.sign(to.col - from.col);
@@ -360,20 +433,39 @@ function straightRailCanReach(state: GameState, from: Position, to: Position) {
   return true;
 }
 
-export function isLegalMove(state: GameState, side: Side, from: Position, to: Position) {
-  if (state.phase !== "playing" || state.turn !== side || !isInsideBoard(from) || !isInsideBoard(to)) {
-    return false;
-  }
+export function getMoveViolation(
+  state: GameState,
+  side: Side,
+  from: Position,
+  to: Position,
+): string | null {
+  if (state.phase === "finished") return "GAME_FINISHED";
+  if (state.phase !== "playing") return "GAME_NOT_STARTED";
+  if (state.turn !== side) return "NOT_YOUR_TURN";
+  if (!isInsideBoard(from) || !isInsideBoard(to)) return "POSITION_OUT_OF_BOUNDS";
+  if (samePosition(from, to)) return "SAME_POSITION";
   const piece = alivePieceAt(state, from);
-  if (!piece || piece.side !== side || piece.type === "flag" || piece.type === "mine") return false;
-  if (isHeadquarters(from)) return false;
+  if (!piece) return "NO_PIECE_AT_SOURCE";
+  if (piece.side !== side) return "NOT_YOUR_PIECE";
+  if (piece.type === "flag") return "FLAG_CANNOT_MOVE";
+  if (piece.type === "mine") return "MINE_CANNOT_MOVE";
+  if (isHeadquarters(from)) return "HEADQUARTERS_LOCKED";
   const target = alivePieceAt(state, to);
-  if (target?.side === side) return false;
-  if (target && isCamp(to)) return false;
-  if (isRoadEdge(from, to)) return true;
-  return piece.type === "engineer"
-    ? engineerCanReach(state, from, to)
-    : straightRailCanReach(state, from, to);
+  if (target?.side === side) return "DESTINATION_OCCUPIED_BY_ALLY";
+  if (target && isCamp(to)) return "CAMP_PROTECTED";
+  if (isRoadEdge(from, to)) return null;
+  if (piece.type === "engineer") {
+    if (engineerCanReach(state, from, to)) return null;
+    return railNetworkCanReach(from, to) ? "RAIL_PATH_BLOCKED" : "ROAD_ONE_STEP_ONLY";
+  }
+  if (straightRailCanReach(state, from, to)) return null;
+  if (straightRailRouteExists(from, to)) return "RAIL_PATH_BLOCKED";
+  if (railNetworkCanReach(from, to)) return "ENGINEER_ONLY_RAIL_TURN";
+  return "ROAD_ONE_STEP_ONLY";
+}
+
+export function isLegalMove(state: GameState, side: Side, from: Position, to: Position) {
+  return getMoveViolation(state, side, from, to) === null;
 }
 
 export function getLegalTargets(state: GameState, side: Side, from: Position) {
@@ -387,8 +479,8 @@ export function getLegalTargets(state: GameState, side: Side, from: Position) {
   return targets;
 }
 
-export function getProjectedLegalTargets(game: ProjectedGame, side: Side, from: Position) {
-  const movementState: GameState = {
+function projectedMovementState(game: ProjectedGame): GameState {
+  return {
     rulesVersion: game.rulesVersion,
     phase: game.phase,
     joined: { ...game.joined },
@@ -404,8 +496,20 @@ export function getProjectedLegalTargets(game: ProjectedGame, side: Side, from: 
     })),
     events: game.events,
     moveNumber: game.moveNumber,
-    noCombatPly: 0,
   };
+}
+
+export function getProjectedMoveViolation(
+  game: ProjectedGame,
+  side: Side,
+  from: Position,
+  to: Position,
+) {
+  return getMoveViolation(projectedMovementState(game), side, from, to);
+}
+
+export function getProjectedLegalTargets(game: ProjectedGame, side: Side, from: Position) {
+  const movementState = projectedMovementState(game);
   return getLegalTargets(movementState, side, from);
 }
 
@@ -426,7 +530,8 @@ function revealFlagWhenCommanderFalls(state: GameState, piece: Piece | undefined
 }
 
 function applyMove(state: GameState, side: Side, from: Position, to: Position) {
-  if (!isLegalMove(state, side, from, to)) throw new GameRuleError("ILLEGAL_MOVE");
+  const violation = getMoveViolation(state, side, from, to);
+  if (violation) throw new GameRuleError(violation);
   const attacker = alivePieceAt(state, from)!;
   const defender = alivePieceAt(state, to);
   const attackedHeadquarters = Boolean(defender && isHeadquarters(to));
@@ -435,9 +540,7 @@ function applyMove(state: GameState, side: Side, from: Position, to: Position) {
   if (!defender) {
     attacker.row = to.row;
     attacker.col = to.col;
-    state.noCombatPly += 1;
   } else {
-    state.noCombatPly = 0;
     if (defender.type === "flag") {
       defender.alive = false;
       if (attacker.type === "bomb") attacker.alive = false;
@@ -496,10 +599,6 @@ function applyMove(state: GameState, side: Side, from: Position, to: Position) {
     state.phase = "finished";
     state.winner = side;
     state.finishReason = "no_moves";
-  } else if (state.noCombatPly >= 70) {
-    state.phase = "finished";
-    state.winner = null;
-    state.finishReason = "draw";
   }
 }
 
@@ -507,25 +606,19 @@ export function applyPlayerAction(current: GameState, side: Side, action: Player
   const state = JSON.parse(JSON.stringify(current)) as GameState;
   if (state.phase === "finished") throw new GameRuleError("GAME_FINISHED");
 
-  if (action.type === "join") {
-    if (state.phase !== "setup") throw new GameRuleError("GAME_ALREADY_STARTED");
-    state.joined[side] = true;
-    return state;
-  }
-
   if (action.type === "randomize") {
-    if (state.phase !== "setup" || state.ready[side]) throw new GameRuleError("LAYOUT_LOCKED");
+    if (state.phase !== "setup") throw new GameRuleError("GAME_ALREADY_STARTED");
+    if (state.ready[side]) throw new GameRuleError("LAYOUT_LOCKED");
     state.pieces = [...state.pieces.filter((piece) => piece.side !== side), ...makeSidePieces(side)];
     return state;
   }
 
   if (action.type === "swap") {
-    if (state.phase !== "setup" || state.ready[side]) throw new GameRuleError("LAYOUT_LOCKED");
+    const violation = getSetupSwapViolation(state, side, action.from, action.to);
+    if (violation) throw new GameRuleError(violation);
     const first = alivePieceAt(state, action.from);
     const second = alivePieceAt(state, action.to);
-    if (!first || !second || first.side !== side || second.side !== side) {
-      throw new GameRuleError("INVALID_SWAP");
-    }
+    if (!first || !second) throw new GameRuleError("INVALID_SWAP");
     [first.row, second.row] = [second.row, first.row];
     [first.col, second.col] = [second.col, first.col];
     if (!validateSideSetup(state.pieces, side)) throw new GameRuleError("INVALID_LAYOUT");
@@ -534,11 +627,13 @@ export function applyPlayerAction(current: GameState, side: Side, action: Player
 
   if (action.type === "ready") {
     if (state.phase !== "setup") throw new GameRuleError("GAME_ALREADY_STARTED");
+    if (state.ready[side] === action.value) throw new GameRuleError("NO_STATE_CHANGE");
     if (action.value && !validateSideSetup(state.pieces, side)) throw new GameRuleError("INVALID_LAYOUT");
     state.joined[side] = true;
     state.ready[side] = action.value;
-    if (action.value) addEvent(state, { actor: side, result: "ready" });
+    addEvent(state, { actor: side, result: action.value ? "ready" : "unready" });
     if (state.ready.black && state.ready.white) {
+      state.firstTurn = randomIndex(2) === 0 ? "black" : "white";
       state.phase = "playing";
       state.turn = state.firstTurn;
       addEvent(state, { actor: state.firstTurn, result: "game_started" });
@@ -573,8 +668,11 @@ export function projectGame(state: GameState, viewer: Viewer): ProjectedGame {
       .map((piece) => {
         const flagRevealed = piece.type === "flag" && state.revealedFlags[piece.side];
         const canSeeType = state.phase === "finished" || viewer === piece.side || flagRevealed;
+        const hidesSetupIdentity = state.phase === "setup" && viewer !== piece.side;
         return {
-          id: piece.id,
+          id: hidesSetupIdentity
+            ? `${piece.side}-hidden-${piece.row}-${piece.col}`
+            : piece.id,
           side: piece.side,
           row: piece.row,
           col: piece.col,

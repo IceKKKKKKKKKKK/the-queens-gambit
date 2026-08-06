@@ -5,6 +5,7 @@ import {
   type PlayerAction,
   type Position,
 } from "../../../../../lib/game";
+import { RequestBodyTooLargeError, readBoundedJson } from "../../../../../lib/request";
 import {
   bearerToken,
   getRoom,
@@ -30,7 +31,7 @@ function isPosition(value: unknown): value is Position {
 function parseAction(value: unknown): PlayerAction | null {
   if (!value || typeof value !== "object") return null;
   const action = value as Record<string, unknown>;
-  if (action.type === "join" || action.type === "randomize" || action.type === "resign") {
+  if (action.type === "randomize" || action.type === "resign") {
     return { type: action.type };
   }
   if (action.type === "ready" && typeof action.value === "boolean") {
@@ -72,13 +73,20 @@ export async function POST(
 
     let body: Record<string, unknown>;
     try {
-      body = (await request.json()) as Record<string, unknown>;
-    } catch {
+      const parsed = await readBoundedJson(request);
+      if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
+        return Response.json({ error: "INVALID_REQUEST" }, { status: 400, headers: responseHeaders });
+      }
+      body = parsed as Record<string, unknown>;
+    } catch (error) {
+      if (error instanceof RequestBodyTooLargeError) {
+        return Response.json({ error: error.message }, { status: 413, headers: responseHeaders });
+      }
       return Response.json({ error: "INVALID_REQUEST" }, { status: 400, headers: responseHeaders });
     }
     const expectedVersion = body.expectedVersion;
     const action = parseAction(body.action);
-    if (!Number.isInteger(expectedVersion) || (expectedVersion as number) < 0 || !action) {
+    if (!Number.isSafeInteger(expectedVersion) || (expectedVersion as number) < 0 || !action) {
       return Response.json({ error: "INVALID_REQUEST" }, { status: 400, headers: responseHeaders });
     }
     if (row.version !== expectedVersion) {
