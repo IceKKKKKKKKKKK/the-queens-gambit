@@ -1062,13 +1062,19 @@ summary:focus-visible {
   max-height: min(82dvh, 720px);
   margin: auto;
   padding: 0;
-  overflow: auto;
+  overflow: hidden;
   overscroll-behavior: contain;
   border: 1px solid var(--black);
   border-radius: 20px;
   background: var(--white);
   color: var(--black);
   box-shadow: 0 24px 80px rgba(0, 0, 0, 0.16);
+}
+
+.rules-dialog[open] {
+  display: grid;
+  grid-template-rows: auto minmax(0, 1fr);
+  height: min(82dvh, 720px);
 }
 
 .rules-dialog::backdrop {
@@ -1113,32 +1119,35 @@ summary:focus-visible {
 
 .rules-list {
   display: grid;
-  grid-template-columns: repeat(2, minmax(0, 1fr));
+  grid-template-columns: minmax(0, 1fr);
   gap: 1px;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  scrollbar-gutter: stable;
   background: var(--line);
 }
 
 .rules-list section {
   min-width: 0;
-  padding: 15px 17px 17px;
+  padding: 18px 20px 20px;
   background: var(--white);
 }
 
 .rules-list section:last-child {
-  grid-column: 1 / -1;
+  grid-column: auto;
 }
 
 .rules-list h3 {
-  margin: 0 0 6px;
-  font-size: 11px;
+  margin: 0 0 7px;
+  font-size: 14px;
   font-weight: 750;
 }
 
 .rules-list p {
   margin: 0;
   color: var(--muted);
-  font-size: 10px;
-  line-height: 1.7;
+  font-size: 14px;
+  line-height: 1.75;
 }
 
 @media (max-width: 1050px) {
@@ -1232,6 +1241,10 @@ summary:focus-visible {
   .rules-dialog {
     width: calc(100vw - 28px);
     max-height: calc(100dvh - 28px);
+  }
+
+  .rules-dialog[open] {
+    height: calc(100dvh - 28px);
   }
 
   .rules-list {
