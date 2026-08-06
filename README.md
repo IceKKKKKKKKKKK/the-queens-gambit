@@ -2,6 +2,16 @@
 
 在线二人暗军棋，支持玩家邀请和观战链接。
 
+## 界面
+
+<p align="center">
+  <img src="docs/screenshots/home.png" alt="入口界面" width="360">
+</p>
+
+![布阵界面](docs/screenshots/board.png)
+
+![观战界面](docs/screenshots/spectator.png)
+
 ## 本地运行
 
 ```powershell
