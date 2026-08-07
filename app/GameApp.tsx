@@ -380,7 +380,8 @@ function Board({
         const downRight = { row: row + 1, col: col + 1 };
         const downLeft = { row: row + 1, col: col - 1 };
         const hasVertical = row < 11 && isRoadEdge(position, down);
-        const pieceLabel = piece?.type ? PIECE_INFO[piece.type].label : piece ? "暗子" : "空位";
+        const visiblePieceLabel = piece?.type ? PIECE_INFO[piece.type].label : null;
+        const pieceLabel = visiblePieceLabel ?? (piece ? "身份隐藏" : "空位");
         const stationLabel = camp
           ? "行营"
           : headquarters
@@ -425,7 +426,7 @@ function Board({
               <span className="road road-diagonal down-left" />
             ) : null}
             <button
-              className={`station-hit ${selectedHere ? "is-selected" : ""} ${targetHere ? "is-target" : ""} ${targetAttack ? "is-attack" : ""} ${piece ? "has-piece-label" : ""} ${headquarters ? "is-headquarters" : ""} ${headquartersOwnershipClass}`}
+              className={`station-hit ${selectedHere ? "is-selected" : ""} ${targetHere ? "is-target" : ""} ${targetAttack ? "is-attack" : ""} ${visiblePieceLabel ? "has-piece-label" : ""} ${headquarters ? "is-headquarters" : ""} ${headquartersOwnershipClass}`}
               type="button"
               onClick={() => onCell(position)}
               draggable={draggable}
@@ -472,12 +473,14 @@ function Board({
               {piece ? (
                 <>
                   <PieceModel piece={piece} inCamp={camp} campMotion={campMotion.piece} />
-                  <span
-                    className={`board-piece-label side-${piece.side} ${camp ? "is-in-camp" : ""}`}
-                    aria-hidden="true"
-                  >
-                    {pieceLabel}
-                  </span>
+                  {visiblePieceLabel ? (
+                    <span
+                      className={`board-piece-label side-${piece.side} ${camp ? "is-in-camp" : ""}`}
+                      aria-hidden="true"
+                    >
+                      {visiblePieceLabel}
+                    </span>
+                  ) : null}
                 </>
               ) : null}
             </button>

@@ -587,6 +587,26 @@ test("both commanders falling reveals exactly both flags while play continues", 
   );
 });
 
+test("combat does not reveal a surviving piece to the opponent or spectators", () => {
+  const state = stateWith([
+    piece("attacker", "black", "commander", 3, 0),
+    piece("defender", "white", "platoon", 3, 1),
+    piece("black-support", "black", "engineer", 9, 4),
+    piece("white-support", "white", "engineer", 8, 4),
+  ]);
+  const result = applyPlayerAction(state, "black", {
+    type: "move",
+    from: { row: 3, col: 0 },
+    to: { row: 3, col: 1 },
+  });
+
+  assert.equal(result.phase, "playing");
+  assert.equal(result.events.at(-1)?.result, "attacker_survives");
+  assert.equal(projectGame(result, "black").pieces.find((candidate) => candidate.id === "attacker")?.type, "commander");
+  assert.equal(projectGame(result, "white").pieces.find((candidate) => candidate.id === "attacker")?.type, null);
+  assert.equal(projectGame(result, "spectator").pieces.find((candidate) => candidate.id === "attacker")?.type, null);
+});
+
 test("v2 has no automatic 70-ply draw", () => {
   let state = stateWith([
     piece("black", "black", "platoon", 3, 0),
