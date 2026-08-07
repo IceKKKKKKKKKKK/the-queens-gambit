@@ -480,7 +480,7 @@ summary:focus-visible {
 .tray-piece {
   position: relative;
   min-width: 0;
-  aspect-ratio: 0.82;
+  aspect-ratio: 0.78;
   padding: 0;
   overflow: visible;
   border: 1px solid var(--line);
@@ -507,8 +507,9 @@ summary:focus-visible {
 }
 
 .tray-piece .piece-model {
-  width: 68%;
-  height: 78%;
+  top: 38%;
+  width: 62%;
+  height: 64%;
 }
 
 .tray-piece .piece-crest,
@@ -518,7 +519,26 @@ summary:focus-visible {
 }
 
 .tray-piece .piece-name {
-  font-size: 7px;
+  display: none;
+}
+
+.tray-piece-label {
+  position: absolute;
+  z-index: 5;
+  right: 2px;
+  bottom: 4px;
+  left: 2px;
+  overflow: hidden;
+  color: var(--black);
+  font-family: "Songti SC", STSong, serif;
+  font-size: 9px;
+  font-weight: 750;
+  line-height: 1;
+  letter-spacing: 0.06em;
+  text-align: center;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  pointer-events: none;
 }
 
 .piece-box-hint {

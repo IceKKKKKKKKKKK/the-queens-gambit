@@ -537,6 +537,9 @@ function PieceTray({
             onDragEnd={onDragEnd}
           >
             <PieceModel piece={piece} />
+            <span className="tray-piece-label" aria-hidden="true">
+              {piece.type ? PIECE_INFO[piece.type].label : "棋子"}
+            </span>
           </button>
         ))}
       </div>
