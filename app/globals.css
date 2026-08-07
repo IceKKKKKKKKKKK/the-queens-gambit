@@ -782,25 +782,6 @@ summary:focus-visible {
   height: 80%;
 }
 
-.station-hit.is-opponent-headquarters .station.headquarters {
-  width: 82%;
-  height: auto;
-  aspect-ratio: 1;
-  border: 2px solid var(--black);
-  border-radius: 2px;
-  outline: 1px solid var(--black);
-  outline-offset: 3px;
-  background: var(--white);
-  box-shadow: none;
-}
-
-.station-hit.is-opponent-headquarters .station.headquarters::before,
-.station-hit.is-opponent-headquarters .station.headquarters::after,
-.station-hit.is-opponent-headquarters .headquarters-mark,
-.station-hit.is-opponent-headquarters .headquarters-badge {
-  display: none;
-}
-
 .station.headquarters::before,
 .station.headquarters::after {
   position: absolute;
@@ -1187,6 +1168,28 @@ summary:focus-visible {
   border-color: var(--black);
   background: var(--white);
   color: var(--black);
+}
+
+.rank-order {
+  display: flex;
+  width: min(100%, 1440px);
+  margin: 18px auto 0;
+  padding: 13px 8px 0;
+  align-items: baseline;
+  justify-content: center;
+  flex-wrap: wrap;
+  gap: 9px;
+  border-top: 1px solid var(--line);
+  color: var(--muted);
+  font-size: 10px;
+  line-height: 1.6;
+  text-align: center;
+}
+
+.rank-order strong {
+  flex: none;
+  color: var(--black);
+  font-weight: 750;
 }
 
 .rules-dialog {

@@ -305,7 +305,7 @@ function PieceModel({
       data-piece={piece.type ?? "hidden"}
       aria-hidden="true"
     >
-      <span className="piece-crest">{info?.glyph ?? "◆"}</span>
+      <span className="piece-crest">{info?.glyph ?? "□"}</span>
       <span className="piece-neck" />
       <span className="piece-base" />
       <span className="piece-name">{info?.short ?? ""}</span>
@@ -1446,6 +1446,10 @@ export default function GameApp({ hasRoom = false }: { hasRoom?: boolean }) {
           </div>
         </aside>
       </section>
+      <p className="rank-order" aria-label="军阶大小规则">
+        <strong>大小规则</strong>
+        <span>司令 ＞ 军长 ＞ 师长 ＞ 旅长 ＞ 团长 ＞ 营长 ＞ 连长 ＞ 排长 ＞ 工兵</span>
+      </p>
       <dialog
         className="rules-dialog"
         id="game-rules-dialog"
