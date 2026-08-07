@@ -1032,6 +1032,19 @@ summary:focus-visible {
   font-size: clamp(15px, 2.8vw, 25px);
 }
 
+.station-hit.is-opponent-headquarters .piece-model.is-hidden .piece-crest {
+  top: 6%;
+  width: clamp(16px, 3.6vw, 25px);
+  height: auto;
+  aspect-ratio: 1;
+  box-sizing: border-box;
+  border: 2px solid var(--black);
+  border-radius: 1px;
+  background: var(--white);
+  color: transparent;
+  font-size: 0;
+}
+
 .piece-model.is-hidden .piece-neck {
   right: 17%;
   bottom: 22%;

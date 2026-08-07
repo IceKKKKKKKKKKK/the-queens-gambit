@@ -37,3 +37,22 @@ test("starter preview and promotional copy stay removed", async () => {
   assert.doesNotMatch(`${page}${layout}${css}${packageJson}`, /codex-preview|react-loading-skeleton|把战场|PRIVATE ROOMS/i);
   await assert.rejects(access(new URL("../app/_sites-preview", templateRoot)));
 });
+
+test("opponent headquarters replace only the hidden-piece diamond with an outlined white square", async () => {
+  const [component, css] = await Promise.all([
+    readFile(new URL("../app/GameApp.tsx", import.meta.url), "utf8"),
+    readFile(new URL("../app/globals.css", import.meta.url), "utf8"),
+  ]);
+  const selector = ".station-hit.is-opponent-headquarters .piece-model.is-hidden .piece-crest";
+  const ruleStart = css.indexOf(selector);
+  const ruleEnd = css.indexOf("}", ruleStart);
+  const rule = css.slice(ruleStart, ruleEnd + 1);
+
+  assert.match(component, /info\?\.glyph \?\? "◆"/);
+  assert.match(component, /"is-opponent-headquarters"/);
+  assert.notEqual(ruleStart, -1);
+  assert.match(rule, /aspect-ratio:\s*1/);
+  assert.match(rule, /border:\s*2px solid var\(--black\)/);
+  assert.match(rule, /background:\s*var\(--white\)/);
+  assert.match(rule, /color:\s*transparent/);
+});
