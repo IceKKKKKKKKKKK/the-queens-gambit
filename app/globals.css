@@ -782,6 +782,23 @@ summary:focus-visible {
   height: 80%;
 }
 
+.station-hit.is-opponent-headquarters .station.headquarters {
+  width: 82%;
+  height: auto;
+  aspect-ratio: 1;
+  border: 0;
+  border-radius: 0;
+  background: var(--white);
+  box-shadow: none;
+}
+
+.station-hit.is-opponent-headquarters .station.headquarters::before,
+.station-hit.is-opponent-headquarters .station.headquarters::after,
+.station-hit.is-opponent-headquarters .headquarters-mark,
+.station-hit.is-opponent-headquarters .headquarters-badge {
+  display: none;
+}
+
 .station.headquarters::before,
 .station.headquarters::after {
   position: absolute;

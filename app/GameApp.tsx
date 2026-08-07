@@ -305,7 +305,7 @@ function PieceModel({
       data-piece={piece.type ?? "hidden"}
       aria-hidden="true"
     >
-      <span className="piece-crest">{info?.glyph ?? "□"}</span>
+      <span className="piece-crest">{info?.glyph ?? "◆"}</span>
       <span className="piece-neck" />
       <span className="piece-base" />
       <span className="piece-name">{info?.short ?? ""}</span>
