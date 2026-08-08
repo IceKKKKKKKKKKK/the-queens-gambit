@@ -300,7 +300,8 @@ test("replay reconstruction covers every battle outcome", () => {
         },
       ],
     } satisfies ReplayArchive;
-    const finalPieces = buildReplayFrames(archive).at(-1)!.pieces;
+    const frames = buildReplayFrames(archive);
+    const finalPieces = frames.at(-1)!.pieces;
     const finalAttacker = finalPieces.find((candidate) => candidate.id === "attacker")!;
     const finalDefender = finalPieces.find((candidate) => candidate.id === "defender");
     assert.equal(finalAttacker.alive, scenario.attackerAlive, scenario.result);
@@ -311,6 +312,10 @@ test("replay reconstruction covers every battle outcome", () => {
     );
     if (scenario.defenderAlive !== undefined) {
       assert.equal(finalDefender?.alive, scenario.defenderAlive, scenario.result);
+    }
+    if (scenario.result === "attacker_survives") {
+      assert.equal(frames[0].pieces.filter((candidate) => candidate.side === "white" && !candidate.alive).length, 0);
+      assert.equal(finalPieces.filter((candidate) => candidate.side === "white" && !candidate.alive).length, 1);
     }
   }
 });
@@ -801,6 +806,9 @@ test("combat keeps a survivor hidden from the opponent while spectators retain f
   assert.equal(projectGame(result, "black").pieces.find((candidate) => candidate.id === "attacker")?.type, "commander");
   assert.equal(projectGame(result, "white").pieces.find((candidate) => candidate.id === "attacker")?.type, null);
   assert.equal(projectGame(result, "spectator").pieces.find((candidate) => candidate.id === "attacker")?.type, "commander");
+  assert.equal(projectGame(result, "white").pieces.find((candidate) => candidate.id === "defender")?.type, "platoon");
+  assert.equal(projectGame(result, "white").pieces.find((candidate) => candidate.id === "defender")?.alive, false);
+  assert.equal(projectGame(result, "black").pieces.find((candidate) => candidate.id === "defender")?.type, null);
 });
 
 test("v2 has no automatic 70-ply draw", () => {

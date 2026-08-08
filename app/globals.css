@@ -512,6 +512,22 @@ summary:focus-visible {
   opacity: 0.52;
 }
 
+.tray-piece.captured-piece {
+  cursor: default;
+  pointer-events: none;
+}
+
+.captured-piece-empty {
+  display: grid;
+  min-height: 48px;
+  margin: 0;
+  place-items: center;
+  border: 1px dashed var(--line);
+  border-radius: 10px;
+  color: var(--muted);
+  font-size: 9px;
+}
+
 .tray-piece .piece-model {
   top: 38%;
   width: 62%;

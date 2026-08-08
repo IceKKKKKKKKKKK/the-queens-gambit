@@ -76,3 +76,18 @@ test("board coordinates, move markers, and replay controls stay visibly rendered
   assert.match(css, /\.station-hit\.is-last-move-to/);
   assert.match(game, /String\.fromCharCode\(65 \+ position\.col\)/);
 });
+
+test("players retain a left-side box containing only their own captured pieces", async () => {
+  const [component, css] = await Promise.all([
+    readFile(new URL("../app/GameApp.tsx", import.meta.url), "utf8"),
+    readFile(new URL("../app/globals.css", import.meta.url), "utf8"),
+  ]);
+
+  assert.match(component, /function CapturedPieceBox/);
+  assert.match(component, /棋盒 · 阵亡/);
+  assert.match(component, /piece\.side === viewerSide && !piece\.alive/);
+  assert.match(component, /viewerSide && game\.phase !== "setup"/);
+  assert.match(component, /<CapturedPieceBox pieces=\{capturedOwnPieces\}/);
+  assert.match(css, /\.tray-piece\.captured-piece\s*\{/);
+  assert.match(css, /\.captured-piece-empty\s*\{/);
+});

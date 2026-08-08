@@ -524,6 +524,14 @@ function Board({
   );
 }
 
+function orderPiecesForBox(pieces: PublicPiece[]) {
+  return [...pieces].sort((first, second) => {
+    const firstIndex = first.type ? Object.keys(PIECE_INFO).indexOf(first.type) : Number.MAX_SAFE_INTEGER;
+    const secondIndex = second.type ? Object.keys(PIECE_INFO).indexOf(second.type) : Number.MAX_SAFE_INTEGER;
+    return firstIndex - secondIndex || first.id.localeCompare(second.id);
+  });
+}
+
 function PieceTray({
   pieces,
   selectedPieceId,
@@ -539,11 +547,7 @@ function PieceTray({
   onDragStartPiece: (pieceId: string) => boolean;
   onDragEnd: () => void;
 }) {
-  const ordered = [...pieces].sort((first, second) => {
-    const firstIndex = first.type ? Object.keys(PIECE_INFO).indexOf(first.type) : Number.MAX_SAFE_INTEGER;
-    const secondIndex = second.type ? Object.keys(PIECE_INFO).indexOf(second.type) : Number.MAX_SAFE_INTEGER;
-    return firstIndex - secondIndex || first.id.localeCompare(second.id);
-  });
+  const ordered = orderPiecesForBox(pieces);
   return (
     <section className="piece-box" aria-label={`棋盒，剩余 ${pieces.length} 枚棋子`}>
       <div className="piece-box-title">
@@ -580,6 +584,37 @@ function PieceTray({
         ))}
       </div>
       <p className="piece-box-hint">拖到棋盘，或先点棋子再点位置</p>
+    </section>
+  );
+}
+
+function CapturedPieceBox({ pieces }: { pieces: PublicPiece[] }) {
+  const ordered = orderPiecesForBox(pieces);
+  return (
+    <section className="piece-box captured-piece-box" aria-label={`己方阵亡棋子，共 ${pieces.length} 枚`}>
+      <div className="piece-box-title">
+        <strong>棋盒 · 阵亡</strong>
+        <span role="status">{pieces.length}</span>
+      </div>
+      {ordered.length ? (
+        <div className="piece-tray" role="list" aria-label="己方阵亡棋子">
+          {ordered.map((piece) => (
+            <div
+              className="tray-piece captured-piece"
+              key={piece.id}
+              role="listitem"
+              aria-label={piece.type ? PIECE_INFO[piece.type].label : "棋子"}
+            >
+              <PieceModel piece={piece} />
+              <span className="tray-piece-label" aria-hidden="true">
+                {piece.type ? PIECE_INFO[piece.type].label : "棋子"}
+              </span>
+            </div>
+          ))}
+        </div>
+      ) : (
+        <p className="captured-piece-empty">暂无</p>
+      )}
     </section>
   );
 }
@@ -1374,6 +1409,9 @@ export default function GameApp({ hasRoom = false }: { hasRoom?: boolean }) {
   const displayedGame = activeReplayFrame
     ? { ...game, pieces: activeReplayFrame.pieces, events: replayMoveEvent ? [replayMoveEvent] : [] }
     : game;
+  const capturedOwnPieces = viewerSide && game.phase !== "setup"
+    ? displayedPieces.filter((piece) => piece.side === viewerSide && !piece.alive)
+    : [];
   const replayHasGap = Boolean(
     game.replay && replayFrames.length !== game.replay.moves.length + 1,
   );
@@ -1450,6 +1488,9 @@ export default function GameApp({ hasRoom = false }: { hasRoom?: boolean }) {
               onDragStartPiece={beginTrayPieceDrag}
               onDragEnd={handlePieceDragEnd}
             />
+          ) : null}
+          {viewerSide && game.phase !== "setup" ? (
+            <CapturedPieceBox pieces={capturedOwnPieces} />
           ) : null}
           <div className="seat-list">
             {(["black", "white"] as Side[]).map((side) => (
