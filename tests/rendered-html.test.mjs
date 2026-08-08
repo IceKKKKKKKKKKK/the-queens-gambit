@@ -130,11 +130,17 @@ test("live moves use one-shot monochrome motion and battle overlays", async () =
   assert.match(component, /aria-hidden="true"/);
   assert.doesNotMatch(component, /latestMovementEvent\(game\.events\)/);
   assert.match(css, /@keyframes battle-attacker-arrive/);
+  assert.match(css, /@keyframes battle-piece-move/);
+  assert.match(css, /@keyframes battle-piece-move\s*\{[\s\S]*68%,\s*100%/);
   assert.match(css, /@keyframes battle-attacker-removed/);
   assert.match(css, /@keyframes battle-defender-removed/);
   assert.match(css, /@keyframes battle-defender-survives/);
   assert.match(css, /\.battle-animation-cell,[\s\S]*pointer-events:\s*none/);
+  assert.match(css, /\.board-grid\s*\{[\s\S]*--battle-duration:\s*600ms/);
+  assert.match(css, /\.board-grid\[data-animation-outcome="move"\]\s*\{[\s\S]*--battle-duration:\s*280ms/);
   assert.match(css, /@media \(prefers-reduced-motion: reduce\)[\s\S]*\.battle-animation-cell,[\s\S]*visibility:\s*hidden/);
   assert.match(game, /export function movementAnimationForTransition/);
   assert.match(game, /next\.moveNumber !== previous\.moveNumber \+ 1/);
+  assert.match(component, /BATTLE_ANIMATION_MS = 640/);
+  assert.match(component, /movementAnimation\.outcome === "move"[\s\S]*MOVEMENT_ANIMATION_MS[\s\S]*BATTLE_ANIMATION_MS/);
 });

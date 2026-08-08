@@ -70,6 +70,7 @@ interface SetupDraftState {
 
 const PIECE_DRAG_TYPE = "application/x-queens-gambit-piece";
 const MOVEMENT_ANIMATION_MS = 320;
+const BATTLE_ANIMATION_MS = 640;
 const BATTLE_CELL_PERCENT = 100 / 0.9;
 
 class RequestError extends Error {
@@ -526,7 +527,11 @@ function Board({
           </span>
         ))}
       </div>
-      <div className={`board-grid ${flipped ? "is-flipped" : ""}`} aria-label="军棋棋盘">
+      <div
+        className={`board-grid ${flipped ? "is-flipped" : ""}`}
+        data-animation-outcome={movementAnimation?.outcome}
+        aria-label="军棋棋盘"
+      >
       <div className="mountain-band" aria-hidden="true">
         <span>界</span>
       </div>
@@ -889,11 +894,15 @@ export default function GameApp({ hasRoom = false }: { hasRoom?: boolean }) {
 
   useEffect(() => {
     if (!movementAnimation) return;
+    const duration =
+      movementAnimation.outcome === "move"
+        ? MOVEMENT_ANIMATION_MS
+        : BATTLE_ANIMATION_MS;
     const timer = window.setTimeout(() => {
       setMovementAnimation((current) =>
         current === movementAnimation ? null : current,
       );
-    }, MOVEMENT_ANIMATION_MS);
+    }, duration);
     return () => window.clearTimeout(timer);
   }, [movementAnimation]);
 

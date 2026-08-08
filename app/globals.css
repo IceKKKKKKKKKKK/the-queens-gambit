@@ -249,7 +249,7 @@ summary:focus-visible {
   100% { opacity: 1; }
 }
 
-@keyframes battle-attacker-arrive {
+@keyframes battle-piece-move {
   0% {
     opacity: 1;
     transform: translate(-50%, -50%) translate3d(var(--battle-x, 0px), var(--battle-y, 0px), 0);
@@ -261,15 +261,29 @@ summary:focus-visible {
   }
 }
 
+@keyframes battle-attacker-arrive {
+  0% {
+    opacity: 1;
+    transform: translate(-50%, -50%) translate3d(var(--battle-x, 0px), var(--battle-y, 0px), 0);
+  }
+  40%,
+  100% {
+    opacity: 1;
+    transform: translate(-50%, -50%) translate3d(0, 0, 0);
+  }
+}
+
 @keyframes battle-attacker-removed {
   0% {
     opacity: 1;
     transform: translate(-50%, -50%) translate3d(var(--battle-x, 0px), var(--battle-y, 0px), 0) scale(1);
   }
-  68% {
+  40%,
+  64% {
     opacity: 1;
     transform: translate(-50%, -50%) translate3d(0, 0, 0) scale(1);
   }
+  94%,
   100% {
     opacity: 0;
     transform: translate(-50%, -50%) translate3d(0, 0, 0) scale(0.84);
@@ -278,10 +292,11 @@ summary:focus-visible {
 
 @keyframes battle-defender-removed {
   0%,
-  60% {
+  64% {
     opacity: 1;
     transform: translate(-50%, -50%) scale(1);
   }
+  94%,
   100% {
     opacity: 0;
     transform: translate(-50%, -50%) scale(0.84);
@@ -290,27 +305,35 @@ summary:focus-visible {
 
 @keyframes battle-defender-survives {
   0%,
-  60%,
-  100% {
+  40% {
     opacity: 1;
     transform: translate(-50%, -50%) scale(1);
   }
-  76% {
+  52% {
     opacity: 1;
-    transform: translate(-50%, -50%) scale(0.92);
+    transform: translate(-50%, -50%) scale(0.94);
+  }
+  64% {
+    opacity: 1;
+    transform: translate(-50%, -50%) scale(1);
+  }
+  100% {
+    opacity: 1;
+    transform: translate(-50%, -50%) scale(1);
   }
 }
 
 @keyframes battle-impact-pulse {
   0%,
-  55% {
+  38% {
     opacity: 0;
     transform: translate(-50%, -50%) scale(0.55);
   }
-  68% {
+  48% {
     opacity: 0.48;
     transform: translate(-50%, -50%) scale(0.78);
   }
+  70%,
   100% {
     opacity: 0;
     transform: translate(-50%, -50%) scale(1.16);
@@ -943,6 +966,7 @@ summary:focus-visible {
 }
 
 .board-grid {
+  --battle-duration: 600ms;
   position: relative;
   display: grid;
   width: 100%;
@@ -958,8 +982,11 @@ summary:focus-visible {
   transform: rotate(180deg);
 }
 
-.battle-animation-cell {
+.board-grid[data-animation-outcome="move"] {
   --battle-duration: 280ms;
+}
+
+.battle-animation-cell {
   position: relative;
   z-index: 20;
   min-width: 0;
@@ -991,8 +1018,11 @@ summary:focus-visible {
   animation-name: battle-attacker-removed;
 }
 
+.battle-animation-cell[data-outcome="move"] .battle-animation-visual {
+  animation-name: battle-piece-move;
+}
+
 .battle-defender-ghost {
-  --battle-duration: 280ms;
   z-index: 19;
   animation-name: battle-defender-removed;
   pointer-events: none;
@@ -1007,7 +1037,6 @@ summary:focus-visible {
 }
 
 .battle-impact {
-  --battle-duration: 280ms;
   position: absolute;
   z-index: 21;
   top: 50%;
