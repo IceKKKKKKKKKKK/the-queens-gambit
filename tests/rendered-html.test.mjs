@@ -85,7 +85,7 @@ test("players retain a left-side box containing only their own captured pieces",
 
   assert.match(component, /function CapturedPieceBox/);
   assert.match(component, /棋盒 · 阵亡/);
-  assert.match(component, /piece\.side === viewerSide && !piece\.alive/);
+  assert.match(component, /piece\.side === viewerSide\s*&&\s*!piece\.alive/);
   assert.match(component, /viewerSide && game\.phase !== "setup"/);
   assert.match(component, /<CapturedPieceBox pieces=\{capturedOwnPieces\}/);
   assert.match(css, /\.tray-piece\.captured-piece\s*\{/);
@@ -112,4 +112,29 @@ test("both sides have a responsive server-backed clock and only the host can edi
   assert.match(css, /\.activity-panel\s*\{[\s\S]*?order:\s*3;[\s\S]*?grid-column:\s*auto;/);
   assert.match(game, /DEFAULT_TIME_CONTROL_MINUTES = 20/);
   assert.match(game, /finishReason = "timeout"/);
+});
+
+test("live moves use one-shot monochrome motion and battle overlays", async () => {
+  const [component, css, game] = await Promise.all([
+    readFile(new URL("../app/GameApp.tsx", import.meta.url), "utf8"),
+    readFile(new URL("../app/globals.css", import.meta.url), "utf8"),
+    readFile(new URL("../lib/game.ts", import.meta.url), "utf8"),
+  ]);
+
+  assert.match(component, /movementAnimationForTransition\(current\.snapshot, next\.snapshot\)/);
+  assert.match(component, /const recentMovement = movementAnimation\?\.event/);
+  assert.match(component, /function BattleAnimationOverlay/);
+  assert.match(component, /battle-animation-cell/);
+  assert.match(component, /battle-defender-ghost/);
+  assert.match(component, /battle-impact/);
+  assert.match(component, /aria-hidden="true"/);
+  assert.doesNotMatch(component, /latestMovementEvent\(game\.events\)/);
+  assert.match(css, /@keyframes battle-attacker-arrive/);
+  assert.match(css, /@keyframes battle-attacker-removed/);
+  assert.match(css, /@keyframes battle-defender-removed/);
+  assert.match(css, /@keyframes battle-defender-survives/);
+  assert.match(css, /\.battle-animation-cell,[\s\S]*pointer-events:\s*none/);
+  assert.match(css, /@media \(prefers-reduced-motion: reduce\)[\s\S]*\.battle-animation-cell,[\s\S]*visibility:\s*hidden/);
+  assert.match(game, /export function movementAnimationForTransition/);
+  assert.match(game, /next\.moveNumber !== previous\.moveNumber \+ 1/);
 });

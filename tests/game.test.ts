@@ -20,6 +20,7 @@ import {
   isValidSetupDraft,
   latestMovementEvent,
   latestOpponentMovementEvent,
+  movementAnimationForTransition,
   projectGame,
   randomizeSetupDraft,
   setupDraftToLayout,
@@ -30,7 +31,9 @@ import {
   type PieceType,
   type PlayerAction,
   type Position,
+  type ProjectedGame,
   type PublicEvent,
+  type PublicPiece,
   type ReplayArchive,
   type Side,
 } from "../lib/game.ts";
@@ -41,6 +44,94 @@ const MOBILE_TYPES = (Object.keys(PIECE_INFO) as PieceType[]).filter(
 
 function piece(id: string, side: Side, type: PieceType, row: number, col: number): Piece {
   return { id, side, type, row, col, alive: true };
+}
+
+function publicPiece(
+  id: string,
+  side: Side,
+  type: PieceType | null,
+  row: number,
+  col: number,
+  alive = true,
+): PublicPiece {
+  return { id, side, type, row, col, alive, flagRevealed: false };
+}
+
+function projectedState(
+  pieces: PublicPiece[],
+  moveNumber: number,
+  events: PublicEvent[] = [],
+  overrides: Partial<ProjectedGame> = {},
+): ProjectedGame {
+  return {
+    rulesVersion: "classic-duel-dark-v2",
+    phase: "playing",
+    joined: { black: true, white: true },
+    ready: { black: true, white: true },
+    turn: "black",
+    winner: null,
+    finishReason: null,
+    revealedFlags: { black: false, white: false },
+    pieces,
+    events,
+    moveNumber,
+    replay: null,
+    clock: null,
+    ...overrides,
+  };
+}
+
+function movementTransitionFixture({
+  result,
+  attackerAliveAfter,
+  defenderAliveAfter,
+  attackerType = "engineer",
+  defenderType = null,
+  finished = false,
+}: {
+  result: "move" | "attacker_survives" | "defender_survives" | "both_removed" | "flag_captured";
+  attackerAliveAfter: boolean;
+  defenderAliveAfter?: boolean;
+  attackerType?: PieceType | null;
+  defenderType?: PieceType | null;
+  finished?: boolean;
+}) {
+  const from = { row: 6, col: 0 };
+  const to = { row: 6, col: 1 };
+  const attacker = publicPiece("current-attacker", "black", attackerType, from.row, from.col);
+  const defender =
+    defenderAliveAfter === undefined
+      ? null
+      : publicPiece("current-defender", "white", defenderType, to.row, to.col);
+  const previous = projectedState(
+    defender ? [attacker, defender] : [attacker],
+    7,
+  );
+  const nextAttacker = {
+    ...attacker,
+    row: attackerAliveAfter ? to.row : from.row,
+    col: attackerAliveAfter ? to.col : from.col,
+    alive: attackerAliveAfter,
+  };
+  const nextDefender = defender
+    ? { ...defender, alive: defenderAliveAfter ?? false }
+    : null;
+  const event = {
+    id: 19,
+    actor: "black",
+    from,
+    to,
+    result,
+  } satisfies PublicEvent;
+  const next = projectedState(
+    nextDefender ? [nextAttacker, nextDefender] : [nextAttacker],
+    8,
+    [event],
+    finished
+      ? { phase: "finished", winner: "black", finishReason: "flag" }
+      : { turn: "white" },
+  );
+  return { previous, next };
 }
 
 function stateWith(pieces: Piece[], turn: Side = "black"): GameState {
@@ -228,6 +319,158 @@ test("time expires exactly at zero, prevents the pending move, and remains froze
     white: 5_000,
   });
   expectRuleError(result, "black", { type: "resign" }, "GAME_FINISHED");
+});
+
+test("movement animations skip initial, duplicate, and multi-move snapshot transitions", () => {
+  const { previous, next } = movementTransitionFixture({
+    result: "move",
+    attackerAliveAfter: true,
+  });
+
+  assert.equal(movementAnimationForTransition(previous, structuredClone(previous)), null);
+  assert.ok(movementAnimationForTransition(previous, next));
+
+  const repeated = structuredClone(next);
+  repeated.clock = {
+    initialMs: 20_000,
+    remainingMs: { black: 18_000, white: 20_000 },
+    running: "white",
+  };
+  assert.equal(movementAnimationForTransition(next, repeated), null);
+
+  const skipped = structuredClone(next);
+  skipped.moveNumber = previous.moveNumber + 2;
+  skipped.events[0].id += 1;
+  assert.equal(movementAnimationForTransition(previous, skipped), null);
+});
+
+test("movement animations classify every combat outcome, including both flag captures", () => {
+  const scenarios = [
+    {
+      name: "ordinary move",
+      result: "move",
+      attackerAliveAfter: true,
+      defenderAliveAfter: undefined,
+      outcome: "move",
+      finished: false,
+    },
+    {
+      name: "attacker survives",
+      result: "attacker_survives",
+      attackerAliveAfter: true,
+      defenderAliveAfter: false,
+      outcome: "capture",
+      finished: false,
+    },
+    {
+      name: "defender survives",
+      result: "defender_survives",
+      attackerAliveAfter: false,
+      defenderAliveAfter: true,
+      outcome: "repelled",
+      finished: false,
+    },
+    {
+      name: "both removed",
+      result: "both_removed",
+      attackerAliveAfter: false,
+      defenderAliveAfter: false,
+      outcome: "mutual",
+      finished: false,
+    },
+    {
+      name: "ordinary flag capture",
+      result: "flag_captured",
+      attackerAliveAfter: true,
+      defenderAliveAfter: false,
+      attackerType: "engineer",
+      defenderType: "flag",
+      outcome: "capture",
+      finished: true,
+    },
+    {
+      name: "bomb captures flag",
+      result: "flag_captured",
+      attackerAliveAfter: false,
+      defenderAliveAfter: false,
+      attackerType: "bomb",
+      defenderType: "flag",
+      outcome: "mutual",
+      finished: true,
+    },
+  ] as const;
+
+  for (const scenario of scenarios) {
+    const { previous, next } = movementTransitionFixture(scenario);
+    const animation = movementAnimationForTransition(previous, next);
+    assert.ok(animation, scenario.name);
+    assert.equal(animation.outcome, scenario.outcome, scenario.name);
+    assert.equal(animation.attackerAliveAfter, scenario.attackerAliveAfter, scenario.name);
+    assert.equal(
+      animation.defenderAliveAfter,
+      scenario.defenderAliveAfter ?? false,
+      scenario.name,
+    );
+    assert.equal(Boolean(animation.defender), scenario.defenderAliveAfter !== undefined, scenario.name);
+    assert.equal(animation.event.result, scenario.result, scenario.name);
+  }
+
+  const terminalMove = movementTransitionFixture({
+    result: "move",
+    attackerAliveAfter: true,
+  });
+  terminalMove.next.phase = "finished";
+  terminalMove.next.winner = "black";
+  terminalMove.next.finishReason = "no_moves";
+  assert.equal(
+    movementAnimationForTransition(terminalMove.previous, terminalMove.next)?.outcome,
+    "move",
+  );
+});
+
+test("movement animations use the live pre-move pieces instead of old casualties at the same cells", () => {
+  const { previous, next } = movementTransitionFixture({
+    result: "attacker_survives",
+    attackerAliveAfter: true,
+    defenderAliveAfter: false,
+    attackerType: "engineer",
+    defenderType: "mine",
+  });
+  const oldAttacker = publicPiece("old-attacker", "black", "commander", 6, 0, false);
+  const oldDefender = publicPiece("old-defender", "white", "flag", 6, 1, false);
+  previous.pieces = [oldAttacker, oldDefender, ...previous.pieces];
+  next.pieces = [oldAttacker, oldDefender, ...next.pieces];
+
+  const animation = movementAnimationForTransition(previous, next);
+  assert.ok(animation);
+  assert.equal(animation.attacker.id, "current-attacker");
+  assert.equal(animation.defender?.id, "current-defender");
+  assert.equal(animation.attacker.type, "engineer");
+  assert.equal(animation.defender?.type, "mine");
+});
+
+test("movement animation snapshots preserve hidden enemy piece types", () => {
+  const hiddenDefender = movementTransitionFixture({
+    result: "attacker_survives",
+    attackerAliveAfter: true,
+    defenderAliveAfter: false,
+    defenderType: null,
+  });
+  const captured = movementAnimationForTransition(hiddenDefender.previous, hiddenDefender.next);
+  assert.ok(captured);
+  assert.equal(captured.defender?.type, null);
+
+  const hiddenAttacker = movementTransitionFixture({
+    result: "defender_survives",
+    attackerAliveAfter: false,
+    defenderAliveAfter: true,
+    attackerType: null,
+    defenderType: "platoon",
+  });
+  const repelled = movementAnimationForTransition(hiddenAttacker.previous, hiddenAttacker.next);
+  assert.ok(repelled);
+  assert.equal(repelled.attacker.type, null);
+  assert.equal(repelled.defender?.type, "platoon");
 });
 
 test("camp motion marks only the moving attacker and its camp station", () => {

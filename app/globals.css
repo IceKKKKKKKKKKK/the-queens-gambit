@@ -249,6 +249,74 @@ summary:focus-visible {
   100% { opacity: 1; }
 }
 
+@keyframes battle-attacker-arrive {
+  0% {
+    opacity: 1;
+    transform: translate(-50%, -50%) translate3d(var(--battle-x, 0px), var(--battle-y, 0px), 0);
+  }
+  68%,
+  100% {
+    opacity: 1;
+    transform: translate(-50%, -50%) translate3d(0, 0, 0);
+  }
+}
+
+@keyframes battle-attacker-removed {
+  0% {
+    opacity: 1;
+    transform: translate(-50%, -50%) translate3d(var(--battle-x, 0px), var(--battle-y, 0px), 0) scale(1);
+  }
+  68% {
+    opacity: 1;
+    transform: translate(-50%, -50%) translate3d(0, 0, 0) scale(1);
+  }
+  100% {
+    opacity: 0;
+    transform: translate(-50%, -50%) translate3d(0, 0, 0) scale(0.84);
+  }
+}
+
+@keyframes battle-defender-removed {
+  0%,
+  60% {
+    opacity: 1;
+    transform: translate(-50%, -50%) scale(1);
+  }
+  100% {
+    opacity: 0;
+    transform: translate(-50%, -50%) scale(0.84);
+  }
+}
+
+@keyframes battle-defender-survives {
+  0%,
+  60%,
+  100% {
+    opacity: 1;
+    transform: translate(-50%, -50%) scale(1);
+  }
+  76% {
+    opacity: 1;
+    transform: translate(-50%, -50%) scale(0.92);
+  }
+}
+
+@keyframes battle-impact-pulse {
+  0%,
+  55% {
+    opacity: 0;
+    transform: translate(-50%, -50%) scale(0.55);
+  }
+  68% {
+    opacity: 0.48;
+    transform: translate(-50%, -50%) scale(0.78);
+  }
+  100% {
+    opacity: 0;
+    transform: translate(-50%, -50%) scale(1.16);
+  }
+}
+
 .room-page {
   min-height: 100vh;
   padding: 18px 26px 36px;
@@ -888,6 +956,126 @@ summary:focus-visible {
 
 .board-grid.is-flipped {
   transform: rotate(180deg);
+}
+
+.battle-animation-cell {
+  --battle-duration: 280ms;
+  position: relative;
+  z-index: 20;
+  min-width: 0;
+  min-height: 0;
+  align-self: stretch;
+  justify-self: stretch;
+  pointer-events: none;
+}
+
+.battle-animation-cell,
+.battle-animation-cell * {
+  pointer-events: none;
+}
+
+.battle-animation-visual,
+.battle-defender-ghost {
+  position: absolute;
+  z-index: 2;
+  top: 50%;
+  left: 50%;
+  width: 90%;
+  height: 90%;
+  animation: battle-attacker-arrive var(--battle-duration) cubic-bezier(0.22, 1, 0.36, 1) both;
+  will-change: transform, opacity;
+}
+
+.battle-animation-cell.is-attacker-removed .battle-animation-visual,
+.battle-animation-visual.is-attacker-removed {
+  animation-name: battle-attacker-removed;
+}
+
+.battle-defender-ghost {
+  --battle-duration: 280ms;
+  z-index: 19;
+  animation-name: battle-defender-removed;
+  pointer-events: none;
+}
+
+.battle-defender-ghost * {
+  pointer-events: none;
+}
+
+.battle-defender-ghost.is-defender-survivor {
+  animation-name: battle-defender-survives;
+}
+
+.battle-impact {
+  --battle-duration: 280ms;
+  position: absolute;
+  z-index: 21;
+  top: 50%;
+  left: 50%;
+  display: block;
+  width: 48%;
+  aspect-ratio: 1;
+  border: 1px solid var(--black);
+  border-radius: 50%;
+  opacity: 0;
+  animation: battle-impact-pulse var(--battle-duration) ease-out both;
+  pointer-events: none;
+}
+
+.station-hit.is-arrival-hidden > .piece-model,
+.station-hit.is-arrival-hidden > .board-piece-label,
+.is-arrival-hidden > .piece-model,
+.is-arrival-hidden > .board-piece-label,
+.piece-model.is-arrival-hidden,
+.board-piece-label.is-arrival-hidden {
+  visibility: hidden;
+}
+
+.battle-animation-visual.has-piece-label .piece-model,
+.battle-defender-ghost.has-piece-label .piece-model {
+  top: 38%;
+  width: 68%;
+  height: 66%;
+}
+
+.battle-animation-visual.is-headquarters .piece-model,
+.battle-defender-ghost.is-headquarters .piece-model {
+  width: 68%;
+  height: 80%;
+}
+
+.battle-animation-visual.is-opponent-headquarters .piece-model.is-hidden .piece-crest,
+.battle-defender-ghost.is-opponent-headquarters .piece-model.is-hidden .piece-crest {
+  top: 6%;
+  width: clamp(16px, 3.6vw, 25px);
+  height: auto;
+  aspect-ratio: 1;
+  box-sizing: border-box;
+  border: 2px solid var(--black);
+  border-radius: 1px;
+  background: var(--white);
+  color: transparent;
+  font-size: 0;
+}
+
+.battle-animation-visual.is-headquarters.has-piece-label .piece-model,
+.battle-defender-ghost.is-headquarters.has-piece-label .piece-model {
+  height: 66%;
+}
+
+.battle-animation-visual.has-piece-label .piece-name,
+.battle-defender-ghost.has-piece-label .piece-name {
+  display: none;
+}
+
+.battle-animation-visual.has-piece-label .piece-crest,
+.battle-defender-ghost.has-piece-label .piece-crest {
+  font-size: clamp(15px, 3vw, 28px);
+}
+
+.is-flipped .battle-animation-visual.has-piece-label .piece-model,
+.is-flipped .battle-defender-ghost.has-piece-label .piece-model {
+  top: 62%;
 }
 
 .board-cell {
@@ -1769,5 +1957,20 @@ summary:focus-visible {
     animation-duration: 0.01ms !important;
     animation-iteration-count: 1 !important;
     transition-duration: 0.01ms !important;
+  }
+
+  .battle-animation-cell,
+  .battle-defender-ghost,
+  .battle-impact {
+    visibility: hidden !important;
+  }
+
+  .station-hit.is-arrival-hidden > .piece-model,
+  .station-hit.is-arrival-hidden > .board-piece-label,
+  .is-arrival-hidden > .piece-model,
+  .is-arrival-hidden > .board-piece-label,
+  .piece-model.is-arrival-hidden,
+  .board-piece-label.is-arrival-hidden {
+    visibility: visible !important;
   }
 }

@@ -121,6 +121,22 @@ export interface ProjectedGame {
   clock: PublicClock | null;
 }
 
+export type MovementAnimationOutcome = "move" | "capture" | "repelled" | "mutual";
+
+export interface MovementAnimationTransition {
+  moveNumber: number;
+  event: PublicEvent & {
+    from: Position;
+    to: Position;
+    result: BattleResult;
+  };
+  attacker: PublicPiece;
+  defender: PublicPiece | null;
+  attackerAliveAfter: boolean;
+  defenderAliveAfter: boolean;
+  outcome: MovementAnimationOutcome;
+}
+
 export type SetupDraft = Record<string, Position | null>;
 
 export interface SetupPlacement extends Position {
@@ -222,6 +238,127 @@ export type CampMotion = {
 export function latestMovementEvent(events: readonly PublicEvent[]) {
   const event = events.at(-1);
   return event?.from && event.to ? event : undefined;
+}
+
+function isBattleResult(result: PublicEvent["result"]): result is BattleResult {
+  return (
+    result === "move" ||
+    result === "attacker_survives" ||
+    result === "defender_survives" ||
+    result === "both_removed" ||
+    result === "flag_captured"
+  );
+}
+
+function clonePublicPiece(piece: PublicPiece) {
+  return { ...piece };
+}
+
+export function movementAnimationForTransition(
+  previous: ProjectedGame,
+  next: ProjectedGame,
+): MovementAnimationTransition | null {
+  if (
+    previous.phase !== "playing" ||
+    (next.phase !== "playing" && next.phase !== "finished") ||
+    next.moveNumber !== previous.moveNumber + 1
+  ) {
+    return null;
+  }
+
+  const event = next.events.at(-1);
+  if (
+    !event?.from ||
+    !event.to ||
+    !isBattleResult(event.result) ||
+    event.actor !== previous.turn ||
+    !isInsideBoard(event.from) ||
+    !isInsideBoard(event.to) ||
+    samePosition(event.from, event.to)
+  ) {
+    return null;
+  }
+
+  const attacker = previous.pieces.find(
+    (piece) =>
+      piece.alive &&
+      piece.side === event.actor &&
+      samePosition(piece, event.from!),
+  );
+  if (!attacker) return null;
+
+  const defender =
+    previous.pieces.find(
+      (piece) =>
+        piece.alive &&
+        piece.side !== event.actor &&
+        samePosition(piece, event.to!),
+    ) ?? null;
+  const attackerAfter = next.pieces.find((piece) => piece.id === attacker.id);
+  const defenderAfter = defender
+    ? next.pieces.find((piece) => piece.id === defender.id)
+    : undefined;
+  if (!attackerAfter || (defender && !defenderAfter)) return null;
+
+  let outcome: MovementAnimationOutcome;
+  if (event.result === "move") {
+    if (defender || !attackerAfter.alive || !samePosition(attackerAfter, event.to)) return null;
+    outcome = "move";
+  } else {
+    if (!defender || !defenderAfter || !samePosition(defenderAfter, event.to)) return null;
+    if (event.result === "attacker_survives") {
+      if (
+        !attackerAfter.alive ||
+        !samePosition(attackerAfter, event.to) ||
+        defenderAfter.alive
+      ) {
+        return null;
+      }
+      outcome = "capture";
+    } else if (event.result === "defender_survives") {
+      if (
+        attackerAfter.alive ||
+        !samePosition(attackerAfter, event.from) ||
+        !defenderAfter.alive
+      ) {
+        return null;
+      }
+      outcome = "repelled";
+    } else if (event.result === "both_removed") {
+      if (
+        attackerAfter.alive ||
+        !samePosition(attackerAfter, event.from) ||
+        defenderAfter.alive
+      ) {
+        return null;
+      }
+      outcome = "mutual";
+    } else {
+      if (defenderAfter.alive) return null;
+      if (attackerAfter.alive) {
+        if (!samePosition(attackerAfter, event.to)) return null;
+        outcome = "capture";
+      } else {
+        if (!samePosition(attackerAfter, event.from)) return null;
+        outcome = "mutual";
+      }
+    }
+  }
+
+  return {
+    moveNumber: next.moveNumber,
+    event: {
+      ...event,
+      from: { ...event.from },
+      to: { ...event.to },
+      result: event.result,
+    },
+    attacker: clonePublicPiece(attacker),
+    defender: defender ? clonePublicPiece(defender) : null,
+    attackerAliveAfter: attackerAfter.alive,
+    defenderAliveAfter: defenderAfter?.alive ?? false,
+    outcome,
+  };
 }
 
 export function latestOpponentMovementEvent(events: readonly PublicEvent[], viewer: Viewer) {

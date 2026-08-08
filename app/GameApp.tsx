@@ -1,6 +1,13 @@
 "use client";
 
-import { useEffect, useMemo, useRef, useState, type DragEvent } from "react";
+import {
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+  type CSSProperties,
+  type DragEvent,
+} from "react";
 import {
   CAMPS,
   HEADQUARTERS,
@@ -21,8 +28,8 @@ import {
   isRailEdge,
   isRoadEdge,
   isValidSetupDraft,
-  latestMovementEvent,
   latestOpponentMovementEvent,
+  movementAnimationForTransition,
   positionKey,
   randomizeSetupDraft,
   samePosition,
@@ -33,6 +40,7 @@ import {
   type ProjectedGame,
   type PublicEvent,
   type PublicPiece,
+  type MovementAnimationTransition,
   type SetupDraft,
   type Side,
   type Viewer,
@@ -61,6 +69,8 @@ interface SetupDraftState {
 }
 
 const PIECE_DRAG_TYPE = "application/x-queens-gambit-piece";
+const MOVEMENT_ANIMATION_MS = 320;
+const BATTLE_CELL_PERCENT = 100 / 0.9;
 
 class RequestError extends Error {
   constructor(
@@ -306,16 +316,18 @@ function PieceModel({
   piece,
   inCamp = false,
   campMotion = null,
+  className = "",
 }: {
   piece: PublicPiece;
   inCamp?: boolean;
   campMotion?: "enter" | "leave" | null;
+  className?: string;
 }) {
   const known = Boolean(piece.type);
   const info = piece.type ? PIECE_INFO[piece.type] : null;
   return (
     <span
-      className={`piece-model side-${piece.side} ${known ? "is-known" : "is-hidden"} ${inCamp ? "is-in-camp" : ""} ${campMotion ? `camp-motion-${campMotion}` : ""}`}
+      className={`piece-model side-${piece.side} ${known ? "is-known" : "is-hidden"} ${inCamp ? "is-in-camp" : ""} ${campMotion ? `camp-motion-${campMotion}` : ""} ${className}`}
       data-piece={piece.type ?? "hidden"}
       aria-hidden="true"
     >
@@ -324,6 +336,132 @@ function PieceModel({
       <span className="piece-base" />
       <span className="piece-name">{info?.short ?? ""}</span>
     </span>
+  );
+}
+
+type BattleAnimationStyle = CSSProperties & {
+  "--battle-x"?: string;
+  "--battle-y"?: string;
+};
+
+function boardGridRow(position: Position) {
+  return position.row < 6 ? position.row + 1 : position.row + 2;
+}
+
+function battleTargetStyle(position: Position): BattleAnimationStyle {
+  return {
+    gridRow: boardGridRow(position),
+    gridColumn: position.col + 1,
+  };
+}
+
+function battleMotionStyle(from: Position, to: Position): BattleAnimationStyle {
+  const rowOffset = (from.row - to.row) * BATTLE_CELL_PERCENT;
+  const crossesTowardBlack = from.row < 6 && to.row >= 6;
+  const crossesTowardWhite = from.row >= 6 && to.row < 6;
+  const y = crossesTowardBlack
+    ? `calc(${rowOffset}% - var(--front-gap))`
+    : crossesTowardWhite
+      ? `calc(${rowOffset}% + var(--front-gap))`
+      : `${rowOffset}%`;
+  return {
+    ...battleTargetStyle(to),
+    "--battle-x": `${(from.col - to.col) * BATTLE_CELL_PERCENT}%`,
+    "--battle-y": y,
+  };
+}
+
+function opponentHeadquartersClass(position: Position, viewer: Viewer) {
+  if (!isHeadquarters(position)) return "";
+  if (viewer === "spectator") return "is-headquarters";
+  const headquartersSide: Side = position.row < 6 ? "white" : "black";
+  return headquartersSide === viewer
+    ? "is-headquarters"
+    : "is-headquarters is-opponent-headquarters";
+}
+
+function BattlePieceVisual({
+  piece,
+  position,
+  viewer,
+  campMotion = null,
+  motionClass = "battle-animation-visual",
+  className = "",
+  style,
+  ariaHidden,
+}: {
+  piece: PublicPiece;
+  position: Position;
+  viewer: Viewer;
+  campMotion?: "enter" | "leave" | null;
+  motionClass?: "battle-animation-visual" | "battle-defender-ghost";
+  className?: string;
+  style?: BattleAnimationStyle;
+  ariaHidden?: boolean;
+}) {
+  const label = piece.type ? PIECE_INFO[piece.type].label : null;
+  return (
+    <span
+      className={`${motionClass} ${label ? "has-piece-label" : ""} ${opponentHeadquartersClass(position, viewer)} ${className}`}
+      style={style}
+      aria-hidden={ariaHidden}
+    >
+      <PieceModel piece={piece} inCamp={isCamp(position)} campMotion={campMotion} />
+      {label ? (
+        <span
+          className={`board-piece-label side-${piece.side} ${isCamp(position) ? "is-in-camp" : ""}`}
+        >
+          {label}
+        </span>
+      ) : null}
+    </span>
+  );
+}
+
+function BattleAnimationOverlay({
+  animation,
+  viewer,
+}: {
+  animation: MovementAnimationTransition;
+  viewer: Viewer;
+}) {
+  const { attacker, defender, event, outcome } = animation;
+  const attackerCampMotion = isCamp(event.to)
+    ? "enter"
+    : isCamp(event.from)
+      ? "leave"
+      : null;
+  const targetStyle = battleTargetStyle(event.to);
+  return (
+    <>
+      <span
+        className={`battle-animation-cell ${animation.attackerAliveAfter ? "" : "is-attacker-removed"}`}
+        style={battleMotionStyle(event.from, event.to)}
+        data-outcome={outcome}
+        aria-hidden="true"
+      >
+        <BattlePieceVisual
+          piece={attacker}
+          position={event.to}
+          viewer={viewer}
+          campMotion={attackerCampMotion}
+        />
+      </span>
+      {defender ? (
+        <BattlePieceVisual
+          piece={defender}
+          position={event.to}
+          viewer={viewer}
+          motionClass="battle-defender-ghost"
+          className={animation.defenderAliveAfter ? "is-defender-survivor" : ""}
+          style={targetStyle}
+          ariaHidden
+        />
+      ) : null}
+      {defender ? (
+        <span className="battle-impact" style={targetStyle} aria-hidden="true" />
+      ) : null}
+    </>
   );
 }
 
@@ -337,6 +475,7 @@ interface BoardProps {
   busy: boolean;
   readOnly?: boolean;
   movementHighlight?: PublicEvent;
+  movementAnimation?: MovementAnimationTransition | null;
   onCell: (position: Position) => void;
   onPieceDragStart: (pieceId: string, position: Position) => boolean;
   onPieceDrop: (pieceId: string, position: Position) => void;
@@ -353,6 +492,7 @@ function Board({
   busy,
   readOnly = false,
   movementHighlight,
+  movementAnimation,
   onCell,
   onPieceDragStart,
   onPieceDrop,
@@ -363,7 +503,7 @@ function Board({
     for (let col = 0; col < 5; col += 1) cells.push({ row, col });
   }
   const alivePieces = pieces.filter((piece) => piece.alive && isInsideBoard(piece));
-  const recentMovement = game.phase === "setup" ? undefined : latestMovementEvent(game.events);
+  const recentMovement = movementAnimation?.event;
   const columnLabels = Array.from({ length: 5 }, (_, index) =>
     String.fromCharCode(65 + (flipped ? 4 - index : index)),
   );
@@ -425,6 +565,12 @@ function Board({
         const downLeft = { row: row + 1, col: col - 1 };
         const hasVertical = row < 11 && isRoadEdge(position, down);
         const visiblePieceLabel = piece?.type ? PIECE_INFO[piece.type].label : null;
+        const hiddenByAnimation = Boolean(
+          piece &&
+            movementAnimation &&
+            (piece.id === movementAnimation.attacker.id ||
+              piece.id === movementAnimation.defender?.id),
+        );
         const pieceLabel = visiblePieceLabel ?? (piece ? "身份隐藏" : "空位");
         const stationLabel = camp
           ? "行营"
@@ -519,10 +665,15 @@ function Board({
               {lastMoveTo ? <span className="last-move-marker is-to" aria-hidden="true">到</span> : null}
               {piece ? (
                 <>
-                  <PieceModel piece={piece} inCamp={camp} campMotion={campMotion.piece} />
+                  <PieceModel
+                    piece={piece}
+                    inCamp={camp}
+                    campMotion={campMotion.piece}
+                    className={hiddenByAnimation ? "is-arrival-hidden" : ""}
+                  />
                   {visiblePieceLabel ? (
                     <span
-                      className={`board-piece-label side-${piece.side} ${camp ? "is-in-camp" : ""}`}
+                      className={`board-piece-label side-${piece.side} ${camp ? "is-in-camp" : ""} ${hiddenByAnimation ? "is-arrival-hidden" : ""}`}
                       aria-hidden="true"
                     >
                       {visiblePieceLabel}
@@ -534,6 +685,13 @@ function Board({
           </div>
         );
       })}
+      {movementAnimation ? (
+        <BattleAnimationOverlay
+          key={`${movementAnimation.moveNumber}:${movementAnimation.event.id}`}
+          animation={movementAnimation}
+          viewer={viewer}
+        />
+      ) : null}
       </div>
     </div>
   );
@@ -684,6 +842,8 @@ export default function GameApp({ hasRoom = false }: { hasRoom?: boolean }) {
   const [toast, setToast] = useState<string | null>(null);
   const [rulesOpen, setRulesOpen] = useState(false);
   const [replayIndex, setReplayIndex] = useState<number | null>(null);
+  const [movementAnimation, setMovementAnimation] =
+    useState<MovementAnimationTransition | null>(null);
   const [clockTick, setClockTick] = useState(0);
   const [clockAnchor, setClockAnchor] = useState(0);
   const [connection, setConnection] = useState<"live" | "syncing" | "offline">("live");
@@ -692,6 +852,8 @@ export default function GameApp({ hasRoom = false }: { hasRoom?: boolean }) {
   const busyRef = useRef(false);
   const creatingRef = useRef(false);
   const toastTimerRef = useRef<number | null>(null);
+  const replayIndexRef = useRef<number | null>(null);
+  const reduceMotionRef = useRef(false);
   const suppressClickUntilRef = useRef(0);
   const dragDroppedRef = useRef(false);
   const rulesDialogRef = useRef<HTMLDialogElement>(null);
@@ -709,6 +871,39 @@ export default function GameApp({ hasRoom = false }: { hasRoom?: boolean }) {
   useEffect(() => {
     roomRef.current = room;
   }, [room]);
+
+  useEffect(() => {
+    replayIndexRef.current = replayIndex;
+  }, [replayIndex]);
+
+  useEffect(() => {
+    const media = window.matchMedia("(prefers-reduced-motion: reduce)");
+    const syncPreference = () => {
+      reduceMotionRef.current = media.matches;
+      if (media.matches) setMovementAnimation(null);
+    };
+    syncPreference();
+    media.addEventListener("change", syncPreference);
+    return () => media.removeEventListener("change", syncPreference);
+  }, []);
+
+  useEffect(() => {
+    if (!movementAnimation) return;
+    const timer = window.setTimeout(() => {
+      setMovementAnimation((current) =>
+        current === movementAnimation ? null : current,
+      );
+    }, MOVEMENT_ANIMATION_MS);
+    return () => window.clearTimeout(timer);
+  }, [movementAnimation]);
+
+  useEffect(() => {
+    const stopHiddenAnimation = () => {
+      if (document.hidden) setMovementAnimation(null);
+    };
+    document.addEventListener("visibilitychange", stopHiddenAnimation);
+    return () => document.removeEventListener("visibilitychange", stopHiddenAnimation);
+  }, []);
 
   useEffect(() => {
     if (
@@ -763,6 +958,17 @@ export default function GameApp({ hasRoom = false }: { hasRoom?: boolean }) {
     const current = roomRef.current;
     if (current && current.code !== next.code && !allowRoomChange) return false;
     if (current && current.code === next.code && next.version < current.version) return false;
+    if (!current || current.code !== next.code || current.viewer !== next.viewer) {
+      setMovementAnimation(null);
+    } else if (next.version > current.version) {
+      const animation =
+        replayIndexRef.current === null &&
+        !reduceMotionRef.current &&
+        !document.hidden
+          ? movementAnimationForTransition(current.snapshot, next.snapshot)
+          : null;
+      setMovementAnimation(animation);
+    }
     if (
       !current ||
       current.code !== next.code ||
@@ -824,7 +1030,9 @@ export default function GameApp({ hasRoom = false }: { hasRoom?: boolean }) {
     setSelectedPieceId(null);
     setSetupDraftState(null);
     setRulesOpen(false);
+    replayIndexRef.current = null;
     setReplayIndex(null);
+    setMovementAnimation(null);
     setClockAnchor(0);
     setClockTick(0);
     roomRef.current = null;
@@ -1441,11 +1649,18 @@ export default function GameApp({ hasRoom = false }: { hasRoom?: boolean }) {
   const latestOpponentMove = latestOpponentMovementEvent(game.events, room.viewer);
   const highlightedMove = activeReplayFrame ? replayMoveEvent : latestOpponentMove;
   const displayedPieces = activeReplayFrame?.pieces ?? renderPieces;
+  const liveMovementAnimation = activeReplayFrame ? null : movementAnimation;
   const displayedGame = activeReplayFrame
     ? { ...game, pieces: activeReplayFrame.pieces, events: replayMoveEvent ? [replayMoveEvent] : [] }
     : game;
   const capturedOwnPieces = viewerSide && game.phase !== "setup"
-    ? displayedPieces.filter((piece) => piece.side === viewerSide && !piece.alive)
+    ? displayedPieces.filter(
+        (piece) =>
+          piece.side === viewerSide &&
+          !piece.alive &&
+          piece.id !== liveMovementAnimation?.attacker.id &&
+          piece.id !== liveMovementAnimation?.defender?.id,
+      )
     : [];
   const replayHasGap = Boolean(
     game.replay && replayFrames.length !== game.replay.moves.length + 1,
@@ -1512,7 +1727,10 @@ export default function GameApp({ hasRoom = false }: { hasRoom?: boolean }) {
               type="button"
               onClick={() => {
                 setSelectedPieceId(null);
-                setReplayIndex((current) => (current === null ? 0 : null));
+                setMovementAnimation(null);
+                const nextReplayIndex = replayIndexRef.current === null ? 0 : null;
+                replayIndexRef.current = nextReplayIndex;
+                setReplayIndex(nextReplayIndex);
               }}
               aria-pressed={Boolean(activeReplayFrame)}
             >
@@ -1531,7 +1749,17 @@ export default function GameApp({ hasRoom = false }: { hasRoom?: boolean }) {
           >
             规则
           </button>
-          <button className="icon-button" type="button" onClick={() => setFlipped((value) => !value)} aria-label="旋转棋盘">↻</button>
+          <button
+            className="icon-button"
+            type="button"
+            onClick={() => {
+              setMovementAnimation(null);
+              setFlipped((value) => !value);
+            }}
+            aria-label="旋转棋盘"
+          >
+            ↻
+          </button>
         </div>
       </header>
 
@@ -1649,6 +1877,7 @@ export default function GameApp({ hasRoom = false }: { hasRoom?: boolean }) {
             busy={busy}
             readOnly={Boolean(activeReplayFrame)}
             movementHighlight={highlightedMove}
+            movementAnimation={liveMovementAnimation}
             onCell={handleCell}
             onPieceDragStart={beginBoardPieceDrag}
             onPieceDrop={handlePieceDrop}
@@ -1668,7 +1897,15 @@ export default function GameApp({ hasRoom = false }: { hasRoom?: boolean }) {
                 <button type="button" onClick={() => setReplayIndex((current) => Math.max(0, (current ?? 0) - 1))} disabled={replayIndex === 0}>上一手</button>
                 <button type="button" onClick={() => setReplayIndex((current) => Math.min(replayFrames.length - 1, (current ?? 0) + 1))} disabled={replayIndex === replayFrames.length - 1}>下一手</button>
                 <button type="button" onClick={() => setReplayIndex(replayFrames.length - 1)} disabled={replayIndex === replayFrames.length - 1}>末手</button>
-                <button type="button" onClick={() => setReplayIndex(null)}>退出</button>
+                <button
+                  type="button"
+                  onClick={() => {
+                    replayIndexRef.current = null;
+                    setReplayIndex(null);
+                  }}
+                >
+                  退出
+                </button>
               </div>
             </div>
           ) : null}
