@@ -55,6 +55,8 @@ test("opponent headquarters replace only the hidden-piece diamond with an outlin
   assert.match(rule, /border:\s*2px solid var\(--black\)/);
   assert.match(rule, /background:\s*var\(--white\)/);
   assert.match(rule, /color:\s*transparent/);
+  assert.match(component, /viewer === "spectator"\s*\? sideName\(headquartersSide\)/);
+  assert.doesNotMatch(component, /\$\{sideName\(headquartersSide\)\}方/);
 });
 
 test("board pieces omit the inner arch while tray pieces retain their model", async () => {
@@ -134,6 +136,15 @@ test("live moves use one-shot monochrome motion and battle overlays", async () =
   assert.match(component, /battle-animation-cell/);
   assert.match(component, /battle-defender-ghost/);
   assert.match(component, /battle-impact/);
+  const overlaySource = component.slice(
+    component.indexOf("function BattleAnimationOverlay"),
+    component.indexOf("interface BoardProps"),
+  );
+  assert.match(
+    overlaySource,
+    /className=\{`battle-animation-cell[\s\S]*motionClass="battle-defender-ghost"[\s\S]*className="battle-impact"[\s\S]*<\/span>\s*\);/,
+  );
+  assert.doesNotMatch(overlaySource, /style=\{targetStyle\}/);
   assert.match(component, /aria-hidden="true"/);
   assert.doesNotMatch(component, /latestMovementEvent\(game\.events\)/);
   assert.match(css, /@keyframes battle-attacker-arrive/);
@@ -142,7 +153,16 @@ test("live moves use one-shot monochrome motion and battle overlays", async () =
   assert.match(css, /@keyframes battle-attacker-removed/);
   assert.match(css, /@keyframes battle-defender-removed/);
   assert.match(css, /@keyframes battle-defender-survives/);
+  assert.match(css, /@keyframes battle-mutual-attacker/);
+  assert.match(css, /@keyframes battle-mutual-defender/);
   assert.match(css, /\.battle-animation-cell,[\s\S]*pointer-events:\s*none/);
+  assert.match(css, /\.battle-animation-visual\s*\{\s*z-index:\s*3/);
+  assert.match(css, /\.battle-defender-ghost\s*\{[\s\S]*z-index:\s*2/);
+  assert.match(css, /\.battle-impact\s*\{[\s\S]*z-index:\s*4/);
+  assert.match(css, /data-outcome="capture"\][\s\S]*\.battle-animation-visual\s*\{\s*z-index:\s*2/);
+  assert.match(css, /data-outcome="capture"\][\s\S]*\.battle-defender-ghost\s*\{\s*z-index:\s*3/);
+  assert.match(css, /data-outcome="mutual"\][\s\S]*animation-name:\s*battle-mutual-attacker/);
+  assert.match(css, /data-outcome="mutual"\][\s\S]*animation-name:\s*battle-mutual-defender/);
   assert.match(css, /\.board-grid\s*\{[\s\S]*--battle-duration:\s*600ms/);
   assert.match(css, /\.board-grid\[data-animation-outcome="move"\]\s*\{[\s\S]*--battle-duration:\s*280ms/);
   assert.match(css, /@media \(prefers-reduced-motion: reduce\)[\s\S]*\.battle-animation-cell,[\s\S]*visibility:\s*hidden/);
@@ -150,4 +170,6 @@ test("live moves use one-shot monochrome motion and battle overlays", async () =
   assert.match(game, /next\.moveNumber !== previous\.moveNumber \+ 1/);
   assert.match(component, /BATTLE_ANIMATION_MS = 640/);
   assert.match(component, /movementAnimation\.outcome === "move"[\s\S]*MOVEMENT_ANIMATION_MS[\s\S]*BATTLE_ANIMATION_MS/);
+  assert.match(component, /if \(!room \|\| busy \|\| movementAnimation \|\| !isPlayer\(room\.viewer\)\) return/);
+  assert.match(component, /busy=\{busy \|\| Boolean\(liveMovementAnimation\)\}/);
 });

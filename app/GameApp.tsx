@@ -432,22 +432,19 @@ function BattleAnimationOverlay({
     : isCamp(event.from)
       ? "leave"
       : null;
-  const targetStyle = battleTargetStyle(event.to);
   return (
-    <>
-      <span
-        className={`battle-animation-cell ${animation.attackerAliveAfter ? "" : "is-attacker-removed"}`}
-        style={battleMotionStyle(event.from, event.to)}
-        data-outcome={outcome}
-        aria-hidden="true"
-      >
-        <BattlePieceVisual
-          piece={attacker}
-          position={event.to}
-          viewer={viewer}
-          campMotion={attackerCampMotion}
-        />
-      </span>
+    <span
+      className={`battle-animation-cell ${animation.attackerAliveAfter ? "" : "is-attacker-removed"}`}
+      style={battleMotionStyle(event.from, event.to)}
+      data-outcome={outcome}
+      aria-hidden="true"
+    >
+      <BattlePieceVisual
+        piece={attacker}
+        position={event.to}
+        viewer={viewer}
+        campMotion={attackerCampMotion}
+      />
       {defender ? (
         <BattlePieceVisual
           piece={defender}
@@ -455,14 +452,13 @@ function BattleAnimationOverlay({
           viewer={viewer}
           motionClass="battle-defender-ghost"
           className={animation.defenderAliveAfter ? "is-defender-survivor" : ""}
-          style={targetStyle}
           ariaHidden
         />
       ) : null}
       {defender ? (
-        <span className="battle-impact" style={targetStyle} aria-hidden="true" />
+        <span className="battle-impact" aria-hidden="true" />
       ) : null}
-    </>
+    </span>
   );
 }
 
@@ -552,7 +548,7 @@ function Board({
         const headquartersSide: Side | null = headquarters ? (row < 6 ? "white" : "black") : null;
         const headquartersRelation = headquartersSide
           ? viewer === "spectator"
-            ? `${sideName(headquartersSide)}方`
+            ? sideName(headquartersSide)
             : headquartersSide === viewer
               ? "本方"
               : "对方"
@@ -1487,7 +1483,7 @@ export default function GameApp({ hasRoom = false }: { hasRoom?: boolean }) {
 
   function beginBoardPieceDrag(pieceId: string, position: Position) {
     dragDroppedRef.current = false;
-    if (!room || !isPlayer(room.viewer)) return false;
+    if (!room || !isPlayer(room.viewer) || movementAnimation) return false;
     if (room.snapshot.phase === "setup") {
       if (room.snapshot.ready[room.viewer]) {
         showToast(ERROR_TEXT.LAYOUT_LOCKED);
@@ -1506,7 +1502,7 @@ export default function GameApp({ hasRoom = false }: { hasRoom?: boolean }) {
 
   function handleCell(position: Position) {
     if (Date.now() < suppressClickUntilRef.current) return;
-    if (!room || busy || !isPlayer(room.viewer)) return;
+    if (!room || busy || movementAnimation || !isPlayer(room.viewer)) return;
     const piece = renderPieces.find((candidate) => candidate.alive && samePosition(candidate, position));
     if (room.snapshot.phase === "setup") {
       if (room.snapshot.ready[room.viewer]) {
@@ -1556,7 +1552,7 @@ export default function GameApp({ hasRoom = false }: { hasRoom?: boolean }) {
   function handlePieceDrop(pieceId: string, position: Position) {
     dragDroppedRef.current = true;
     suppressClickUntilRef.current = Date.now() + 350;
-    if (!room || !isPlayer(room.viewer)) return;
+    if (!room || movementAnimation || !isPlayer(room.viewer)) return;
     const origin =
       room.snapshot.phase === "setup"
         ? activeSetupDraft?.[pieceId]
@@ -1883,7 +1879,7 @@ export default function GameApp({ hasRoom = false }: { hasRoom?: boolean }) {
             selected={activeReplayFrame ? null : selectedPosition}
             targets={activeReplayFrame ? new Set<string>() : targetKeys}
             flipped={orientationFlipped}
-            busy={busy}
+            busy={busy || Boolean(liveMovementAnimation)}
             readOnly={Boolean(activeReplayFrame)}
             movementHighlight={highlightedMove}
             movementAnimation={liveMovementAnimation}

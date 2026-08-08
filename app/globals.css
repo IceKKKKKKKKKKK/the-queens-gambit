@@ -323,6 +323,36 @@ summary:focus-visible {
   }
 }
 
+@keyframes battle-mutual-attacker {
+  0% {
+    opacity: 1;
+    transform: translate(-50%, -50%) translate3d(var(--battle-x, 0px), var(--battle-y, 0px), 0) scale(1);
+  }
+  40%,
+  64% {
+    opacity: 1;
+    transform: translate(-50%, -50%) translate3d(0, 0, 0) scale(1);
+  }
+  94%,
+  100% {
+    opacity: 0;
+    transform: translate(-54%, -50%) translate3d(0, 0, 0) scale(0.84);
+  }
+}
+
+@keyframes battle-mutual-defender {
+  0%,
+  64% {
+    opacity: 1;
+    transform: translate(-50%, -50%) scale(1);
+  }
+  94%,
+  100% {
+    opacity: 0;
+    transform: translate(-46%, -50%) scale(0.84);
+  }
+}
+
 @keyframes battle-impact-pulse {
   0%,
   38% {
@@ -1004,13 +1034,24 @@ summary:focus-visible {
 .battle-animation-visual,
 .battle-defender-ghost {
   position: absolute;
-  z-index: 2;
   top: 50%;
   left: 50%;
   width: 90%;
   height: 90%;
   animation: battle-attacker-arrive var(--battle-duration) cubic-bezier(0.22, 1, 0.36, 1) both;
   will-change: transform, opacity;
+}
+
+.battle-animation-visual {
+  z-index: 3;
+}
+
+.battle-animation-cell[data-outcome="capture"] .battle-animation-visual {
+  z-index: 2;
+}
+
+.battle-animation-cell[data-outcome="capture"] .battle-defender-ghost {
+  z-index: 3;
 }
 
 .battle-animation-cell.is-attacker-removed .battle-animation-visual,
@@ -1023,7 +1064,7 @@ summary:focus-visible {
 }
 
 .battle-defender-ghost {
-  z-index: 19;
+  z-index: 2;
   animation-name: battle-defender-removed;
   pointer-events: none;
 }
@@ -1036,9 +1077,17 @@ summary:focus-visible {
   animation-name: battle-defender-survives;
 }
 
+.battle-animation-cell[data-outcome="mutual"] .battle-animation-visual {
+  animation-name: battle-mutual-attacker;
+}
+
+.battle-animation-cell[data-outcome="mutual"] .battle-defender-ghost {
+  animation-name: battle-mutual-defender;
+}
+
 .battle-impact {
   position: absolute;
-  z-index: 21;
+  z-index: 4;
   top: 50%;
   left: 50%;
   display: block;
