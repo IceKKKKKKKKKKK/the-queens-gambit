@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import {
+  DEFAULT_TIME_CONTROL_MINUTES,
   GameRuleError,
   PIECE_INFO,
   applyPlayerAction,
@@ -22,6 +23,7 @@ import {
   projectGame,
   randomizeSetupDraft,
   setupDraftToLayout,
+  settleExpiredClock,
   validateSideSetup,
   type GameState,
   type Piece,
@@ -56,6 +58,7 @@ function stateWith(pieces: Piece[], turn: Side = "black"): GameState {
     events: [],
     moveNumber: 0,
     replay: null,
+    clock: null,
   };
 }
 
@@ -92,6 +95,139 @@ test("v2 board graph and random layouts satisfy the selected classic rules", () 
   assert.equal(isAllowedSetupPosition("flag", "black", { row: 10, col: 1 }), false);
   assert.equal(isAllowedSetupPosition("mine", "white", { row: 2, col: 0 }), false);
   assert.equal(isAllowedSetupPosition("bomb", "white", { row: 5, col: 0 }), false);
+});
+
+test("new rooms default to a paused twenty-minute clock and the host controls setup time", () => {
+  const initial = createInitialGame();
+  const defaultMs = DEFAULT_TIME_CONTROL_MINUTES * 60 * 1000;
+  assert.equal(initial.clock?.initialMs, defaultMs);
+  assert.deepEqual(initial.clock?.remainingMs, { black: defaultMs, white: defaultMs });
+  assert.equal(initial.clock?.turnStartedAt, null);
+
+  const custom = applyPlayerAction(
+    initial,
+    "black",
+    { type: "set_time_control", minutes: 12 },
+    1_000,
+  );
+  assert.equal(custom.clock?.initialMs, 720_000);
+  assert.deepEqual(custom.clock?.remainingMs, { black: 720_000, white: 720_000 });
+  assert.equal(custom.clock?.turnStartedAt, null);
+  assert.throws(
+    () => applyPlayerAction(custom, "white", { type: "set_time_control", minutes: 10 }, 1_000),
+    (error: unknown) => error instanceof GameRuleError && error.code === "HOST_ONLY_TIME_CONTROL",
+  );
+  assert.throws(
+    () => applyPlayerAction(custom, "black", { type: "set_time_control", minutes: 12 }, 1_000),
+    (error: unknown) => error instanceof GameRuleError && error.code === "NO_STATE_CHANGE",
+  );
+  for (const minutes of [0, 181, 1.5]) {
+    assert.throws(
+      () => applyPlayerAction(custom, "black", { type: "set_time_control", minutes }, 1_000),
+      (error: unknown) => error instanceof GameRuleError && error.code === "INVALID_TIME_CONTROL",
+    );
+  }
+
+  const whiteReady = applyPlayerAction(custom, "white", { type: "ready", value: true }, 2_000);
+  assert.throws(
+    () => applyPlayerAction(whiteReady, "black", { type: "set_time_control", minutes: 10 }, 2_000),
+    (error: unknown) => error instanceof GameRuleError && error.code === "TIME_CONTROL_LOCKED",
+  );
+});
+
+test("the clock starts after both layouts lock and charges only the side that moves", () => {
+  let setup = createInitialGame();
+  setup = applyPlayerAction(setup, "black", { type: "ready", value: true }, 5_000);
+  assert.equal(setup.clock?.turnStartedAt, null);
+  setup = applyPlayerAction(setup, "white", { type: "ready", value: true }, 8_000);
+  assert.equal(setup.phase, "playing");
+  assert.equal(setup.clock?.turnStartedAt, 8_000);
+  assert.deepEqual(setup.clock?.remainingMs, { black: 1_200_000, white: 1_200_000 });
+
+  const timed = stateWith([
+    piece("black-mover", "black", "platoon", 6, 0),
+    piece("white-mover", "white", "platoon", 0, 0),
+  ]);
+  timed.clock = {
+    initialMs: 20_000,
+    remainingMs: { black: 20_000, white: 20_000 },
+    turnStartedAt: 1_000,
+  };
+  assert.throws(
+    () => applyPlayerAction(
+      timed,
+      "white",
+      { type: "move", from: { row: 0, col: 0 }, to: { row: 0, col: 1 } },
+      4_000,
+    ),
+    (error: unknown) => error instanceof GameRuleError && error.code === "NOT_YOUR_TURN",
+  );
+  assert.deepEqual(timed.clock.remainingMs, { black: 20_000, white: 20_000 });
+  assert.equal(timed.clock.turnStartedAt, 1_000);
+  const resigned = applyPlayerAction(timed, "black", { type: "resign" }, 4_000);
+  assert.deepEqual(resigned.clock?.remainingMs, { black: 17_000, white: 20_000 });
+  assert.equal(resigned.clock?.turnStartedAt, null);
+  assert.deepEqual(projectGame(resigned, "spectator", 90_000).clock?.remainingMs, {
+    black: 17_000,
+    white: 20_000,
+  });
+  const afterBlack = applyPlayerAction(
+    timed,
+    "black",
+    { type: "move", from: { row: 6, col: 0 }, to: { row: 6, col: 1 } },
+    6_000,
+  );
+  assert.equal(afterBlack.turn, "white");
+  assert.deepEqual(afterBlack.clock?.remainingMs, { black: 15_000, white: 20_000 });
+  assert.equal(afterBlack.clock?.turnStartedAt, 6_000);
+  assert.deepEqual(projectGame(afterBlack, "spectator", 9_000).clock?.remainingMs, {
+    black: 15_000,
+    white: 17_000,
+  });
+
+  const afterWhite = applyPlayerAction(
+    afterBlack,
+    "white",
+    { type: "move", from: { row: 0, col: 0 }, to: { row: 0, col: 1 } },
+    9_000,
+  );
+  assert.equal(afterWhite.turn, "black");
+  assert.deepEqual(afterWhite.clock?.remainingMs, { black: 15_000, white: 17_000 });
+  assert.equal(afterWhite.clock?.turnStartedAt, 9_000);
+});
+
+test("time expires exactly at zero, prevents the pending move, and remains frozen", () => {
+  const timed = stateWith([
+    piece("black-mover", "black", "platoon", 6, 0),
+    piece("white-mover", "white", "platoon", 0, 0),
+  ]);
+  timed.clock = {
+    initialMs: 5_000,
+    remainingMs: { black: 5_000, white: 5_000 },
+    turnStartedAt: 1_000,
+  };
+  assert.equal(settleExpiredClock(timed, 5_999), false);
+  assert.equal(projectGame(timed, "black", 5_999).clock?.remainingMs.black, 1);
+
+  const result = applyPlayerAction(
+    timed,
+    "black",
+    { type: "move", from: { row: 6, col: 0 }, to: { row: 6, col: 1 } },
+    6_000,
+  );
+  assert.equal(result.phase, "finished");
+  assert.equal(result.winner, "white");
+  assert.equal(result.finishReason, "timeout");
+  assert.equal(result.moveNumber, 0);
+  assert.equal(result.pieces.find((candidate) => candidate.id === "black-mover")?.col, 0);
+  assert.deepEqual(result.clock?.remainingMs, { black: 0, white: 5_000 });
+  assert.equal(result.clock?.turnStartedAt, null);
+  assert.equal(result.events.at(-1)?.result, "timeout");
+  assert.deepEqual(projectGame(result, "spectator", 99_000).clock?.remainingMs, {
+    black: 0,
+    white: 5_000,
+  });
+  expectRuleError(result, "black", { type: "resign" }, "GAME_FINISHED");
 });
 
 test("camp motion marks only the moving attacker and its camp station", () => {

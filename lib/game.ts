@@ -1,4 +1,7 @@
 export const RULES_VERSION = "classic-duel-dark-v2";
+export const DEFAULT_TIME_CONTROL_MINUTES = 20;
+export const MIN_TIME_CONTROL_MINUTES = 1;
+export const MAX_TIME_CONTROL_MINUTES = 180;
 
 export type Side = "black" | "white";
 export type Viewer = Side | "spectator";
@@ -49,7 +52,19 @@ export interface PublicEvent {
   actor: Side;
   from?: Position;
   to?: Position;
-  result: BattleResult | "ready" | "unready" | "resigned" | "game_started";
+  result: BattleResult | "ready" | "unready" | "resigned" | "game_started" | "timeout";
+}
+
+export interface GameClock {
+  initialMs: number;
+  remainingMs: Record<Side, number>;
+  turnStartedAt: number | null;
+}
+
+export interface PublicClock {
+  initialMs: number;
+  remainingMs: Record<Side, number>;
+  running: Side | null;
 }
 
 export interface ReplayMove {
@@ -81,12 +96,13 @@ export interface GameState {
   firstTurn: Side;
   turn: Side;
   winner: Side | null;
-  finishReason: "flag" | "no_moves" | "resign" | "draw" | null;
+  finishReason: "flag" | "no_moves" | "resign" | "draw" | "timeout" | null;
   revealedFlags: Record<Side, boolean>;
   pieces: Piece[];
   events: PublicEvent[];
   moveNumber: number;
   replay: ReplayArchive | null;
+  clock: GameClock | null;
 }
 
 export interface ProjectedGame {
@@ -102,6 +118,7 @@ export interface ProjectedGame {
   events: PublicEvent[];
   moveNumber: number;
   replay: ReplayArchive | null;
+  clock: PublicClock | null;
 }
 
 export type SetupDraft = Record<string, Position | null>;
@@ -115,6 +132,7 @@ export type PlayerAction =
   | { type: "swap"; from: Position; to: Position }
   | { type: "ready"; value: boolean; layout?: SetupPlacement[] }
   | { type: "move"; from: Position; to: Position }
+  | { type: "set_time_control"; minutes: number }
   | { type: "resign" };
 
 export const PIECE_INFO: Record<
@@ -368,6 +386,7 @@ function makeSidePieces(side: Side): Piece[] {
 }
 
 export function createInitialGame(): GameState {
+  const initialMs = DEFAULT_TIME_CONTROL_MINUTES * 60 * 1000;
   return {
     rulesVersion: RULES_VERSION,
     phase: "setup",
@@ -382,6 +401,11 @@ export function createInitialGame(): GameState {
     events: [],
     moveNumber: 0,
     replay: null,
+    clock: {
+      initialMs,
+      remainingMs: { black: initialMs, white: initialMs },
+      turnStartedAt: null,
+    },
   };
 }
 
@@ -754,6 +778,7 @@ function projectedMovementState(game: ProjectedGame): GameState {
     events: game.events,
     moveNumber: game.moveNumber,
     replay: null,
+    clock: null,
   };
 }
 
@@ -781,6 +806,62 @@ function hasAnyLegalMove(state: GameState, side: Side) {
 function addEvent(state: GameState, event: Omit<PublicEvent, "id">) {
   state.events.push({ id: (state.events.at(-1)?.id ?? 0) + 1, ...event });
   state.events = state.events.slice(-16);
+}
+
+function clockRemainingAt(state: GameState, side: Side, nowMs: number) {
+  const clock = state.clock;
+  if (!clock) return 0;
+  const stored = Math.max(0, clock.remainingMs[side]);
+  if (
+    state.phase !== "playing" ||
+    state.turn !== side ||
+    clock.turnStartedAt === null
+  ) {
+    return stored;
+  }
+  return Math.max(0, stored - Math.max(0, nowMs - clock.turnStartedAt));
+}
+
+function stopClock(state: GameState) {
+  if (state.clock) state.clock.turnStartedAt = null;
+}
+
+function commitRunningClock(state: GameState, nowMs: number) {
+  if (!state.clock || state.phase !== "playing" || state.clock.turnStartedAt === null) return;
+  state.clock.remainingMs[state.turn] = clockRemainingAt(state, state.turn, nowMs);
+  state.clock.turnStartedAt = nowMs;
+}
+
+export function settleExpiredClock(state: GameState, nowMs = Date.now()) {
+  if (
+    !state.clock ||
+    state.phase !== "playing" ||
+    state.clock.turnStartedAt === null ||
+    clockRemainingAt(state, state.turn, nowMs) > 0
+  ) {
+    return false;
+  }
+  const timedOut = state.turn;
+  state.clock.remainingMs[timedOut] = 0;
+  state.clock.turnStartedAt = null;
+  state.phase = "finished";
+  state.winner = otherSide(timedOut);
+  state.finishReason = "timeout";
+  addEvent(state, { actor: timedOut, result: "timeout" });
+  return true;
+}
+
+function projectClock(state: GameState, nowMs: number): PublicClock | null {
+  if (!state.clock) return null;
+  return {
+    initialMs: state.clock.initialMs,
+    remainingMs: {
+      black: clockRemainingAt(state, "black", nowMs),
+      white: clockRemainingAt(state, "white", nowMs),
+    },
+    running:
+      state.phase === "playing" && state.clock.turnStartedAt !== null ? state.turn : null,
+  };
 }
 
 function clonePiece(piece: Piece): Piece {
@@ -962,9 +1043,40 @@ function applyMove(state: GameState, side: Side, from: Position, to: Position) {
   }
 }
 
-export function applyPlayerAction(current: GameState, side: Side, action: PlayerAction) {
+export function applyPlayerAction(
+  current: GameState,
+  side: Side,
+  action: PlayerAction,
+  nowMs = Date.now(),
+) {
   const state = JSON.parse(JSON.stringify(current)) as GameState;
   if (state.phase === "finished") throw new GameRuleError("GAME_FINISHED");
+
+  if (state.phase === "playing") {
+    if (settleExpiredClock(state, nowMs)) return state;
+    commitRunningClock(state, nowMs);
+  }
+
+  if (action.type === "set_time_control") {
+    if (side !== "black") throw new GameRuleError("HOST_ONLY_TIME_CONTROL");
+    if (state.phase !== "setup") throw new GameRuleError("GAME_ALREADY_STARTED");
+    if (state.ready.black || state.ready.white) throw new GameRuleError("TIME_CONTROL_LOCKED");
+    if (
+      !Number.isInteger(action.minutes) ||
+      action.minutes < MIN_TIME_CONTROL_MINUTES ||
+      action.minutes > MAX_TIME_CONTROL_MINUTES
+    ) {
+      throw new GameRuleError("INVALID_TIME_CONTROL");
+    }
+    const initialMs = action.minutes * 60 * 1000;
+    if (state.clock?.initialMs === initialMs) throw new GameRuleError("NO_STATE_CHANGE");
+    state.clock = {
+      initialMs,
+      remainingMs: { black: initialMs, white: initialMs },
+      turnStartedAt: null,
+    };
+    return state;
+  }
 
   if (action.type === "randomize") {
     if (state.phase !== "setup") throw new GameRuleError("GAME_ALREADY_STARTED");
@@ -1013,6 +1125,13 @@ export function applyPlayerAction(current: GameState, side: Side, action: Player
       state.phase = "playing";
       state.turn = state.firstTurn;
       state.replay = createReplayArchive(state);
+      if (state.clock) {
+        state.clock.remainingMs = {
+          black: state.clock.initialMs,
+          white: state.clock.initialMs,
+        };
+        state.clock.turnStartedAt = nowMs;
+      }
       addEvent(state, { actor: state.firstTurn, result: "game_started" });
     }
     return state;
@@ -1024,15 +1143,21 @@ export function applyPlayerAction(current: GameState, side: Side, action: Player
     state.phase = "finished";
     state.winner = otherSide(side);
     state.finishReason = "resign";
+    stopClock(state);
     addEvent(state, { actor: side, result: "resigned" });
     return state;
   }
 
   applyMove(state, side, action.from, action.to);
+  if (state.phase === "playing") {
+    if (state.clock) state.clock.turnStartedAt = nowMs;
+  } else {
+    stopClock(state);
+  }
   return state;
 }
 
-export function projectGame(state: GameState, viewer: Viewer): ProjectedGame {
+export function projectGame(state: GameState, viewer: Viewer, nowMs = Date.now()): ProjectedGame {
   const canSeeReplay = viewer === "spectator" || state.phase === "finished";
   const availableReplay =
     state.phase === "setup" ? null : state.replay ?? createReplayArchive(state);
@@ -1073,5 +1198,6 @@ export function projectGame(state: GameState, viewer: Viewer): ProjectedGame {
     events: state.events.map((event) => ({ ...event })),
     moveNumber: state.moveNumber,
     replay: canSeeReplay && availableReplay ? cloneReplayArchive(availableReplay) : null,
+    clock: projectClock(state, nowMs),
   };
 }

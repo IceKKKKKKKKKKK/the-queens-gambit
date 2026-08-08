@@ -91,3 +91,25 @@ test("players retain a left-side box containing only their own captured pieces",
   assert.match(css, /\.tray-piece\.captured-piece\s*\{/);
   assert.match(css, /\.captured-piece-empty\s*\{/);
 });
+
+test("both sides have a responsive server-backed clock and only the host can edit setup time", async () => {
+  const [component, css, game] = await Promise.all([
+    readFile(new URL("../app/GameApp.tsx", import.meta.url), "utf8"),
+    readFile(new URL("../app/globals.css", import.meta.url), "utf8"),
+    readFile(new URL("../lib/game.ts", import.meta.url), "utf8"),
+  ]);
+
+  assert.match(component, /room\.viewer === "black"/);
+  assert.match(component, /type:\s*"set_time_control"/);
+  assert.match(component, /每方限时/);
+  assert.match(component, /playerClock\(topSide\)/);
+  assert.match(component, /playerClock\(bottomSide\)/);
+  assert.match(component, /performance\.now\(\)/);
+  assert.match(component, /用时耗尽/);
+  assert.match(css, /\.player-clock\s*\{[\s\S]*font-variant-numeric:\s*tabular-nums/);
+  assert.match(css, /\.player-strip\s*\{[\s\S]*grid-template-columns:\s*1fr auto 1fr/);
+  assert.match(css, /\.time-control-form\s*\{/);
+  assert.match(css, /\.activity-panel\s*\{[\s\S]*?order:\s*3;[\s\S]*?grid-column:\s*auto;/);
+  assert.match(game, /DEFAULT_TIME_CONTROL_MINUTES = 20/);
+  assert.match(game, /finishReason = "timeout"/);
+});

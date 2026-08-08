@@ -4,6 +4,8 @@ import { useEffect, useMemo, useRef, useState, type DragEvent } from "react";
 import {
   CAMPS,
   HEADQUARTERS,
+  MAX_TIME_CONTROL_MINUTES,
+  MIN_TIME_CONTROL_MINUTES,
   PIECE_INFO,
   applySetupDraftPlacement,
   boardCoordinate,
@@ -93,6 +95,9 @@ const ERROR_TEXT: Record<string, string> = {
   GAME_NOT_STARTED: "对局尚未开始，不能移动棋子。",
   GAME_ALREADY_STARTED: "对局已经开始，不能再调整阵型。",
   GAME_FINISHED: "本局已经结束。",
+  HOST_ONLY_TIME_CONTROL: "只有创建房间的黑方可以修改本局限时。",
+  TIME_CONTROL_LOCKED: "双方一旦有人锁定阵型，本局限时就不能再修改。",
+  INVALID_TIME_CONTROL: `限时必须是 ${MIN_TIME_CONTROL_MINUTES}–${MAX_TIME_CONTROL_MINUTES} 分钟的整数。`,
   NOT_YOUR_TURN: "现在是对手回合，不能移动棋子。",
   POSITION_OUT_OF_BOUNDS: "目标位置不在棋盘内。",
   NO_PIECE_AT_SOURCE: "请先从棋盒或棋盘选择一枚自己的棋子。",
@@ -131,6 +136,14 @@ function isPlayer(viewer: Viewer): viewer is Side {
 
 function sideName(side: Side) {
   return side === "black" ? "黑方" : "白方";
+}
+
+function formatClock(remainingMs: number) {
+  const safeMs = Number.isFinite(remainingMs) ? Math.max(0, remainingMs) : 0;
+  const totalSeconds = Math.ceil(safeMs / 1000);
+  const minutes = Math.floor(totalSeconds / 60);
+  const seconds = totalSeconds % 60;
+  return `${String(minutes).padStart(2, "0")}:${String(seconds).padStart(2, "0")}`;
 }
 
 function roomTokenKey(code: string) {
@@ -254,6 +267,7 @@ function eventText(event: PublicEvent) {
   if (event.result === "unready") return `${actor}撤销了确认`;
   if (event.result === "game_started") return `${actor}获得先手`;
   if (event.result === "resigned") return `${actor}认输`;
+  if (event.result === "timeout") return `${actor}用时耗尽`;
   const path = event.from && event.to ? `${boardCoordinate(event.from)} → ${boardCoordinate(event.to)}` : "";
   if (event.result === "move") return `${actor}移动 · ${path}`;
   if (event.result === "attacker_survives") return `${actor}进攻成功 · ${path}`;
@@ -266,6 +280,7 @@ function finishReasonText(reason: ProjectedGame["finishReason"]) {
   if (reason === "flag") return "夺得军旗";
   if (reason === "no_moves") return "对方无棋可走";
   if (reason === "resign") return "认输结束";
+  if (reason === "timeout") return "用时耗尽";
   return "和棋";
 }
 
@@ -669,6 +684,8 @@ export default function GameApp({ hasRoom = false }: { hasRoom?: boolean }) {
   const [toast, setToast] = useState<string | null>(null);
   const [rulesOpen, setRulesOpen] = useState(false);
   const [replayIndex, setReplayIndex] = useState<number | null>(null);
+  const [clockTick, setClockTick] = useState(0);
+  const [clockAnchor, setClockAnchor] = useState(0);
   const [connection, setConnection] = useState<"live" | "syncing" | "offline">("live");
   const roomRef = useRef<RoomEnvelope | null>(null);
   const roomSessionRef = useRef(0);
@@ -692,6 +709,19 @@ export default function GameApp({ hasRoom = false }: { hasRoom?: boolean }) {
   useEffect(() => {
     roomRef.current = room;
   }, [room]);
+
+  useEffect(() => {
+    if (
+      !room?.snapshot.clock?.running ||
+      room.snapshot.phase !== "playing"
+    ) {
+      return;
+    }
+    const updateClock = () => setClockTick(performance.now());
+    updateClock();
+    const timer = window.setInterval(updateClock, 250);
+    return () => window.clearInterval(timer);
+  }, [room?.code, room?.snapshot.clock?.running, room?.snapshot.phase]);
 
   useEffect(() => {
     if (!setupDraftState) return;
@@ -779,6 +809,9 @@ export default function GameApp({ hasRoom = false }: { hasRoom?: boolean }) {
     } else {
       setSetupDraftState(null);
     }
+    const receivedAt = performance.now();
+    setClockAnchor(receivedAt);
+    setClockTick(receivedAt);
     roomRef.current = next;
     setRoom(next);
     return true;
@@ -792,6 +825,8 @@ export default function GameApp({ hasRoom = false }: { hasRoom?: boolean }) {
     setSetupDraftState(null);
     setRulesOpen(false);
     setReplayIndex(null);
+    setClockAnchor(0);
+    setClockTick(0);
     roomRef.current = null;
     setRoom(null);
   }
@@ -1418,6 +1453,32 @@ export default function GameApp({ hasRoom = false }: { hasRoom?: boolean }) {
   const replayIsPartial = Boolean(game.replay?.partial || replayHasGap);
   const topSide: Side = orientationFlipped ? "black" : "white";
   const bottomSide: Side = topSide === "black" ? "white" : "black";
+  const displayedClockRemaining = (side: Side) => {
+    if (!game.clock) return null;
+    const elapsed =
+      game.phase === "playing" && game.clock.running === side
+        ? Math.max(0, clockTick - clockAnchor)
+        : 0;
+    return Math.max(0, game.clock.remainingMs[side] - elapsed);
+  };
+  const playerClock = (side: Side) => {
+    const remaining = displayedClockRemaining(side);
+    if (remaining === null) {
+      return <span className="player-clock is-untimed" aria-label={`${sideName(side)}不限时`}>不限时</span>;
+    }
+    const low = game.phase === "playing" && game.clock?.running === side && remaining <= 60_000;
+    const text = formatClock(remaining);
+    return (
+      <time
+        className={`player-clock ${low ? "is-low" : ""} ${remaining <= 0 ? "is-expired" : ""}`}
+        aria-label={`${sideName(side)}剩余用时 ${text}`}
+      >
+        {text}
+      </time>
+    );
+  };
+  const timeControlMinutes = game.clock ? Math.round(game.clock.initialMs / 60_000) : null;
+  const timeControlLocked = game.ready.black || game.ready.white;
   const aliveCount = (side: Side) => game.pieces.filter((piece) => piece.alive && piece.side === side).length;
   const replayAliveCount = (side: Side) =>
     displayedPieces.filter((piece) => piece.alive && piece.side === side).length;
@@ -1477,6 +1538,48 @@ export default function GameApp({ hasRoom = false }: { hasRoom?: boolean }) {
       <section className={`game-shell ${game.phase === "setup" ? "is-setup" : ""}`}>
         <aside className="side-panel setup-panel">
           <h2>{statusText(room, placedSetupCount)}</h2>
+          {game.phase === "setup" && timeControlMinutes !== null ? (
+            <div className="time-control-card">
+              {room.viewer === "black" ? (
+                <form
+                  className="time-control-form"
+                  key={`${room.code}-${game.clock?.initialMs}`}
+                  onSubmit={(event) => {
+                    event.preventDefault();
+                    const minutes = Number(new FormData(event.currentTarget).get("minutes"));
+                    if (!Number.isInteger(minutes)) {
+                      showToast(ERROR_TEXT.INVALID_TIME_CONTROL);
+                      return;
+                    }
+                    void performAction({ type: "set_time_control", minutes });
+                  }}
+                >
+                  <label htmlFor="time-control-minutes">每方限时</label>
+                  <div className="time-control-input">
+                    <input
+                      id="time-control-minutes"
+                      name="minutes"
+                      type="number"
+                      min={MIN_TIME_CONTROL_MINUTES}
+                      max={MAX_TIME_CONTROL_MINUTES}
+                      step="1"
+                      defaultValue={timeControlMinutes}
+                      disabled={busy || timeControlLocked}
+                      inputMode="numeric"
+                    />
+                    <span>分钟</span>
+                  </div>
+                  <button type="submit" disabled={busy || timeControlLocked}>应用</button>
+                </form>
+              ) : (
+                <div className="time-control-summary">
+                  <span>每方限时</span>
+                  <strong>{timeControlMinutes} 分钟</strong>
+                </div>
+              )}
+              <small>{timeControlLocked ? "限时已锁定" : room.viewer === "black" ? "房主可在确认布阵前修改" : "由房主设置"}</small>
+            </div>
+          ) : null}
           {viewerSide && game.phase === "setup" ? (
             <PieceTray
               pieces={trayPieces}
@@ -1526,7 +1629,7 @@ export default function GameApp({ hasRoom = false }: { hasRoom?: boolean }) {
 
         <section className="board-column">
           <div className={`player-strip ${!activeReplayFrame && game.turn === topSide && game.phase === "playing" ? "active" : ""}`}>
-            <span>{sideName(topSide)}</span><span>{boardPieceCount(topSide)} / 25</span>
+            <span>{sideName(topSide)}</span>{playerClock(topSide)}<span>{boardPieceCount(topSide)} / 25</span>
           </div>
           {highlightedMove?.from && highlightedMove.to ? (
             <p className="last-move-summary">
@@ -1552,13 +1655,13 @@ export default function GameApp({ hasRoom = false }: { hasRoom?: boolean }) {
             onPieceDragEnd={handlePieceDragEnd}
           />
           <div className={`player-strip board-player-bottom ${!activeReplayFrame && game.turn === bottomSide && game.phase === "playing" ? "active" : ""}`}>
-            <span>{sideName(bottomSide)}</span><span>{boardPieceCount(bottomSide)} / 25</span>
+            <span>{sideName(bottomSide)}</span>{playerClock(bottomSide)}<span>{boardPieceCount(bottomSide)} / 25</span>
           </div>
           {activeReplayFrame ? (
             <div className="replay-controls" aria-label="复盘控制">
               <div className="replay-progress">
                 <strong>{replayIsPartial ? "部分复盘" : "明棋复盘"}</strong>
-                <span>第 {activeReplayFrame.moveNumber} 手 · {Math.max(0, replayFrames.length - 1)} 手已记录</span>
+                <span>第 {activeReplayFrame.moveNumber} 手 · {Math.max(0, replayFrames.length - 1)} 手已记录 · {game.clock ? game.phase === "playing" ? "棋钟为实时余时" : "棋钟为终局余时" : "本局不限时"}</span>
               </div>
               <div className="replay-buttons">
                 <button type="button" onClick={() => setReplayIndex(0)} disabled={replayIndex === 0}>起点</button>
@@ -1611,7 +1714,7 @@ export default function GameApp({ hasRoom = false }: { hasRoom?: boolean }) {
         <div className="rules-list">
           <section>
             <h3>目标</h3>
-            <p>夺取对方军旗、使对方无合法着法，或对方认输即可获胜。没有自动和棋或回合上限。</p>
+            <p>夺取对方军旗、使对方无合法着法、用尽对局时间，或对方认输即可获胜。没有自动和棋或回合上限。</p>
           </section>
           <section>
             <h3>暗棋</h3>
@@ -1648,6 +1751,10 @@ export default function GameApp({ hasRoom = false }: { hasRoom?: boolean }) {
           <section>
             <h3>复盘</h3>
             <p>观战者可以随时查看双方明棋回放；两名玩家需等本局结束后再查看，避免暗子身份提前暴露。</p>
+          </section>
+          <section>
+            <h3>用时</h3>
+            <p>默认每方 20 分钟，房主可在任何一方确认布阵前修改。对局开始后只计算当前行动方的时间；剩余时间归零立即判负。</p>
           </section>
         </div>
       </dialog>

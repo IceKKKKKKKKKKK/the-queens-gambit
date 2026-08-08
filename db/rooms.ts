@@ -1,5 +1,13 @@
 import { env } from "cloudflare:workers";
-import { RULES_VERSION, type GameState, type Side, type Viewer } from "../lib/game";
+import {
+  DEFAULT_TIME_CONTROL_MINUTES,
+  MAX_TIME_CONTROL_MINUTES,
+  MIN_TIME_CONTROL_MINUTES,
+  RULES_VERSION,
+  type GameState,
+  type Side,
+  type Viewer,
+} from "../lib/game";
 
 export interface RoomRow {
   code: string;
@@ -149,9 +157,42 @@ export function parseRoomState(row: RoomRow) {
   const state = JSON.parse(row.state_json) as GameState & {
     noCombatPly?: number;
     replay?: GameState["replay"];
+    clock?: GameState["clock"];
   };
   state.rulesVersion = RULES_VERSION;
   state.replay ??= null;
+  if (state.clock === undefined) {
+    if (state.phase === "setup") {
+      const initialMs = DEFAULT_TIME_CONTROL_MINUTES * 60 * 1000;
+      state.clock = {
+        initialMs,
+        remainingMs: { black: initialMs, white: initialMs },
+        turnStartedAt: null,
+      };
+    } else {
+      // Games already in progress before clocks were introduced remain untimed.
+      state.clock = null;
+    }
+  } else if (state.clock) {
+    const minimumMs = MIN_TIME_CONTROL_MINUTES * 60 * 1000;
+    const maximumMs = MAX_TIME_CONTROL_MINUTES * 60 * 1000;
+    const initialMs = Number.isFinite(state.clock.initialMs)
+      ? Math.min(maximumMs, Math.max(minimumMs, Math.round(state.clock.initialMs)))
+      : DEFAULT_TIME_CONTROL_MINUTES * 60 * 1000;
+    state.clock.initialMs = initialMs;
+    const normalizedRemaining = (value: unknown) =>
+      typeof value === "number" && Number.isFinite(value)
+        ? Math.min(initialMs, Math.max(0, value))
+        : initialMs;
+    state.clock.remainingMs = {
+      black: normalizedRemaining(state.clock.remainingMs?.black),
+      white: normalizedRemaining(state.clock.remainingMs?.white),
+    };
+    state.clock.turnStartedAt = Number.isFinite(state.clock.turnStartedAt)
+      ? state.clock.turnStartedAt
+      : null;
+    if (state.phase !== "playing") state.clock.turnStartedAt = null;
+  }
   delete state.noCombatPly;
   return state as GameState;
 }

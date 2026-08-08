@@ -450,6 +450,90 @@ summary:focus-visible {
   gap: 8px;
 }
 
+.time-control-card {
+  display: grid;
+  padding: 12px;
+  gap: 9px;
+  border: 1px solid var(--line);
+  border-radius: 14px;
+  background: var(--white);
+}
+
+.time-control-form {
+  display: grid;
+  grid-template-columns: 1fr auto auto;
+  align-items: center;
+  gap: 8px;
+}
+
+.time-control-form label,
+.time-control-summary span {
+  font-size: 10px;
+  font-weight: 700;
+}
+
+.time-control-input {
+  display: flex;
+  min-height: 40px;
+  align-items: center;
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  overflow: hidden;
+}
+
+.time-control-input input {
+  width: 52px;
+  min-height: 38px;
+  padding: 0 4px 0 10px;
+  border: 0;
+  outline: 0;
+  background: transparent;
+  color: var(--black);
+  font: 700 12px/1 ui-monospace, "SFMono-Regular", Consolas, monospace;
+}
+
+.time-control-input span {
+  padding-right: 9px;
+  color: var(--muted);
+  font-size: 9px;
+}
+
+.time-control-form button {
+  min-width: 52px;
+  min-height: 40px;
+  border: 1px solid var(--black);
+  border-radius: 10px;
+  background: var(--black);
+  color: var(--white);
+  cursor: pointer;
+  font-size: 9px;
+  font-weight: 700;
+}
+
+.time-control-form button:disabled,
+.time-control-input:has(input:disabled) {
+  cursor: default;
+  opacity: 0.42;
+}
+
+.time-control-summary {
+  display: flex;
+  min-height: 32px;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.time-control-summary strong {
+  font: 700 12px/1 ui-monospace, "SFMono-Regular", Consolas, monospace;
+}
+
+.time-control-card small {
+  color: var(--muted);
+  font-size: 9px;
+  line-height: 1.4;
+}
+
 .piece-box {
   padding: 12px;
   border: 1px solid var(--line);
@@ -683,10 +767,10 @@ summary:focus-visible {
 }
 
 .player-strip {
-  display: flex;
+  display: grid;
   min-height: 38px;
+  grid-template-columns: 1fr auto 1fr;
   align-items: center;
-  justify-content: space-between;
   padding: 0 12px;
   border: 1px solid var(--line);
   border-radius: 12px;
@@ -703,6 +787,40 @@ summary:focus-visible {
 .player-strip:last-child,
 .player-strip.board-player-bottom {
   margin-top: 10px;
+}
+
+.player-strip > :last-child {
+  justify-self: end;
+}
+
+.player-clock {
+  min-width: 6ch;
+  justify-self: center;
+  color: var(--black);
+  font-family: ui-monospace, "SFMono-Regular", Consolas, monospace;
+  font-size: 14px;
+  font-variant-numeric: tabular-nums;
+  font-weight: 750;
+  letter-spacing: 0.02em;
+  text-align: center;
+}
+
+.player-strip.active .player-clock {
+  color: var(--white);
+}
+
+.player-clock.is-low {
+  font-weight: 900;
+  text-decoration: underline;
+  text-decoration-thickness: 1.5px;
+  text-underline-offset: 3px;
+}
+
+.player-clock.is-untimed {
+  color: var(--muted);
+  font-family: inherit;
+  font-size: 9px;
+  letter-spacing: 0;
 }
 
 .player-strip.active {
@@ -1565,6 +1683,7 @@ summary:focus-visible {
 
   .activity-panel {
     order: 3;
+    grid-column: auto;
   }
 
   .side-panel {
@@ -1587,6 +1706,12 @@ summary:focus-visible {
   }
 
   .replay-buttons button {
+    min-height: 44px;
+  }
+
+  .time-control-input,
+  .time-control-input input,
+  .time-control-form button {
     min-height: 44px;
   }
 

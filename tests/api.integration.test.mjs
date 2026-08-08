@@ -189,6 +189,88 @@ test("room API preserves role-based visibility, identity, concurrency, and limit
   assert.equal(blackPayload.includes(candidates[0]), false);
   assert.equal(blackPayload.includes(candidates[1]), false);
 
+  const clockRoom = await createRoom(origin);
+  assert.equal(clockRoom.status, 201);
+  assert.equal(clockRoom.body.snapshot.clock.initialMs, 1_200_000);
+  assert.deepEqual(clockRoom.body.snapshot.clock.remainingMs, {
+    black: 1_200_000,
+    white: 1_200_000,
+  });
+  assert.equal(clockRoom.body.snapshot.clock.running, null);
+  const customClock = await postAction(
+    origin,
+    clockRoom.body.code,
+    clockRoom.body.playerToken,
+    0,
+    { type: "set_time_control", minutes: 7 },
+  );
+  assert.equal(customClock.status, 200);
+  assert.equal(customClock.body.version, 1);
+  assert.equal(customClock.body.snapshot.clock.initialMs, 420_000);
+  assert.deepEqual(customClock.body.snapshot.clock.remainingMs, {
+    black: 420_000,
+    white: 420_000,
+  });
+  const duplicateClock = await postAction(
+    origin,
+    clockRoom.body.code,
+    clockRoom.body.playerToken,
+    1,
+    { type: "set_time_control", minutes: 7 },
+  );
+  assert.equal(duplicateClock.status, 422);
+  assert.equal(duplicateClock.body.error, "NO_STATE_CHANGE");
+  const invalidClock = await postAction(
+    origin,
+    clockRoom.body.code,
+    clockRoom.body.playerToken,
+    1,
+    { type: "set_time_control", minutes: 0 },
+  );
+  assert.equal(invalidClock.status, 422);
+  assert.equal(invalidClock.body.error, "INVALID_TIME_CONTROL");
+  const noTokenClock = await postJson(
+    `${origin}/api/rooms/${clockRoom.body.code}/actions`,
+    { expectedVersion: 1, action: { type: "set_time_control", minutes: 8 } },
+  );
+  assert.equal(noTokenClock.status, 401);
+
+  const clockWhiteToken = opaqueToken();
+  const clockClaim = await postJson(`${origin}/api/rooms/${clockRoom.body.code}/claim`, {
+    inviteToken: clockRoom.body.opponentInviteToken,
+    playerToken: clockWhiteToken,
+  });
+  assert.equal(clockClaim.status, 200);
+  assert.equal(clockClaim.body.snapshot.clock.initialMs, 420_000);
+  const whiteClockChange = await postAction(
+    origin,
+    clockRoom.body.code,
+    clockWhiteToken,
+    clockClaim.body.version,
+    { type: "set_time_control", minutes: 8 },
+  );
+  assert.equal(whiteClockChange.status, 422);
+  assert.equal(whiteClockChange.body.error, "HOST_ONLY_TIME_CONTROL");
+  const clockReady = await postAction(
+    origin,
+    clockRoom.body.code,
+    clockRoom.body.playerToken,
+    clockClaim.body.version,
+    { type: "ready", value: true },
+  );
+  assert.equal(clockReady.status, 200);
+  const lockedClockChange = await postAction(
+    origin,
+    clockRoom.body.code,
+    clockRoom.body.playerToken,
+    clockReady.body.version,
+    { type: "set_time_control", minutes: 8 },
+  );
+  assert.equal(lockedClockChange.status, 422);
+  assert.equal(lockedClockChange.body.error, "TIME_CONTROL_LOCKED");
+  const spectatorClock = await requestJson(`${origin}/api/rooms/${clockRoom.body.code}`);
+  assert.equal(spectatorClock.body.snapshot.clock.initialMs, 420_000);
+
   const validationRoom = await createRoom(origin);
   assert.equal(validationRoom.status, 201);
   const validationCode = validationRoom.body.code;

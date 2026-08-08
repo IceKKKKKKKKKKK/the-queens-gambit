@@ -1,10 +1,11 @@
-import { projectGame } from "../../../../lib/game";
+import { projectGame, settleExpiredClock } from "../../../../lib/game";
 import {
   bearerToken,
   getRoom,
   isExpiredRoom,
   normalizeRoomCode,
   parseRoomState,
+  updateRoomState,
   viewerForToken,
 } from "../../../../db/rooms";
 
@@ -39,18 +40,55 @@ export async function GET(
       return Response.json({ error: "INVALID_PLAYER_TOKEN" }, { status: 401, headers: responseHeaders });
     }
 
+    let activeRow = row;
+    let state = parseRoomState(activeRow);
+    let nowMs = Date.now();
+    let clockStateResolved = false;
+    for (let attempt = 0; attempt < 3; attempt += 1) {
+      if (!settleExpiredClock(state, nowMs)) {
+        clockStateResolved = true;
+        break;
+      }
+      if (await updateRoomState(activeRow, state, activeRow.version)) {
+        activeRow = { ...activeRow, version: activeRow.version + 1 };
+        clockStateResolved = true;
+        break;
+      }
+      const refreshed = await getRoom(code);
+      if (!refreshed || isExpiredRoom(refreshed)) {
+        return Response.json(
+          { error: refreshed ? "ROOM_EXPIRED" : "ROOM_NOT_FOUND" },
+          { status: refreshed ? 410 : 404, headers: responseHeaders },
+        );
+      }
+      activeRow = refreshed;
+      state = parseRoomState(activeRow);
+      nowMs = Date.now();
+    }
+    if (!clockStateResolved) {
+      return Response.json(
+        { error: "VERSION_CONFLICT" },
+        { status: 409, headers: responseHeaders },
+      );
+    }
+
     const sinceValue = new URL(request.url).searchParams.get("since");
     const since = sinceValue === null ? null : Number(sinceValue);
-    if (since !== null && Number.isInteger(since) && since === row.version) {
+    if (
+      state.phase !== "playing" &&
+      since !== null &&
+      Number.isInteger(since) &&
+      since === activeRow.version
+    ) {
       return new Response(null, { status: 204, headers: responseHeaders });
     }
 
     return Response.json(
       {
-        code: row.code,
-        version: row.version,
+        code: activeRow.code,
+        version: activeRow.version,
         viewer,
-        snapshot: projectGame(parseRoomState(row), viewer),
+        snapshot: projectGame(state, viewer, nowMs),
       },
       { headers: responseHeaders },
     );

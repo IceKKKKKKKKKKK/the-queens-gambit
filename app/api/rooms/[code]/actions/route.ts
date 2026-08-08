@@ -46,6 +46,9 @@ function parseAction(value: unknown): PlayerAction | null {
   if (action.type === "randomize" || action.type === "resign") {
     return { type: action.type };
   }
+  if (action.type === "set_time_control" && Number.isInteger(action.minutes)) {
+    return { type: "set_time_control", minutes: action.minutes as number };
+  }
   if (action.type === "ready" && typeof action.value === "boolean") {
     if (action.layout === undefined) return { type: "ready", value: action.value };
     if (!action.value || !Array.isArray(action.layout) || action.layout.length > 25) return null;
@@ -109,8 +112,9 @@ export async function POST(
     }
 
     let nextState;
+    const nowMs = Date.now();
     try {
-      nextState = applyPlayerAction(parseRoomState(row), viewer, action);
+      nextState = applyPlayerAction(parseRoomState(row), viewer, action, nowMs);
     } catch (error) {
       if (error instanceof GameRuleError) {
         return Response.json({ error: error.code }, { status: 422, headers: responseHeaders });
@@ -127,7 +131,7 @@ export async function POST(
         code: row.code,
         version: (expectedVersion as number) + 1,
         viewer,
-        snapshot: projectGame(nextState, viewer),
+        snapshot: projectGame(nextState, viewer, nowMs),
       },
       { headers: responseHeaders },
     );
