@@ -902,7 +902,7 @@ export function projectGame(state: GameState, viewer: Viewer): ProjectedGame {
     pieces: state.pieces
       .map((piece) => {
         const flagRevealed = piece.type === "flag" && state.revealedFlags[piece.side];
-        const canSeeType = state.phase === "finished" || viewer === piece.side || flagRevealed;
+        const canSeeType = viewer === "spectator" || state.phase === "finished" || viewer === piece.side || flagRevealed;
         const hidesSetupIdentity = state.phase === "setup" && viewer !== piece.side;
         return {
           id: hidesSetupIdentity

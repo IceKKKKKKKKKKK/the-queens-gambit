@@ -97,7 +97,7 @@ function ownLayout(snapshot, side) {
     .sort((first, second) => first.id.localeCompare(second.id));
 }
 
-test("room API preserves hidden information, identity, concurrency, and limits", { timeout: 90_000 }, async (t) => {
+test("room API preserves role-based visibility, identity, concurrency, and limits", { timeout: 90_000 }, async (t) => {
   const port = await openPort();
   const origin = `http://localhost:${port}`;
   const logs = { value: "" };
@@ -122,7 +122,9 @@ test("room API preserves hidden information, identity, concurrency, and limits",
   const spectator = await requestJson(`${origin}/api/rooms/${code}`);
   assert.equal(spectator.status, 200);
   assert.equal(spectator.body.viewer, "spectator");
-  assert.equal(spectator.body.snapshot.pieces.some((piece) => piece.type), false);
+  assert.equal(spectator.body.snapshot.pieces.filter((piece) => piece.type).length, 50);
+  assert.equal(spectator.body.snapshot.pieces.filter((piece) => piece.side === "black" && piece.type).length, 25);
+  assert.equal(spectator.body.snapshot.pieces.filter((piece) => piece.side === "white" && piece.type).length, 25);
 
   const black = await requestJson(`${origin}/api/rooms/${code}`, {
     headers: { Authorization: `Bearer ${blackToken}` },
@@ -170,6 +172,8 @@ test("room API preserves hidden information, identity, concurrency, and limits",
   const retry = await postJson(`${origin}/api/rooms/${code}/claim`, { inviteToken, playerToken: winnerToken });
   assert.equal(retry.status, 200);
   assert.equal(retry.body.version, winnerVersion);
+  assert.equal(retry.body.snapshot.pieces.filter((piece) => piece.side === "white" && piece.type).length, 25);
+  assert.equal(retry.body.snapshot.pieces.filter((piece) => piece.side === "black" && piece.type).length, 0);
   const loserRetry = await postJson(`${origin}/api/rooms/${code}/claim`, {
     inviteToken,
     playerToken: candidates[1 - winnerIndex],

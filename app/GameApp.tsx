@@ -273,7 +273,7 @@ function finishReasonText(reason: ProjectedGame["finishReason"]) {
 function statusText(room: RoomEnvelope, placedCount?: number) {
   const { snapshot, viewer } = room;
   if (snapshot.phase === "setup") {
-    if (viewer === "spectator") return "双方正在秘密布阵";
+    if (viewer === "spectator") return "双方正在布阵 · 全部棋型可见";
     if (snapshot.ready[viewer]) return "阵型已锁定，等待对手";
     if (placedCount !== undefined && placedCount < 25) return `还需放置 ${25 - placedCount} 枚棋子`;
     return "拖动或点选棋子调整阵型";
@@ -1283,7 +1283,7 @@ export default function GameApp({ hasRoom = false }: { hasRoom?: boolean }) {
     const link = kind === "player" && inviteToken ? `${base}#invite=${inviteToken}` : `${base}&watch=1`;
     try {
       await navigator.clipboard.writeText(link);
-      showToast(kind === "player" ? "玩家邀请已复制" : "观战链接已复制");
+      showToast(kind === "player" ? "玩家邀请已复制" : "明牌观战链接已复制");
     } catch {
       showToast("复制失败，请允许剪贴板权限后重试。");
     }
@@ -1341,7 +1341,7 @@ export default function GameApp({ hasRoom = false }: { hasRoom?: boolean }) {
         </button>
         <div className="room-identity">
           <span className="room-code">{displayCode(room.code)}</span>
-          <span className={`connection ${connection}`}>{connection === "offline" ? "正在重连" : room.viewer === "spectator" ? "观战模式" : sideName(room.viewer)}</span>
+          <span className={`connection ${connection}`}>{connection === "offline" ? "正在重连" : room.viewer === "spectator" ? "明牌观战" : sideName(room.viewer)}</span>
         </div>
         <div className="header-actions">
           <button
@@ -1434,7 +1434,7 @@ export default function GameApp({ hasRoom = false }: { hasRoom?: boolean }) {
             {room.viewer === "black" && inviteToken && !game.joined.white ? (
               <button className="button primary compact" type="button" onClick={() => void copyLink("player")}>复制玩家邀请</button>
             ) : null}
-            <button className="button secondary compact" type="button" onClick={() => void copyLink("spectator")}>复制观战链接</button>
+            <button className="button secondary compact" type="button" onClick={() => void copyLink("spectator")}>复制明牌观战链接</button>
           </div>
           <div className="activity-block">
             <div className="panel-title-row"><strong>战报</strong><span>{game.moveNumber} 手</span></div>
@@ -1473,7 +1473,7 @@ export default function GameApp({ hasRoom = false }: { hasRoom?: boolean }) {
           </section>
           <section>
             <h3>暗棋</h3>
-            <p>对手棋型在本局结束前保持隐藏，已经暴露的军旗除外。</p>
+            <p>两名玩家看不到对手棋型，已经暴露的军旗除外；观战者可以看见双方全部棋型。</p>
           </section>
           <section>
             <h3>布阵</h3>

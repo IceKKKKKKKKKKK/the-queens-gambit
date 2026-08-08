@@ -453,7 +453,21 @@ test("a complete local setup is validated and committed atomically without chang
   assert.equal(validateSideSetup(randomized.pieces, "black"), true);
 });
 
-test("setup projections cannot track swapped hidden pieces into the match", () => {
+test("spectators see both armies while each player sees only their own", () => {
+  const initial = createInitialGame();
+  const spectator = projectGame(initial, "spectator");
+  const black = projectGame(initial, "black");
+  const white = projectGame(initial, "white");
+
+  assert.equal(spectator.pieces.length, 50);
+  assert.equal(spectator.pieces.filter((candidate) => candidate.type).length, 50);
+  assert.equal(black.pieces.filter((candidate) => candidate.side === "black" && candidate.type).length, 25);
+  assert.equal(black.pieces.filter((candidate) => candidate.side === "white" && candidate.type).length, 0);
+  assert.equal(white.pieces.filter((candidate) => candidate.side === "white" && candidate.type).length, 25);
+  assert.equal(white.pieces.filter((candidate) => candidate.side === "black" && candidate.type).length, 0);
+});
+
+test("opponent setup projections cannot track swapped hidden pieces into the match", () => {
   const initial = createInitialGame();
   const swappable = initial.pieces
     .filter(
@@ -462,20 +476,20 @@ test("setup projections cannot track swapped hidden pieces into the match", () =
     .slice(0, 2);
   assert.equal(swappable.length, 2);
 
-  const before = projectGame(initial, "spectator").pieces.filter((candidate) => candidate.side === "black");
+  const before = projectGame(initial, "white").pieces.filter((candidate) => candidate.side === "black");
   const swapped = applyPlayerAction(initial, "black", {
     type: "swap",
     from: swappable[0],
     to: swappable[1],
   });
-  const after = projectGame(swapped, "spectator").pieces.filter((candidate) => candidate.side === "black");
+  const after = projectGame(swapped, "white").pieces.filter((candidate) => candidate.side === "black");
   assert.deepEqual(after, before);
   assert.ok(after.every((candidate) => candidate.id === `black-hidden-${candidate.row}-${candidate.col}`));
 
   let started = applyPlayerAction(swapped, "black", { type: "ready", value: true });
   started = applyPlayerAction(started, "white", { type: "ready", value: true });
   const playingIds = new Set(
-    projectGame(started, "spectator").pieces
+    projectGame(started, "white").pieces
       .filter((candidate) => candidate.side === "black")
       .map((candidate) => candidate.id),
   );
@@ -581,13 +595,18 @@ test("both commanders falling reveals exactly both flags while play continues", 
   assert.equal(result.phase, "playing");
   assert.deepEqual(result.revealedFlags, { black: true, white: true });
   const spectator = projectGame(result, "spectator");
-  assert.deepEqual(
-    spectator.pieces.filter((candidate) => candidate.type).map((candidate) => candidate.type),
-    ["flag", "flag"],
+  assert.equal(spectator.pieces.every((candidate) => candidate.type !== null), true);
+  assert.equal(
+    projectGame(result, "black").pieces.filter((candidate) => candidate.side === "white" && candidate.type).length,
+    1,
+  );
+  assert.equal(
+    projectGame(result, "white").pieces.filter((candidate) => candidate.side === "black" && candidate.type).length,
+    1,
   );
 });
 
-test("combat does not reveal a surviving piece to the opponent or spectators", () => {
+test("combat keeps a survivor hidden from the opponent while spectators retain full visibility", () => {
   const state = stateWith([
     piece("attacker", "black", "commander", 3, 0),
     piece("defender", "white", "platoon", 3, 1),
@@ -604,7 +623,7 @@ test("combat does not reveal a surviving piece to the opponent or spectators", (
   assert.equal(result.events.at(-1)?.result, "attacker_survives");
   assert.equal(projectGame(result, "black").pieces.find((candidate) => candidate.id === "attacker")?.type, "commander");
   assert.equal(projectGame(result, "white").pieces.find((candidate) => candidate.id === "attacker")?.type, null);
-  assert.equal(projectGame(result, "spectator").pieces.find((candidate) => candidate.id === "attacker")?.type, null);
+  assert.equal(projectGame(result, "spectator").pieces.find((candidate) => candidate.id === "attacker")?.type, "commander");
 });
 
 test("v2 has no automatic 70-ply draw", () => {
