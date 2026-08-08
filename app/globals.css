@@ -1523,6 +1523,10 @@ summary:focus-visible {
   border-radius: 50% 50% 0 0;
 }
 
+.board-grid .piece-neck {
+  display: none;
+}
+
 .piece-base {
   position: absolute;
   right: -7%;

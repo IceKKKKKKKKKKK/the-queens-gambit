@@ -57,6 +57,13 @@ test("opponent headquarters replace only the hidden-piece diamond with an outlin
   assert.match(rule, /color:\s*transparent/);
 });
 
+test("board pieces omit the inner arch while tray pieces retain their model", async () => {
+  const css = await readFile(new URL("../app/globals.css", import.meta.url), "utf8");
+
+  assert.match(css, /\.board-grid\s+\.piece-neck\s*\{\s*display:\s*none;\s*\}/);
+  assert.doesNotMatch(css, /(?:^|\})\s*\.piece-neck\s*\{\s*display:\s*none;/m);
+});
+
 test("board coordinates, move markers, and replay controls stay visibly rendered", async () => {
   const [component, css, game] = await Promise.all([
     readFile(new URL("../app/GameApp.tsx", import.meta.url), "utf8"),
