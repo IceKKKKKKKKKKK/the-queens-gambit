@@ -52,6 +52,27 @@ export interface PublicEvent {
   result: BattleResult | "ready" | "unready" | "resigned" | "game_started";
 }
 
+export interface ReplayMove {
+  moveNumber: number;
+  actor: Side;
+  from: Position;
+  to: Position;
+  result: BattleResult;
+}
+
+export interface ReplayArchive {
+  baselineMoveNumber: number;
+  partial: boolean;
+  initialPieces: Piece[];
+  moves: ReplayMove[];
+}
+
+export interface ReplayFrame {
+  moveNumber: number;
+  move: ReplayMove | null;
+  pieces: PublicPiece[];
+}
+
 export interface GameState {
   rulesVersion: typeof RULES_VERSION;
   phase: "setup" | "playing" | "finished";
@@ -65,6 +86,7 @@ export interface GameState {
   pieces: Piece[];
   events: PublicEvent[];
   moveNumber: number;
+  replay: ReplayArchive | null;
 }
 
 export interface ProjectedGame {
@@ -79,6 +101,7 @@ export interface ProjectedGame {
   pieces: PublicPiece[];
   events: PublicEvent[];
   moveNumber: number;
+  replay: ReplayArchive | null;
 }
 
 export type SetupDraft = Record<string, Position | null>;
@@ -154,6 +177,10 @@ export function positionKey(position: Position) {
   return `${position.row},${position.col}`;
 }
 
+export function boardCoordinate(position: Position) {
+  return `${String.fromCharCode(65 + position.col)}${position.row + 1}`;
+}
+
 export function isInsideBoard(position: Position) {
   return (
     Number.isInteger(position.row) &&
@@ -177,6 +204,16 @@ export type CampMotion = {
 export function latestMovementEvent(events: readonly PublicEvent[]) {
   const event = events.at(-1);
   return event?.from && event.to ? event : undefined;
+}
+
+export function latestOpponentMovementEvent(events: readonly PublicEvent[], viewer: Viewer) {
+  return [...events]
+    .reverse()
+    .find(
+      (event) =>
+        Boolean(event.from && event.to) &&
+        (viewer === "spectator" || event.actor !== viewer),
+    );
 }
 
 export function getCampMotionForPosition(
@@ -344,6 +381,7 @@ export function createInitialGame(): GameState {
     pieces: [...makeSidePieces("black"), ...makeSidePieces("white")],
     events: [],
     moveNumber: 0,
+    replay: null,
   };
 }
 
@@ -715,6 +753,7 @@ function projectedMovementState(game: ProjectedGame): GameState {
     })),
     events: game.events,
     moveNumber: game.moveNumber,
+    replay: null,
   };
 }
 
@@ -744,6 +783,100 @@ function addEvent(state: GameState, event: Omit<PublicEvent, "id">) {
   state.events = state.events.slice(-16);
 }
 
+function clonePiece(piece: Piece): Piece {
+  return { ...piece };
+}
+
+function createReplayArchive(state: GameState): ReplayArchive {
+  return {
+    baselineMoveNumber: state.moveNumber,
+    partial: state.moveNumber > 0,
+    initialPieces: state.pieces.map(clonePiece),
+    moves: [],
+  };
+}
+
+function ensureReplayArchive(state: GameState) {
+  state.replay ??= createReplayArchive(state);
+  return state.replay;
+}
+
+function cloneReplayArchive(replay: ReplayArchive): ReplayArchive {
+  return {
+    baselineMoveNumber: replay.baselineMoveNumber,
+    partial: replay.partial,
+    initialPieces: replay.initialPieces.map(clonePiece),
+    moves: replay.moves.map((move) => ({
+      ...move,
+      from: { ...move.from },
+      to: { ...move.to },
+    })),
+  };
+}
+
+function publicReplayPieces(pieces: readonly Piece[]): PublicPiece[] {
+  return pieces.map((piece) => ({
+    ...piece,
+    type: piece.type,
+    flagRevealed: piece.type === "flag",
+  }));
+}
+
+export function buildReplayFrames(replay: ReplayArchive | null): ReplayFrame[] {
+  if (!replay) return [];
+  const pieces = replay.initialPieces.map(clonePiece);
+  const frames: ReplayFrame[] = [
+    {
+      moveNumber: replay.baselineMoveNumber,
+      move: null,
+      pieces: publicReplayPieces(pieces),
+    },
+  ];
+
+  for (const recordedMove of replay.moves) {
+    const move: ReplayMove = {
+      ...recordedMove,
+      from: { ...recordedMove.from },
+      to: { ...recordedMove.to },
+    };
+    const attacker = pieces.find(
+      (piece) => piece.alive && piece.side === move.actor && samePosition(piece, move.from),
+    );
+    const defender = pieces.find(
+      (piece) => piece.alive && piece.side !== move.actor && samePosition(piece, move.to),
+    );
+    if (!attacker) break;
+
+    if (move.result === "move") {
+      attacker.row = move.to.row;
+      attacker.col = move.to.col;
+    } else if (move.result === "attacker_survives") {
+      if (defender) defender.alive = false;
+      attacker.row = move.to.row;
+      attacker.col = move.to.col;
+    } else if (move.result === "defender_survives") {
+      attacker.alive = false;
+    } else if (move.result === "both_removed") {
+      attacker.alive = false;
+      if (defender) defender.alive = false;
+    } else {
+      if (defender) defender.alive = false;
+      if (attacker.type === "bomb") attacker.alive = false;
+      else {
+        attacker.row = move.to.row;
+        attacker.col = move.to.col;
+      }
+    }
+
+    frames.push({
+      moveNumber: move.moveNumber,
+      move,
+      pieces: publicReplayPieces(pieces),
+    });
+  }
+  return frames;
+}
+
 function revealFlagWhenCommanderFalls(state: GameState, piece: Piece | undefined) {
   if (piece?.type === "commander" && !piece.alive) state.revealedFlags[piece.side] = true;
 }
@@ -751,6 +884,7 @@ function revealFlagWhenCommanderFalls(state: GameState, piece: Piece | undefined
 function applyMove(state: GameState, side: Side, from: Position, to: Position) {
   const violation = getMoveViolation(state, side, from, to);
   if (violation) throw new GameRuleError(violation);
+  const replay = ensureReplayArchive(state);
   const attacker = alivePieceAt(state, from)!;
   const defender = alivePieceAt(state, to);
   const attackedHeadquarters = Boolean(defender && isHeadquarters(to));
@@ -809,6 +943,13 @@ function applyMove(state: GameState, side: Side, from: Position, to: Position) {
   }
 
   state.moveNumber += 1;
+  replay.moves.push({
+    moveNumber: state.moveNumber,
+    actor: side,
+    from: { ...from },
+    to: { ...to },
+    result,
+  });
   addEvent(state, { actor: side, from, to, result });
   if (state.phase === "finished") return;
 
@@ -871,6 +1012,7 @@ export function applyPlayerAction(current: GameState, side: Side, action: Player
       state.firstTurn = randomIndex(2) === 0 ? "black" : "white";
       state.phase = "playing";
       state.turn = state.firstTurn;
+      state.replay = createReplayArchive(state);
       addEvent(state, { actor: state.firstTurn, result: "game_started" });
     }
     return state;
@@ -878,6 +1020,7 @@ export function applyPlayerAction(current: GameState, side: Side, action: Player
 
   if (action.type === "resign") {
     if (state.phase !== "playing") throw new GameRuleError("GAME_NOT_STARTED");
+    ensureReplayArchive(state);
     state.phase = "finished";
     state.winner = otherSide(side);
     state.finishReason = "resign";
@@ -890,6 +1033,9 @@ export function applyPlayerAction(current: GameState, side: Side, action: Player
 }
 
 export function projectGame(state: GameState, viewer: Viewer): ProjectedGame {
+  const canSeeReplay = viewer === "spectator" || state.phase === "finished";
+  const availableReplay =
+    state.phase === "setup" ? null : state.replay ?? createReplayArchive(state);
   return {
     rulesVersion: state.rulesVersion,
     phase: state.phase,
@@ -926,5 +1072,6 @@ export function projectGame(state: GameState, viewer: Viewer): ProjectedGame {
       ),
     events: state.events.map((event) => ({ ...event })),
     moveNumber: state.moveNumber,
+    replay: canSeeReplay && availableReplay ? cloneReplayArchive(availableReplay) : null,
   };
 }

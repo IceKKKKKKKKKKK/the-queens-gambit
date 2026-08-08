@@ -334,6 +334,12 @@ summary:focus-visible {
   font-weight: 650;
 }
 
+.rules-trigger.is-active {
+  border-color: var(--black);
+  background: var(--black);
+  color: var(--white);
+}
+
 .game-shell {
   display: grid;
   width: min(1320px, 100%);
@@ -583,6 +589,83 @@ summary:focus-visible {
   min-width: 0;
 }
 
+.last-move-summary {
+  display: flex;
+  min-height: 28px;
+  margin: 0 0 7px;
+  padding: 0 3px;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  color: var(--muted);
+  font-size: 9px;
+  line-height: 1.35;
+}
+
+.last-move-summary strong {
+  flex: none;
+  color: var(--black);
+  font-weight: 750;
+}
+
+.last-move-summary span {
+  overflow: hidden;
+  text-align: right;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.replay-controls {
+  display: grid;
+  margin: 12px 0 10px;
+  padding: 12px;
+  gap: 10px;
+  border: 1px solid var(--line);
+  border-radius: 14px;
+  background: var(--white);
+}
+
+.replay-progress {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  font-size: 10px;
+}
+
+.replay-progress span {
+  color: var(--muted);
+  font-size: 9px;
+}
+
+.replay-buttons {
+  display: grid;
+  grid-template-columns: repeat(5, minmax(0, 1fr));
+  gap: 6px;
+}
+
+.replay-buttons button {
+  min-width: 0;
+  min-height: 40px;
+  padding: 0 5px;
+  border: 1px solid var(--line);
+  border-radius: 9px;
+  background: var(--white);
+  color: var(--black);
+  cursor: pointer;
+  font-size: 9px;
+  font-weight: 650;
+}
+
+.replay-buttons button:last-child {
+  border-color: var(--black);
+}
+
+.replay-buttons button:disabled {
+  cursor: default;
+  opacity: 0.32;
+}
+
 .player-strip {
   display: flex;
   min-height: 38px;
@@ -601,7 +684,8 @@ summary:focus-visible {
   margin-bottom: 10px;
 }
 
-.player-strip:last-child {
+.player-strip:last-child,
+.player-strip.board-player-bottom {
   margin-top: 10px;
 }
 
@@ -611,12 +695,58 @@ summary:focus-visible {
   color: var(--white);
 }
 
-.board-grid {
+.board-frame {
   --front-gap: 14px;
   position: relative;
   display: grid;
   width: 100%;
+  grid-template-columns: 2.4ch minmax(0, 1fr) 2.4ch;
+  grid-template-rows: 18px minmax(0, auto);
+}
+
+.board-axis {
+  color: var(--muted);
+  font-family: ui-monospace, "SFMono-Regular", Consolas, monospace;
+  font-size: 9px;
+  font-weight: 650;
+  line-height: 1;
+  pointer-events: none;
+  user-select: none;
+}
+
+.board-axis-columns {
+  display: grid;
+  grid-row: 1;
+  grid-column: 2;
+  grid-template-columns: repeat(5, minmax(0, 1fr));
+}
+
+.board-axis-columns span {
+  display: grid;
+  place-items: center;
+}
+
+.board-axis-rows {
+  display: grid;
+  grid-row: 2;
+  grid-column: 1;
+  grid-template-rows: repeat(6, minmax(0, 1fr)) var(--front-gap) repeat(6, minmax(0, 1fr));
+}
+
+.board-axis-rows span {
+  display: grid;
+  padding-right: 5px;
+  align-items: center;
+  justify-items: end;
+}
+
+.board-grid {
+  position: relative;
+  display: grid;
+  width: 100%;
   aspect-ratio: 5 / 9.45;
+  grid-row: 2;
+  grid-column: 2;
   grid-template-columns: repeat(5, minmax(0, 1fr));
   grid-template-rows: repeat(6, minmax(0, 1fr)) var(--front-gap) repeat(6, minmax(0, 1fr));
   transition: transform 260ms cubic-bezier(0.22, 1, 0.36, 1);
@@ -931,6 +1061,50 @@ summary:focus-visible {
 .piece-model.side-white {
   --piece-fill: var(--white);
   --piece-ink: var(--black);
+}
+
+.station-hit.is-last-move-from {
+  outline: 1px dashed var(--black);
+  outline-offset: -3px;
+  border-radius: 11px;
+}
+
+.station-hit.is-last-move-to {
+  outline: 2px solid var(--black);
+  outline-offset: -3px;
+  border-radius: 11px;
+}
+
+.last-move-marker {
+  position: absolute;
+  z-index: 8;
+  top: 0;
+  right: 0;
+  display: grid;
+  width: 16px;
+  height: 16px;
+  place-items: center;
+  border: 1px solid var(--black);
+  border-radius: 4px;
+  background: var(--white);
+  color: var(--black);
+  font-size: 8px;
+  font-weight: 750;
+  line-height: 1;
+  pointer-events: none;
+}
+
+.last-move-marker.is-to {
+  background: var(--black);
+  color: var(--white);
+}
+
+.is-flipped .last-move-marker {
+  right: auto;
+  bottom: 0;
+  left: 0;
+  top: auto;
+  transform: rotate(180deg);
 }
 
 .piece-model.is-in-camp {
@@ -1392,8 +1566,12 @@ summary:focus-visible {
     display: flex;
   }
 
-  .board-grid {
+  .board-frame {
     --front-gap: 10px;
+  }
+
+  .replay-buttons button {
+    min-height: 44px;
   }
 
   .piece-crest {

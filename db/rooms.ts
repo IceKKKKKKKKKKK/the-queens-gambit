@@ -146,10 +146,14 @@ export async function getRoom(code: string) {
 }
 
 export function parseRoomState(row: RoomRow) {
-  const state = JSON.parse(row.state_json) as GameState & { noCombatPly?: number };
+  const state = JSON.parse(row.state_json) as GameState & {
+    noCombatPly?: number;
+    replay?: GameState["replay"];
+  };
   state.rulesVersion = RULES_VERSION;
+  state.replay ??= null;
   delete state.noCombatPly;
-  return state;
+  return state as GameState;
 }
 
 export async function viewerForToken(row: RoomRow, token: string | null): Promise<Viewer> {

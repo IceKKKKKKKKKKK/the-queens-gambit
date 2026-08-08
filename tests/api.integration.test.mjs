@@ -125,6 +125,7 @@ test("room API preserves role-based visibility, identity, concurrency, and limit
   assert.equal(spectator.body.snapshot.pieces.filter((piece) => piece.type).length, 50);
   assert.equal(spectator.body.snapshot.pieces.filter((piece) => piece.side === "black" && piece.type).length, 25);
   assert.equal(spectator.body.snapshot.pieces.filter((piece) => piece.side === "white" && piece.type).length, 25);
+  assert.equal(spectator.body.snapshot.replay, null);
 
   const black = await requestJson(`${origin}/api/rooms/${code}`, {
     headers: { Authorization: `Bearer ${blackToken}` },
@@ -132,6 +133,7 @@ test("room API preserves role-based visibility, identity, concurrency, and limit
   assert.equal(black.status, 200);
   assert.equal(black.body.snapshot.pieces.filter((piece) => piece.side === "black" && piece.type).length, 25);
   assert.equal(black.body.snapshot.pieces.filter((piece) => piece.side === "white" && piece.type).length, 0);
+  assert.equal(black.body.snapshot.replay, null);
 
   const blackTokenClaim = await postJson(`${origin}/api/rooms/${code}/claim`, {
     inviteToken,
@@ -417,6 +419,14 @@ test("room API preserves role-based visibility, identity, concurrency, and limit
   );
   assert.equal(ruleWhiteReady.status, 200);
   assert.equal(ruleWhiteReady.body.snapshot.phase, "playing");
+  assert.equal(ruleWhiteReady.body.snapshot.replay, null);
+
+  const ruleSpectator = await requestJson(`${origin}/api/rooms/${ruleRoom.body.code}`);
+  assert.equal(ruleSpectator.status, 200);
+  assert.equal(ruleSpectator.body.snapshot.replay.partial, false);
+  assert.equal(ruleSpectator.body.snapshot.replay.baselineMoveNumber, 0);
+  assert.equal(ruleSpectator.body.snapshot.replay.initialPieces.length, 50);
+  assert.equal(ruleSpectator.body.snapshot.replay.moves.length, 0);
 
   const activeSide = ruleWhiteReady.body.snapshot.turn;
   const inactiveSide = activeSide === "black" ? "white" : "black";
@@ -479,6 +489,22 @@ test("room API preserves role-based visibility, identity, concurrency, and limit
     headers: { Authorization: `Bearer ${activeToken}` },
   });
   assert.equal(ruleAfterRejects.body.version, playingVersion);
+  assert.equal(ruleAfterRejects.body.snapshot.replay, null);
+
+  const resigned = await postAction(
+    origin,
+    ruleRoom.body.code,
+    activeToken,
+    playingVersion,
+    { type: "resign" },
+  );
+  assert.equal(resigned.status, 200);
+  assert.equal(resigned.body.snapshot.phase, "finished");
+  assert.equal(resigned.body.snapshot.replay.initialPieces.length, 50);
+  const finishedOtherPlayer = await requestJson(`${origin}/api/rooms/${ruleRoom.body.code}`, {
+    headers: { Authorization: `Bearer ${inactiveToken}` },
+  });
+  assert.equal(finishedOtherPlayer.body.snapshot.replay.initialPieces.length, 50);
 
   const rateKey = uniqueTestIp();
   const rateStatuses = [];

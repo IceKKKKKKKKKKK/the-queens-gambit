@@ -6,6 +6,8 @@ import {
   HEADQUARTERS,
   PIECE_INFO,
   applySetupDraftPlacement,
+  boardCoordinate,
+  buildReplayFrames,
   createSetupDraft,
   getCampMotionForPosition,
   getProjectedLegalTargets,
@@ -18,6 +20,7 @@ import {
   isRoadEdge,
   isValidSetupDraft,
   latestMovementEvent,
+  latestOpponentMovementEvent,
   positionKey,
   randomizeSetupDraft,
   samePosition,
@@ -245,17 +248,13 @@ async function claimSeat(code: string, inviteToken: string, playerToken: string)
   return (await parseResponse(response)) as ClaimRoomEnvelope;
 }
 
-function coordinates(position: Position) {
-  return `${String.fromCharCode(65 + position.row)}${position.col + 1}`;
-}
-
 function eventText(event: PublicEvent) {
   const actor = sideName(event.actor);
   if (event.result === "ready") return `${actor}锁定了阵型`;
   if (event.result === "unready") return `${actor}撤销了确认`;
   if (event.result === "game_started") return `${actor}获得先手`;
   if (event.result === "resigned") return `${actor}认输`;
-  const path = event.from && event.to ? `${coordinates(event.from)} → ${coordinates(event.to)}` : "";
+  const path = event.from && event.to ? `${boardCoordinate(event.from)} → ${boardCoordinate(event.to)}` : "";
   if (event.result === "move") return `${actor}移动 · ${path}`;
   if (event.result === "attacker_survives") return `${actor}进攻成功 · ${path}`;
   if (event.result === "defender_survives") return `${actor}进攻失利 · ${path}`;
@@ -321,6 +320,8 @@ interface BoardProps {
   targets: Set<string>;
   flipped: boolean;
   busy: boolean;
+  readOnly?: boolean;
+  movementHighlight?: PublicEvent;
   onCell: (position: Position) => void;
   onPieceDragStart: (pieceId: string, position: Position) => boolean;
   onPieceDrop: (pieceId: string, position: Position) => void;
@@ -335,6 +336,8 @@ function Board({
   targets,
   flipped,
   busy,
+  readOnly = false,
+  movementHighlight,
   onCell,
   onPieceDragStart,
   onPieceDrop,
@@ -346,9 +349,29 @@ function Board({
   }
   const alivePieces = pieces.filter((piece) => piece.alive && isInsideBoard(piece));
   const recentMovement = game.phase === "setup" ? undefined : latestMovementEvent(game.events);
+  const columnLabels = Array.from({ length: 5 }, (_, index) =>
+    String.fromCharCode(65 + (flipped ? 4 - index : index)),
+  );
+  const rowLabels = Array.from({ length: 12 }, (_, index) =>
+    flipped ? 12 - index : index + 1,
+  );
 
   return (
-    <div className={`board-grid ${flipped ? "is-flipped" : ""}`} aria-label="军棋棋盘">
+    <div className="board-frame">
+      <div className="board-axis board-axis-columns" aria-hidden="true">
+        {columnLabels.map((label) => <span key={label}>{label}</span>)}
+      </div>
+      <div className="board-axis board-axis-rows" aria-hidden="true">
+        {rowLabels.map((label, index) => (
+          <span
+            key={label}
+            style={{ gridRow: index < 6 ? index + 1 : index + 2 }}
+          >
+            {label}
+          </span>
+        ))}
+      </div>
+      <div className={`board-grid ${flipped ? "is-flipped" : ""}`} aria-label="军棋棋盘">
       <div className="mountain-band" aria-hidden="true">
         <span>界</span>
       </div>
@@ -358,6 +381,12 @@ function Board({
         const selectedHere = Boolean(selected && samePosition(selected, position));
         const targetHere = targets.has(positionKey(position));
         const targetAttack = Boolean(targetHere && piece && piece.side !== viewer);
+        const lastMoveFrom = Boolean(
+          movementHighlight?.from && samePosition(movementHighlight.from, position),
+        );
+        const lastMoveTo = Boolean(
+          movementHighlight?.to && samePosition(movementHighlight.to, position),
+        );
         const camp = CAMPS.some((candidate) => samePosition(candidate, position));
         const headquarters = HEADQUARTERS.some((candidate) => samePosition(candidate, position));
         const headquartersSide: Side | null = headquarters ? (row < 6 ? "white" : "black") : null;
@@ -403,6 +432,7 @@ function Board({
           piece &&
             piece.side === viewer &&
             game.phase !== "finished" &&
+            !readOnly &&
             !busy,
         );
         return (
@@ -426,7 +456,7 @@ function Board({
               <span className="road road-diagonal down-left" />
             ) : null}
             <button
-              className={`station-hit ${selectedHere ? "is-selected" : ""} ${targetHere ? "is-target" : ""} ${targetAttack ? "is-attack" : ""} ${visiblePieceLabel ? "has-piece-label" : ""} ${headquarters ? "is-headquarters" : ""} ${headquartersOwnershipClass}`}
+              className={`station-hit ${selectedHere ? "is-selected" : ""} ${targetHere ? "is-target" : ""} ${targetAttack ? "is-attack" : ""} ${lastMoveFrom ? "is-last-move-from" : ""} ${lastMoveTo ? "is-last-move-to" : ""} ${visiblePieceLabel ? "has-piece-label" : ""} ${headquarters ? "is-headquarters" : ""} ${headquartersOwnershipClass}`}
               type="button"
               onClick={() => onCell(position)}
               draggable={draggable}
@@ -444,21 +474,21 @@ function Board({
                 event.dataTransfer.setData("text/plain", piece.id);
               }}
               onDragOver={(event) => {
-                if (viewer === "spectator" || busy) return;
+                if (readOnly || viewer === "spectator" || busy) return;
                 event.preventDefault();
                 event.dataTransfer.dropEffect = "move";
               }}
               onDrop={(event) => {
-                if (viewer === "spectator" || busy) return;
+                if (readOnly || viewer === "spectator" || busy) return;
                 event.preventDefault();
                 const pieceId =
                   event.dataTransfer.getData(PIECE_DRAG_TYPE) || event.dataTransfer.getData("text/plain");
                 if (pieceId) onPieceDrop(pieceId, position);
               }}
               onDragEnd={onPieceDragEnd}
-              disabled={viewer === "spectator" || busy}
+              disabled={readOnly || viewer === "spectator" || busy}
               aria-pressed={piece?.side === viewer ? selectedHere : undefined}
-              aria-label={`${coordinates(position)}，${stationLabel}，${pieceLabel}${coverLabel}${targetLabel}`}
+              aria-label={`${boardCoordinate(position)}，${stationLabel}，${pieceLabel}${coverLabel}${targetLabel}`}
             >
               <span
                 className={`station ${camp ? "camp" : headquarters ? "headquarters" : "post"} ${campMotion.station ? `camp-motion-${campMotion.station}` : ""}`}
@@ -470,6 +500,8 @@ function Board({
                 <span className="headquarters-badge" aria-hidden="true">{headquartersRelation}</span>
               ) : null}
               {targetHere && !piece ? <span className="target-dot" /> : null}
+              {lastMoveFrom ? <span className="last-move-marker is-from" aria-hidden="true">起</span> : null}
+              {lastMoveTo ? <span className="last-move-marker is-to" aria-hidden="true">到</span> : null}
               {piece ? (
                 <>
                   <PieceModel piece={piece} inCamp={camp} campMotion={campMotion.piece} />
@@ -487,6 +519,7 @@ function Board({
           </div>
         );
       })}
+      </div>
     </div>
   );
 }
@@ -600,6 +633,7 @@ export default function GameApp({ hasRoom = false }: { hasRoom?: boolean }) {
   const [fatalError, setFatalError] = useState<string | null>(null);
   const [toast, setToast] = useState<string | null>(null);
   const [rulesOpen, setRulesOpen] = useState(false);
+  const [replayIndex, setReplayIndex] = useState<number | null>(null);
   const [connection, setConnection] = useState<"live" | "syncing" | "offline">("live");
   const roomRef = useRef<RoomEnvelope | null>(null);
   const roomSessionRef = useRef(0);
@@ -722,6 +756,7 @@ export default function GameApp({ hasRoom = false }: { hasRoom?: boolean }) {
     setSelectedPieceId(null);
     setSetupDraftState(null);
     setRulesOpen(false);
+    setReplayIndex(null);
     roomRef.current = null;
     setRoom(null);
   }
@@ -1025,6 +1060,10 @@ export default function GameApp({ hasRoom = false }: { hasRoom?: boolean }) {
       return position ? [{ ...piece, ...position }] : [];
     });
   }, [activeSetupDraft, room, setupSide]);
+  const replayFrames = useMemo(
+    () => buildReplayFrames(room?.snapshot.replay ?? null),
+    [room?.snapshot.replay],
+  );
   const trayPieces = useMemo(
     () =>
       activeSetupDraft
@@ -1318,13 +1357,37 @@ export default function GameApp({ hasRoom = false }: { hasRoom?: boolean }) {
   const game = room.snapshot;
   const viewerSide = isPlayer(room.viewer) ? room.viewer : null;
   const orientationFlipped = viewerSide === "white" ? !flipped : flipped;
+  const activeReplayFrame =
+    replayIndex === null ? null : replayFrames[Math.min(replayIndex, replayFrames.length - 1)] ?? null;
+  const replayMoveEvent: PublicEvent | undefined = activeReplayFrame?.move
+    ? {
+        id: activeReplayFrame.move.moveNumber,
+        actor: activeReplayFrame.move.actor,
+        from: activeReplayFrame.move.from,
+        to: activeReplayFrame.move.to,
+        result: activeReplayFrame.move.result,
+      }
+    : undefined;
+  const latestOpponentMove = latestOpponentMovementEvent(game.events, room.viewer);
+  const highlightedMove = activeReplayFrame ? replayMoveEvent : latestOpponentMove;
+  const displayedPieces = activeReplayFrame?.pieces ?? renderPieces;
+  const displayedGame = activeReplayFrame
+    ? { ...game, pieces: activeReplayFrame.pieces, events: replayMoveEvent ? [replayMoveEvent] : [] }
+    : game;
+  const replayHasGap = Boolean(
+    game.replay && replayFrames.length !== game.replay.moves.length + 1,
+  );
+  const replayIsPartial = Boolean(game.replay?.partial || replayHasGap);
   const topSide: Side = orientationFlipped ? "black" : "white";
   const bottomSide: Side = topSide === "black" ? "white" : "black";
   const aliveCount = (side: Side) => game.pieces.filter((piece) => piece.alive && piece.side === side).length;
+  const replayAliveCount = (side: Side) =>
+    displayedPieces.filter((piece) => piece.alive && piece.side === side).length;
   const visiblePieceCount = (side: Side) =>
     game.phase === "setup" && viewerSide === side && placedSetupCount !== undefined
       ? placedSetupCount
       : aliveCount(side);
+  const boardPieceCount = (side: Side) => activeReplayFrame ? replayAliveCount(side) : visiblePieceCount(side);
   const seatState = (side: Side) => {
     if (game.phase === "setup") return game.ready[side] ? "已锁定" : game.joined[side] ? "布阵中" : "未进入";
     if (game.phase === "finished") return !game.winner ? "和棋" : game.winner === side ? "获胜" : "落败";
@@ -1344,6 +1407,19 @@ export default function GameApp({ hasRoom = false }: { hasRoom?: boolean }) {
           <span className={`connection ${connection}`}>{connection === "offline" ? "正在重连" : room.viewer === "spectator" ? "明牌观战" : sideName(room.viewer)}</span>
         </div>
         <div className="header-actions">
+          {replayFrames.length ? (
+            <button
+              className={`rules-trigger ${activeReplayFrame ? "is-active" : ""}`}
+              type="button"
+              onClick={() => {
+                setSelectedPieceId(null);
+                setReplayIndex((current) => (current === null ? 0 : null));
+              }}
+              aria-pressed={Boolean(activeReplayFrame)}
+            >
+              {activeReplayFrame ? "实时棋盘" : "复盘"}
+            </button>
+          ) : null}
           <button
             className="rules-trigger"
             type="button"
@@ -1408,25 +1484,50 @@ export default function GameApp({ hasRoom = false }: { hasRoom?: boolean }) {
         </aside>
 
         <section className="board-column">
-          <div className={`player-strip ${game.turn === topSide && game.phase === "playing" ? "active" : ""}`}>
-            <span>{sideName(topSide)}</span><span>{visiblePieceCount(topSide)} / 25</span>
+          <div className={`player-strip ${!activeReplayFrame && game.turn === topSide && game.phase === "playing" ? "active" : ""}`}>
+            <span>{sideName(topSide)}</span><span>{boardPieceCount(topSide)} / 25</span>
           </div>
+          {highlightedMove?.from && highlightedMove.to ? (
+            <p className="last-move-summary">
+              <strong>{activeReplayFrame ? "复盘" : room.viewer === "spectator" ? "上一手" : "对手上一步"}</strong>
+              <span>{sideName(highlightedMove.actor)} · {boardCoordinate(highlightedMove.from)} → {boardCoordinate(highlightedMove.to)}</span>
+            </p>
+          ) : activeReplayFrame ? (
+            <p className="last-move-summary"><strong>复盘</strong><span>{replayHasGap ? "回放记录不完整" : replayIsPartial ? `从第 ${activeReplayFrame.moveNumber} 手开始` : "开局阵型"}</span></p>
+          ) : null}
           <Board
-            game={game}
-            pieces={renderPieces}
-            viewer={room.viewer}
-            selected={selectedPosition}
-            targets={targetKeys}
+            game={displayedGame}
+            pieces={displayedPieces}
+            viewer={activeReplayFrame ? "spectator" : room.viewer}
+            selected={activeReplayFrame ? null : selectedPosition}
+            targets={activeReplayFrame ? new Set<string>() : targetKeys}
             flipped={orientationFlipped}
             busy={busy}
+            readOnly={Boolean(activeReplayFrame)}
+            movementHighlight={highlightedMove}
             onCell={handleCell}
             onPieceDragStart={beginBoardPieceDrag}
             onPieceDrop={handlePieceDrop}
             onPieceDragEnd={handlePieceDragEnd}
           />
-          <div className={`player-strip ${game.turn === bottomSide && game.phase === "playing" ? "active" : ""}`}>
-            <span>{sideName(bottomSide)}</span><span>{visiblePieceCount(bottomSide)} / 25</span>
+          <div className={`player-strip board-player-bottom ${!activeReplayFrame && game.turn === bottomSide && game.phase === "playing" ? "active" : ""}`}>
+            <span>{sideName(bottomSide)}</span><span>{boardPieceCount(bottomSide)} / 25</span>
           </div>
+          {activeReplayFrame ? (
+            <div className="replay-controls" aria-label="复盘控制">
+              <div className="replay-progress">
+                <strong>{replayIsPartial ? "部分复盘" : "明棋复盘"}</strong>
+                <span>第 {activeReplayFrame.moveNumber} 手 · {Math.max(0, replayFrames.length - 1)} 手已记录</span>
+              </div>
+              <div className="replay-buttons">
+                <button type="button" onClick={() => setReplayIndex(0)} disabled={replayIndex === 0}>起点</button>
+                <button type="button" onClick={() => setReplayIndex((current) => Math.max(0, (current ?? 0) - 1))} disabled={replayIndex === 0}>上一手</button>
+                <button type="button" onClick={() => setReplayIndex((current) => Math.min(replayFrames.length - 1, (current ?? 0) + 1))} disabled={replayIndex === replayFrames.length - 1}>下一手</button>
+                <button type="button" onClick={() => setReplayIndex(replayFrames.length - 1)} disabled={replayIndex === replayFrames.length - 1}>末手</button>
+                <button type="button" onClick={() => setReplayIndex(null)}>退出</button>
+              </div>
+            </div>
+          ) : null}
         </section>
 
         <aside className="side-panel activity-panel">
@@ -1502,6 +1603,10 @@ export default function GameApp({ hasRoom = false }: { hasRoom?: boolean }) {
           <section>
             <h3>军旗暴露</h3>
             <p>司令阵亡后，己方军旗公开。若被进攻的大本营内不是军旗，另一座大本营中的军旗也会公开。</p>
+          </section>
+          <section>
+            <h3>复盘</h3>
+            <p>观战者可以随时查看双方明棋回放；两名玩家需等本局结束后再查看，避免暗子身份提前暴露。</p>
           </section>
         </div>
       </dialog>

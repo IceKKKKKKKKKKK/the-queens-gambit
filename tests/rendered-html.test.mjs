@@ -56,3 +56,23 @@ test("opponent headquarters replace only the hidden-piece diamond with an outlin
   assert.match(rule, /background:\s*var\(--white\)/);
   assert.match(rule, /color:\s*transparent/);
 });
+
+test("board coordinates, move markers, and replay controls stay visibly rendered", async () => {
+  const [component, css, game] = await Promise.all([
+    readFile(new URL("../app/GameApp.tsx", import.meta.url), "utf8"),
+    readFile(new URL("../app/globals.css", import.meta.url), "utf8"),
+    readFile(new URL("../lib/game.ts", import.meta.url), "utf8"),
+  ]);
+
+  assert.match(component, /board-axis-columns/);
+  assert.match(component, /board-axis-rows/);
+  assert.match(component, /last-move-marker is-from/);
+  assert.match(component, /last-move-marker is-to/);
+  assert.match(component, /明棋复盘/);
+  assert.match(component, /上一手/);
+  assert.match(component, /下一手/);
+  assert.match(css, /\.board-frame\s*\{[\s\S]*grid-template-columns:\s*2\.4ch minmax\(0, 1fr\) 2\.4ch/);
+  assert.match(css, /\.station-hit\.is-last-move-from/);
+  assert.match(css, /\.station-hit\.is-last-move-to/);
+  assert.match(game, /String\.fromCharCode\(65 \+ position\.col\)/);
+});

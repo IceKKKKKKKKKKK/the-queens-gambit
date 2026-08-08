@@ -5,6 +5,8 @@ import {
   PIECE_INFO,
   applyPlayerAction,
   applySetupDraftPlacement,
+  boardCoordinate,
+  buildReplayFrames,
   createSetupDraft,
   createInitialGame,
   getCampMotionForPosition,
@@ -16,6 +18,7 @@ import {
   isRoadEdge,
   isValidSetupDraft,
   latestMovementEvent,
+  latestOpponentMovementEvent,
   projectGame,
   randomizeSetupDraft,
   setupDraftToLayout,
@@ -26,6 +29,7 @@ import {
   type PlayerAction,
   type Position,
   type PublicEvent,
+  type ReplayArchive,
   type Side,
 } from "../lib/game.ts";
 
@@ -51,6 +55,7 @@ function stateWith(pieces: Piece[], turn: Side = "black"): GameState {
     pieces,
     events: [],
     moveNumber: 0,
+    replay: null,
   };
 }
 
@@ -161,6 +166,178 @@ test("camp motion marks only the moving attacker and its camp station", () => {
   assert.equal(latestMovementEvent([ready, enter]), enter);
   assert.equal(latestMovementEvent([enter, ready]), undefined);
   assert.equal(latestMovementEvent([ready]), undefined);
+});
+
+test("board coordinates and opponent move lookup remain stable in every orientation", () => {
+  assert.equal(boardCoordinate({ row: 0, col: 0 }), "A1");
+  assert.equal(boardCoordinate({ row: 0, col: 4 }), "E1");
+  assert.equal(boardCoordinate({ row: 11, col: 0 }), "A12");
+  assert.equal(boardCoordinate({ row: 11, col: 4 }), "E12");
+  const coordinates = new Set(
+    Array.from({ length: 12 }, (_, row) =>
+      Array.from({ length: 5 }, (_, col) => boardCoordinate({ row, col })),
+    ).flat(),
+  );
+  assert.equal(coordinates.size, 60);
+
+  const blackMove = {
+    id: 1,
+    actor: "black",
+    from: { row: 7, col: 0 },
+    to: { row: 7, col: 1 },
+    result: "move",
+  } satisfies PublicEvent;
+  const whiteMove = {
+    id: 2,
+    actor: "white",
+    from: { row: 4, col: 0 },
+    to: { row: 4, col: 1 },
+    result: "move",
+  } satisfies PublicEvent;
+  const ready = { id: 3, actor: "black", result: "ready" } satisfies PublicEvent;
+  const laterBlackMove = { ...blackMove, id: 4, from: blackMove.to, to: blackMove.from };
+  const events = [blackMove, whiteMove, ready, laterBlackMove];
+  assert.equal(latestOpponentMovementEvent(events, "black"), whiteMove);
+  assert.equal(latestOpponentMovementEvent(events, "white"), laterBlackMove);
+  assert.equal(latestOpponentMovementEvent(events, "spectator"), laterBlackMove);
+  assert.equal(latestOpponentMovementEvent([ready], "black"), undefined);
+});
+
+test("replay stores the final setup and reconstructs every successful move without leaking to players", () => {
+  let state = createInitialGame();
+  state = applyPlayerAction(state, "black", { type: "ready", value: true });
+  state = applyPlayerAction(state, "white", { type: "ready", value: true });
+  assert.equal(state.phase, "playing");
+  assert.equal(state.replay?.partial, false);
+  assert.equal(state.replay?.baselineMoveNumber, 0);
+  assert.equal(state.replay?.initialPieces.length, 50);
+  assert.equal(state.replay?.moves.length, 0);
+  assert.equal(projectGame(state, "black").replay, null);
+  assert.equal(projectGame(state, "white").replay, null);
+
+  const spectatorBefore = projectGame(state, "spectator");
+  assert.equal(spectatorBefore.replay?.initialPieces.every((candidate) => candidate.type), true);
+  const originalType = state.replay!.initialPieces[0].type;
+  spectatorBefore.replay!.initialPieces[0].type = originalType === "flag" ? "mine" : "flag";
+  assert.equal(state.replay!.initialPieces[0].type, originalType);
+
+  const mover = state.pieces.find(
+    (candidate) =>
+      candidate.alive &&
+      candidate.side === state.turn &&
+      getMoveViolation(state, state.turn, candidate, { row: candidate.row, col: candidate.col }) === "SAME_POSITION" &&
+      Array.from({ length: 12 }, (_, row) =>
+        Array.from({ length: 5 }, (_, col) => ({ row, col })),
+      )
+        .flat()
+        .some((target) => getMoveViolation(state, state.turn, candidate, target) === null),
+  );
+  assert.ok(mover);
+  const target = Array.from({ length: 12 }, (_, row) =>
+    Array.from({ length: 5 }, (_, col) => ({ row, col })),
+  )
+    .flat()
+    .find((candidate) => getMoveViolation(state, state.turn, mover, candidate) === null);
+  assert.ok(target);
+
+  const moved = applyPlayerAction(state, state.turn, { type: "move", from: mover, to: target });
+  assert.equal(moved.replay?.moves.length, 1);
+  assert.equal(moved.replay?.moves[0].moveNumber, 1);
+  const frames = buildReplayFrames(moved.replay);
+  assert.equal(frames.length, 2);
+  assert.equal(frames[0].pieces.filter((candidate) => candidate.alive).length, 50);
+  assert.deepEqual(
+    frames.at(-1)!.pieces
+      .map(({ id, side, type, row, col, alive }) => ({ id, side, type, row, col, alive }))
+      .sort((first, second) => first.id.localeCompare(second.id)),
+    moved.pieces
+      .map(({ id, side, type, row, col, alive }) => ({ id, side, type, row, col, alive }))
+      .sort((first, second) => first.id.localeCompare(second.id)),
+  );
+  assert.equal(projectGame(moved, "black").replay, null);
+  assert.equal(projectGame(moved, "white").replay, null);
+  assert.equal(projectGame(moved, "spectator").replay?.moves.length, 1);
+
+  const finished = applyPlayerAction(moved, moved.turn, { type: "resign" });
+  assert.equal(finished.replay?.moves.length, 1);
+  assert.equal(projectGame(finished, "black").replay?.moves.length, 1);
+  assert.equal(projectGame(finished, "white").replay?.moves.length, 1);
+});
+
+test("replay reconstruction covers every battle outcome", () => {
+  const cases: Array<{
+    result: "move" | "attacker_survives" | "defender_survives" | "both_removed" | "flag_captured";
+    attackerType?: PieceType;
+    defenderType?: PieceType;
+    attackerAlive: boolean;
+    defenderAlive?: boolean;
+    attackerAtTarget: boolean;
+  }> = [
+    { result: "move", attackerAlive: true, attackerAtTarget: true },
+    { result: "attacker_survives", defenderType: "platoon", attackerAlive: true, defenderAlive: false, attackerAtTarget: true },
+    { result: "defender_survives", defenderType: "commander", attackerAlive: false, defenderAlive: true, attackerAtTarget: false },
+    { result: "both_removed", defenderType: "bomb", attackerAlive: false, defenderAlive: false, attackerAtTarget: false },
+    { result: "flag_captured", defenderType: "flag", attackerAlive: true, defenderAlive: false, attackerAtTarget: true },
+    { result: "flag_captured", attackerType: "bomb", defenderType: "flag", attackerAlive: false, defenderAlive: false, attackerAtTarget: false },
+  ];
+
+  for (const scenario of cases) {
+    const attacker = piece("attacker", "black", scenario.attackerType ?? "engineer", 6, 0);
+    const defender = scenario.defenderType
+      ? piece("defender", "white", scenario.defenderType, 5, 0)
+      : null;
+    const archive = {
+      baselineMoveNumber: 0,
+      partial: false,
+      initialPieces: defender ? [attacker, defender] : [attacker],
+      moves: [
+        {
+          moveNumber: 1,
+          actor: "black",
+          from: { row: 6, col: 0 },
+          to: { row: 5, col: 0 },
+          result: scenario.result,
+        },
+      ],
+    } satisfies ReplayArchive;
+    const finalPieces = buildReplayFrames(archive).at(-1)!.pieces;
+    const finalAttacker = finalPieces.find((candidate) => candidate.id === "attacker")!;
+    const finalDefender = finalPieces.find((candidate) => candidate.id === "defender");
+    assert.equal(finalAttacker.alive, scenario.attackerAlive, scenario.result);
+    assert.equal(
+      finalAttacker.alive && finalAttacker.row === 5 && finalAttacker.col === 0,
+      scenario.attackerAtTarget,
+      scenario.result,
+    );
+    if (scenario.defenderAlive !== undefined) {
+      assert.equal(finalDefender?.alive, scenario.defenderAlive, scenario.result);
+    }
+  }
+});
+
+test("legacy games begin an honest partial replay at the current move", () => {
+  const legacy = stateWith([
+    piece("black", "black", "platoon", 3, 0),
+    piece("white", "white", "platoon", 8, 4),
+  ]);
+  legacy.moveNumber = 12;
+  legacy.replay = null;
+
+  assert.equal(projectGame(legacy, "black").replay, null);
+  const spectator = projectGame(legacy, "spectator");
+  assert.equal(spectator.replay?.partial, true);
+  assert.equal(spectator.replay?.baselineMoveNumber, 12);
+  assert.equal(spectator.replay?.moves.length, 0);
+
+  const next = applyPlayerAction(legacy, "black", {
+    type: "move",
+    from: { row: 3, col: 0 },
+    to: { row: 4, col: 0 },
+  });
+  assert.equal(next.replay?.partial, true);
+  assert.equal(next.replay?.baselineMoveNumber, 12);
+  assert.equal(next.replay?.moves[0].moveNumber, 13);
+  assert.deepEqual(buildReplayFrames(next.replay).map((frame) => frame.moveNumber), [12, 13]);
 });
 
 test("every move violation has a stable, specific rule code", () => {
@@ -650,6 +827,8 @@ test("v2 has no automatic 70-ply draw", () => {
   assert.equal(state.moveNumber, 100);
   assert.equal(state.events.length, 16);
   assert.equal(state.events.at(-1)?.id, 100);
+  assert.equal(state.replay?.moves.length, 100);
+  assert.equal(buildReplayFrames(state.replay).length, 101);
 });
 
 test("ready transitions are explicit and resignation ends a started match", () => {
