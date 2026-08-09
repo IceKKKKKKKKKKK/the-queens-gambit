@@ -1,7 +1,9 @@
 "use client";
 
+import Link from "next/link";
 import {
   useEffect,
+  useEffectEvent,
   useMemo,
   useRef,
   useState,
@@ -20,6 +22,9 @@ import {
   createSetupDraft,
   getCampMotionForPosition,
   getProjectedLegalTargets,
+  getProjectedAugmentExchangeViolation,
+  getProjectedAugmentLegalTargets,
+  getProjectedAugmentMoveViolation,
   getProjectedMoveViolation,
   getSetupDraftPlacementViolation,
   isCamp,
@@ -30,6 +35,7 @@ import {
   isValidSetupDraft,
   latestOpponentMovementEvent,
   movementAnimationForTransition,
+  otherSide,
   positionKey,
   randomizeSetupDraft,
   samePosition,
@@ -45,12 +51,22 @@ import {
   type Side,
   type Viewer,
 } from "../lib/game";
+import {
+  getAugmentDefinition,
+  type AugmentId,
+  type AugmentSlot,
+} from "../lib/augments";
+import AugmentDraft from "./components/AugmentDraft";
+import AugmentRail from "./components/AugmentRail";
 
 interface RoomEnvelope {
   code: string;
   version: number;
   viewer: Viewer;
   snapshot: ProjectedGame;
+  roomKind?: "custom" | "ranked";
+  gameMode?: "classic" | "augment";
+  spectatorPolicy?: "hidden" | "full";
 }
 
 interface CreateRoomEnvelope extends RoomEnvelope {
@@ -66,6 +82,57 @@ interface SetupDraftState {
   roomCode: string;
   side: Side;
   locations: SetupDraft;
+}
+
+interface SessionUser {
+  displayName: string;
+  email: string;
+}
+
+interface AccountSummary {
+  handle: string;
+  email: string;
+  rating: number;
+  rank: { label: string; tier: string; division: string | null; progress: number };
+  record: { games: number; rankedGames: number; wins: number; losses: number; draws: number; winRate: number };
+}
+
+interface RecentMatch {
+  id: string;
+  opponentHandle: string;
+  outcome: "win" | "loss" | "draw";
+  ratingDelta: number;
+  completedAt: number;
+}
+
+interface AccountEnvelope {
+  account: AccountSummary;
+  recentMatches: RecentMatch[];
+}
+
+interface FriendEntry {
+  relationshipId: string;
+  player: { handle: string; rating: number; rank: { label: string } };
+  presence: "online" | "searching" | "in_game" | "offline";
+  currentMatchId: string | null;
+}
+
+interface FriendsEnvelope {
+  friends: FriendEntry[];
+  incoming: Array<{ requestId: string; player: { handle: string } }>;
+  outgoing: Array<{ requestId: string; player: { handle: string } }>;
+}
+
+interface MatchmakingEnvelope {
+  state: "idle" | "queued" | "matched";
+  queuedAt?: number;
+  ratingRange?: number;
+  match?: {
+    id: string;
+    side: Side;
+    opponent: { handle: string };
+    game: { status: "pending_provisioning" | "ready"; code: string | null };
+  };
 }
 
 const PIECE_DRAG_TYPE = "application/x-queens-gambit-piece";
@@ -130,6 +197,25 @@ const ERROR_TEXT: Record<string, string> = {
   ROOM_IDENTITY_CONFLICT: "这个旧房间的玩家身份发生冲突，请创建新房间。",
   SEAT_ALREADY_CLAIMED: "玩家席位已经被领取。",
   CLAIM_FAILED: "暂时无法领取玩家席位。",
+  AUTH_REQUIRED: "请先使用邮箱登录。",
+  AUGMENT_MODE_REQUIRED: "这局不是军令强化模式。",
+  AUGMENT_SELECTION_REQUIRED: "请先选择并锁定一张军令牌。",
+  NO_ACTIVE_DRAFT: "当前没有进行中的军令选择。",
+  SELECTION_LOCKED: "这轮军令已经锁定。",
+  REFRESH_ALREADY_USED: "本轮已经使用过刷新。",
+  AUGMENT_NOT_OFFERED: "这张牌不在本轮候选中。",
+  SELECTION_REQUIRED: "请先选择一张军令牌。",
+  AUGMENT_NOT_AVAILABLE: "这张军令已经使用或当前不可用。",
+  AUGMENT_ACTION_MISMATCH: "这张军令不能执行该操作。",
+  AUGMENT_PATH_INVALID: "目标不符合这张军令的移动规则。",
+  AUGMENT_REQUIRES_EMPTY_TARGET: "这张军令只能落到空位。",
+  AUGMENT_PIECE_INELIGIBLE: "所选棋子不符合这张军令的要求。",
+  RECON_SELECTION_REQUIRED: "请先完成军令要求的敌子侦察。",
+  RECON_TARGET_INVALID: "请选择一枚存活的敌方棋子。",
+  RECON_TARGET_ALREADY_KNOWN: "这枚敌子已经被你识别，请选择另一枚。",
+  EXTRA_MOVE_DIFFERENT_PIECE: "追加行动必须使用另一枚棋子。",
+  EXTRA_MOVE_NORMAL_ONLY: "追加行动只能进行普通移动。",
+  RANKED_TIME_CONTROL_LOCKED: "排位用时固定为 10 分钟，不能修改。",
 };
 
 function cleanCode(value: string) {
@@ -203,6 +289,7 @@ function restoreSetupDraft(
   pieces: PublicPiece[],
   side: Side,
   requireComplete = false,
+  augmentIds: readonly AugmentId[] = [],
 ) {
   if (!raw) return null;
   try {
@@ -219,7 +306,7 @@ function restoreSetupDraft(
       if (!Number.isInteger(position.row) || !Number.isInteger(position.col)) return null;
       candidate[pieceId] = { row: position.row as number, col: position.col as number };
     }
-    return isValidSetupDraft(pieces, side, candidate, requireComplete) ? candidate : null;
+    return isValidSetupDraft(pieces, side, candidate, requireComplete, augmentIds) ? candidate : null;
   } catch {
     return null;
   }
@@ -243,7 +330,13 @@ async function parseResponse(response: Response): Promise<unknown> {
 }
 
 async function fetchRoom(code: string, token: string | null, since?: number) {
-  const suffix = Number.isInteger(since) ? `?since=${since}` : "";
+  const params = new URLSearchParams();
+  if (Number.isInteger(since)) params.set("since", String(since));
+  if (typeof window !== "undefined") {
+    const watchMatch = new URL(window.location.href).searchParams.get("match");
+    if (watchMatch) params.set("match", watchMatch);
+  }
+  const suffix = params.size ? `?${params.toString()}` : "";
   const response = await fetch(`/api/rooms/${code}${suffix}`, {
     headers: token ? { Authorization: `Bearer ${token}` } : undefined,
     cache: "no-store",
@@ -251,12 +344,12 @@ async function fetchRoom(code: string, token: string | null, since?: number) {
   return (await parseResponse(response)) as RoomEnvelope | null;
 }
 
-async function postAction(code: string, token: string, version: number, action: PlayerAction) {
+async function postAction(code: string, token: string | null, version: number, action: PlayerAction) {
   const response = await fetch(`/api/rooms/${code}/actions`, {
     method: "POST",
     headers: {
       "Content-Type": "application/json",
-      Authorization: `Bearer ${token}`,
+      ...(token ? { Authorization: `Bearer ${token}` } : {}),
     },
     body: JSON.stringify({ expectedVersion: version, action }),
   });
@@ -279,6 +372,10 @@ function eventText(event: PublicEvent) {
   if (event.result === "game_started") return `${actor}获得先手`;
   if (event.result === "resigned") return `${actor}认输`;
   if (event.result === "timeout") return `${actor}用时耗尽`;
+  if (event.result === "augment_revealed") return "双方军令同时公开";
+  if (event.result === "augment_used") {
+    return `${actor}发动「${event.augmentId ? getAugmentDefinition(event.augmentId).name : "军令"}」`;
+  }
   const path = event.from && event.to ? `${boardCoordinate(event.from)} → ${boardCoordinate(event.to)}` : "";
   if (event.result === "move") return `${actor}移动 · ${path}`;
   if (event.result === "attacker_survives") return `${actor}进攻成功 · ${path}`;
@@ -298,10 +395,17 @@ function finishReasonText(reason: ProjectedGame["finishReason"]) {
 function statusText(room: RoomEnvelope, placedCount?: number) {
   const { snapshot, viewer } = room;
   if (snapshot.phase === "setup") {
-    if (viewer === "spectator") return "双方正在布阵 · 全部棋型可见";
+    if (viewer === "spectator") return room.spectatorPolicy === "full" ? "双方正在布阵 · 明牌观战" : "双方正在布阵 · 暗牌保护中";
     if (snapshot.ready[viewer]) return "阵型已锁定，等待对手";
     if (placedCount !== undefined && placedCount < 25) return `还需放置 ${25 - placedCount} 枚棋子`;
     return "拖动或点选棋子调整阵型";
+  }
+  if (snapshot.phase === "augment_draft") {
+    if (viewer === "spectator") return "双方正在选择第二项军令";
+    const draft = snapshot.augment?.draft.rounds.find(
+      (round) => round.number === snapshot.augment?.draft.activeRound,
+    );
+    return draft?.players[viewer].locked ? "军令已锁定，等待对手" : "请选择第二项军令";
   }
   if (snapshot.phase === "finished") {
     if (!snapshot.winner) return "本局和棋";
@@ -793,20 +897,116 @@ function CapturedPieceBox({ pieces }: { pieces: PublicPiece[] }) {
   );
 }
 
-function Landing({ onCreate, creating, onOpen }: { onCreate: () => void; creating: boolean; onOpen: (code: string) => void }) {
-  const [code, setCode] = useState("");
+function SignInLanding({ signInPath }: { signInPath: string }) {
   return (
-    <main className="landing">
-      <section className="landing-core">
-        <h1>
-          <span>The Queen&apos;s</span>
-          <span>Gambit</span>
-        </h1>
-        <p>暗军棋</p>
-        <div className="landing-actions">
-          <button className="button primary" type="button" onClick={onCreate} disabled={creating}>
-            {creating ? "正在创建…" : "创建棋局"}
+    <main className="landing auth-landing">
+      <div className="auth-stage">
+        <div className="auth-court-card auth-queen" aria-hidden="true" />
+        <section className="landing-core auth-panel">
+          <span className="product-kicker">经典规则 · 军令强化</span>
+          <h1><span>军令</span><span>陆战棋</span></h1>
+          <p>邮件账号 · 在线匹配 · 公平三选一</p>
+          <a className="button primary sign-in-button" href={signInPath}>使用邮箱登录</a>
+          <small className="auth-note">登录后才能对局、观战与保存战绩。</small>
+        </section>
+        <div className="auth-court-card auth-king" aria-hidden="true" />
+      </div>
+    </main>
+  );
+}
+
+function Landing({
+  user,
+  signOutPath,
+  account,
+  recentMatches,
+  friends,
+  matchmaking,
+  watchingMatchId,
+  onCreate,
+  creating,
+  onOpen,
+  onMatchmaking,
+  onCancelMatchmaking,
+  onFriendRequest,
+  onAcceptFriend,
+  onWatchFriend,
+}: {
+  user: SessionUser;
+  signOutPath: string;
+  account: AccountSummary | null;
+  recentMatches: RecentMatch[];
+  friends: FriendsEnvelope;
+  matchmaking: MatchmakingEnvelope;
+  watchingMatchId: string | null;
+  onCreate: (mode: "classic" | "augment", spectatorPolicy: "hidden" | "full") => void;
+  creating: boolean;
+  onOpen: (code: string) => void;
+  onMatchmaking: () => void;
+  onCancelMatchmaking: () => void;
+  onFriendRequest: (handle: string) => void;
+  onAcceptFriend: (requestId: string) => void;
+  onWatchFriend: (matchId: string) => void;
+}) {
+  const [code, setCode] = useState("");
+  const [mode, setMode] = useState<"classic" | "augment">("classic");
+  const [spectatorPolicy, setSpectatorPolicy] = useState<"hidden" | "full">("hidden");
+  const [friendHandle, setFriendHandle] = useState("");
+  const searching = matchmaking.state === "queued";
+  return (
+    <main className="lobby-shell">
+      <header className="lobby-header">
+        <Link className="wordmark" href="/" aria-label="军令首页">
+          <span className="wordmark-mark">令</span><span>军令 · 陆战棋</span>
+        </Link>
+        <div className="account-chip">
+          <span>{account?.handle ?? user.displayName}</span>
+          <small>{account?.rank.label ?? "正在载入段位"}</small>
+          <a href={signOutPath}>退出</a>
+        </div>
+      </header>
+
+      <section className="lobby-hero">
+        <div>
+          <span className="product-kicker">保留经典，也允许每局不同</span>
+          <h1>今天下哪一种军棋？</h1>
+          <p>经典模式完整保留原规则；军令强化模式在布阵和第 10 手前各进行一次同等级三选一。</p>
+        </div>
+        <div className="rank-card">
+          <span>当前段位</span>
+          <strong>{account?.rank.label ?? "—"}</strong>
+          <small>{account ? `${account.rating} 分 · ${Math.round(account.record.winRate * 100)}% 胜率` : "正在同步战绩"}</small>
+          <div className="rank-progress" aria-hidden="true"><span style={{ width: `${Math.round((account?.rank.progress ?? 0) * 100)}%` }} /></div>
+        </div>
+      </section>
+
+      <div className="lobby-grid">
+        <section className="lobby-panel play-panel">
+          <div className="panel-title-row"><strong>开始对局</strong><span>好友房不改变排位分</span></div>
+          <div className="mode-picker" role="radiogroup" aria-label="房间模式">
+            <button className={mode === "classic" ? "is-selected" : ""} type="button" role="radio" aria-checked={mode === "classic"} onClick={() => setMode("classic")}>
+              <strong>经典暗军棋</strong><small>原版规则，完全不变</small>
+            </button>
+            <button className={mode === "augment" ? "is-selected" : ""} type="button" role="radio" aria-checked={mode === "augment"} onClick={() => setMode("augment")}>
+              <strong>军令强化</strong><small>两轮强化，20 张牌池</small>
+            </button>
+          </div>
+          <label className="spectator-setting">
+            <span>好友房观战</span>
+            <select value={spectatorPolicy} onChange={(event) => setSpectatorPolicy(event.target.value as "hidden" | "full")}>
+              <option value="hidden">隐藏双方暗牌</option>
+              <option value="full">允许明牌观战</option>
+            </select>
+          </label>
+          <button className="button primary" type="button" onClick={() => onCreate(mode, spectatorPolicy)} disabled={creating}>
+            {creating ? "正在创建…" : `创建${mode === "classic" ? "经典" : "军令"}好友房`}
           </button>
+          <div className="ranked-callout">
+            <div><strong>军令排位</strong><small>10:00 · 落子扣时后余时≤5:00，则 +5 秒</small></div>
+            <button className="button secondary compact" type="button" onClick={searching ? onCancelMatchmaking : onMatchmaking}>
+              {searching ? `取消匹配 · ±${matchmaking.ratingRange ?? 100}` : "寻找实力相近的对手"}
+            </button>
+          </div>
           <form
             className="join-form"
             onSubmit={(event) => {
@@ -823,13 +1023,70 @@ function Landing({ onCreate, creating, onOpen }: { onCreate: () => void; creatin
             />
             <button type="submit" aria-label="进入房间" disabled={cleanCode(code).length !== 8}>→</button>
           </form>
-        </div>
-      </section>
+        </section>
+
+        <section className="lobby-panel stats-panel">
+          <div className="panel-title-row"><strong>最近 10 局</strong><span>{account?.record.games ?? 0} 局总战绩</span></div>
+          <div className="stat-strip">
+            <span><strong>{account?.record.wins ?? 0}</strong><small>胜</small></span>
+            <span><strong>{account?.record.losses ?? 0}</strong><small>负</small></span>
+            <span><strong>{account?.record.draws ?? 0}</strong><small>和</small></span>
+          </div>
+          <ol className="history-list">
+            {recentMatches.length ? recentMatches.map((match) => (
+              <li key={match.id}>
+                <span className={`outcome outcome-${match.outcome}`}>{match.outcome === "win" ? "胜" : match.outcome === "loss" ? "负" : "和"}</span>
+                <strong>{match.opponentHandle}</strong>
+                <small>{match.ratingDelta > 0 ? "+" : ""}{match.ratingDelta} · {new Date(match.completedAt).toLocaleDateString("zh-CN")}</small>
+              </li>
+            )) : <li className="empty-row">完成第一局后，这里会显示最近战绩。</li>}
+          </ol>
+        </section>
+
+        <section className="lobby-panel friends-panel">
+          <div className="panel-title-row"><strong>好友</strong><span>{friends.friends.filter((friend) => friend.presence !== "offline").length} 人在线</span></div>
+          <form className="friend-form" onSubmit={(event) => { event.preventDefault(); if (friendHandle.trim()) { onFriendRequest(friendHandle.trim()); setFriendHandle(""); } }}>
+            <input aria-label="好友昵称" placeholder="输入玩家昵称" value={friendHandle} onChange={(event) => setFriendHandle(event.target.value)} />
+            <button type="submit">添加</button>
+          </form>
+          {friends.incoming.map((request) => (
+            <div className="friend-request" key={request.requestId}><span>{request.player.handle} 请求加你为好友</span><button type="button" onClick={() => onAcceptFriend(request.requestId)}>接受</button></div>
+          ))}
+          <ul className="friend-list">
+            {friends.friends.length ? friends.friends.map((friend) => (
+              <li key={friend.relationshipId}>
+                <span className={`presence-dot presence-${friend.presence}`} aria-hidden="true" />
+                <div><strong>{friend.player.handle}</strong><small>{friend.player.rank.label}</small></div>
+                {friend.presence === "in_game" && friend.currentMatchId ? (
+                  <button
+                    type="button"
+                    disabled={watchingMatchId !== null}
+                    aria-busy={watchingMatchId === friend.currentMatchId}
+                    onClick={() => onWatchFriend(friend.currentMatchId!)}
+                  >
+                    {watchingMatchId === friend.currentMatchId ? "进入中…" : "观战"}
+                  </button>
+                ) : <small>{friend.presence === "offline" ? "离线" : friend.presence === "searching" ? "匹配中" : "在线"}</small>}
+              </li>
+            )) : <li className="empty-row">添加好友后，可以看到在线状态并安全观战。</li>}
+          </ul>
+        </section>
+      </div>
     </main>
   );
 }
 
-export default function GameApp({ hasRoom = false }: { hasRoom?: boolean }) {
+export default function GameApp({
+  hasRoom = false,
+  user,
+  signInPath = "/signin-with-chatgpt?return_to=%2F",
+  signOutPath = "/signout-with-chatgpt?return_to=%2F",
+}: {
+  hasRoom?: boolean;
+  user?: SessionUser | null;
+  signInPath?: string;
+  signOutPath?: string;
+}) {
   const [room, setRoom] = useState<RoomEnvelope | null>(null);
   const [token, setToken] = useState<string | null>(null);
   const [inviteToken, setInviteToken] = useState<string | null>(null);
@@ -837,7 +1094,7 @@ export default function GameApp({ hasRoom = false }: { hasRoom?: boolean }) {
   const [setupDraftState, setSetupDraftState] = useState<SetupDraftState | null>(null);
   const [flipped, setFlipped] = useState(false);
   const [busy, setBusy] = useState(false);
-  const [loading, setLoading] = useState(hasRoom);
+  const [loading, setLoading] = useState(hasRoom && Boolean(user));
   const [creating, setCreating] = useState(false);
   const [fatalError, setFatalError] = useState<string | null>(null);
   const [toast, setToast] = useState<string | null>(null);
@@ -848,10 +1105,17 @@ export default function GameApp({ hasRoom = false }: { hasRoom?: boolean }) {
   const [clockTick, setClockTick] = useState(0);
   const [clockAnchor, setClockAnchor] = useState(0);
   const [connection, setConnection] = useState<"live" | "syncing" | "offline">("live");
+  const [account, setAccount] = useState<AccountSummary | null>(null);
+  const [recentMatches, setRecentMatches] = useState<RecentMatch[]>([]);
+  const [friends, setFriends] = useState<FriendsEnvelope>({ friends: [], incoming: [], outgoing: [] });
+  const [matchmaking, setMatchmaking] = useState<MatchmakingEnvelope>({ state: "idle" });
+  const [watchingMatchId, setWatchingMatchId] = useState<string | null>(null);
+  const [activeAugmentId, setActiveAugmentId] = useState<AugmentId | null>(null);
   const roomRef = useRef<RoomEnvelope | null>(null);
   const roomSessionRef = useRef(0);
   const busyRef = useRef(false);
   const creatingRef = useRef(false);
+  const watchingMatchRef = useRef<string | null>(null);
   const toastTimerRef = useRef<number | null>(null);
   const replayIndexRef = useRef<number | null>(null);
   const reduceMotionRef = useRef(false);
@@ -933,7 +1197,10 @@ export default function GameApp({ hasRoom = false }: { hasRoom?: boolean }) {
 
   useEffect(() => {
     const cancelSelection = (event: KeyboardEvent) => {
-      if (event.key === "Escape" && !rulesDialogRef.current?.open) setSelectedPieceId(null);
+      if (event.key === "Escape" && !rulesDialogRef.current?.open) {
+        setSelectedPieceId(null);
+        setActiveAugmentId(null);
+      }
     };
     window.addEventListener("keydown", cancelSelection);
     return () => window.removeEventListener("keydown", cancelSelection);
@@ -958,6 +1225,77 @@ export default function GameApp({ hasRoom = false }: { hasRoom?: boolean }) {
       toastTimerRef.current = null;
     }, 2800);
   }
+  async function refreshAccountAndFriends() {
+    if (!user) return;
+    const [accountResponse, friendsResponse] = await Promise.all([
+      fetch("/api/account", { cache: "no-store" }),
+      fetch("/api/friends", { cache: "no-store" }),
+    ]);
+    const accountPayload = (await parseResponse(accountResponse)) as AccountEnvelope;
+    const friendsPayload = (await parseResponse(friendsResponse)) as FriendsEnvelope;
+    setAccount(accountPayload.account);
+    setRecentMatches(accountPayload.recentMatches);
+    setFriends(friendsPayload);
+  }
+
+  async function enterAuthenticatedRoom(code: string) {
+    const normalized = cleanCode(code);
+    if (normalized.length !== 8 || roomRef.current?.code === normalized) return;
+    clearRoom();
+    const session = roomSessionRef.current;
+    setToken(null);
+    setInviteToken(null);
+    setLoading(true);
+    setFatalError(null);
+    window.history.replaceState(null, "", `/?room=${normalized}`);
+    try {
+      await loadInitialRoom(normalized, null, session);
+    } catch (error) {
+      if (session !== roomSessionRef.current) return;
+      const errorCode = error instanceof RequestError ? error.code : "ROOM_READ_FAILED";
+      setFatalError(ERROR_TEXT[errorCode] ?? "暂时无法进入匹配对局。");
+    } finally {
+      if (session === roomSessionRef.current) setLoading(false);
+    }
+  }
+
+  async function refreshMatchmaking() {
+    if (!user) return;
+    const response = await fetch("/api/matchmaking", { cache: "no-store" });
+    const payload = (await parseResponse(response)) as MatchmakingEnvelope;
+    setMatchmaking(payload);
+    if (payload.state === "matched" && payload.match?.game.status === "ready" && payload.match.game.code) {
+      await enterAuthenticatedRoom(payload.match.game.code);
+    }
+  }
+
+  const syncLobbyData = useEffectEvent(async () => {
+    await Promise.all([
+      refreshAccountAndFriends(),
+      fetch("/api/presence", { method: "POST" }).then(parseResponse),
+      refreshMatchmaking(),
+    ]);
+  });
+
+  useEffect(() => {
+    if (!user || room?.code) return;
+    let stopped = false;
+    const sync = async () => {
+      try {
+        await syncLobbyData();
+      } catch (error) {
+        if (!stopped && error instanceof RequestError && error.status === 401) {
+          setFatalError("登录状态已失效，请重新登录。");
+        }
+      }
+    };
+    void sync();
+    const timer = window.setInterval(sync, matchmaking.state === "queued" ? 1600 : 15_000);
+    return () => {
+      stopped = true;
+      window.clearInterval(timer);
+    };
+  }, [user, room?.code, matchmaking.state]);
 
   function acceptRoom(next: RoomEnvelope, allowRoomChange = false) {
     const current = roomRef.current;
@@ -987,6 +1325,8 @@ export default function GameApp({ hasRoom = false }: { hasRoom?: boolean }) {
     }
     if (isPlayer(next.viewer) && next.snapshot.phase === "setup") {
       const side = next.viewer;
+      const selectedOpeningAugment = next.snapshot.augment?.draft.rounds[0]?.players[side].selectedId;
+      const setupAugmentIds = selectedOpeningAugment ? [selectedOpeningAugment] : [];
       const hasSetupHistory = next.snapshot.events.some(
         (event) => event.actor === side && (event.result === "ready" || event.result === "unready"),
       );
@@ -995,13 +1335,13 @@ export default function GameApp({ hasRoom = false }: { hasRoom?: boolean }) {
           return {
             roomCode: next.code,
             side,
-            locations: createSetupDraft(next.snapshot.pieces, side, true),
+            locations: createSetupDraft(next.snapshot.pieces, side, true, setupAugmentIds),
           };
         }
         if (
           draftState?.roomCode === next.code &&
           draftState.side === side &&
-          isValidSetupDraft(next.snapshot.pieces, side, draftState.locations)
+          isValidSetupDraft(next.snapshot.pieces, side, draftState.locations, false, setupAugmentIds)
         ) {
           return draftState;
         }
@@ -1009,12 +1349,14 @@ export default function GameApp({ hasRoom = false }: { hasRoom?: boolean }) {
           readLocalValue(setupDraftKey(next.code, side)),
           next.snapshot.pieces,
           side,
+          false,
+          setupAugmentIds,
         );
         return {
           roomCode: next.code,
           side,
           locations:
-            restored ?? createSetupDraft(next.snapshot.pieces, side, hasSetupHistory),
+            restored ?? createSetupDraft(next.snapshot.pieces, side, hasSetupHistory, setupAugmentIds),
         };
       });
     } else {
@@ -1025,6 +1367,9 @@ export default function GameApp({ hasRoom = false }: { hasRoom?: boolean }) {
     setClockTick(receivedAt);
     roomRef.current = next;
     setRoom(next);
+    if (isPlayer(next.viewer) && next.snapshot.augment?.pendingRecon) {
+      setActiveAugmentId(next.snapshot.augment.pendingRecon.augmentId);
+    }
     return true;
   }
 
@@ -1033,6 +1378,7 @@ export default function GameApp({ hasRoom = false }: { hasRoom?: boolean }) {
     busyRef.current = false;
     setBusy(false);
     setSelectedPieceId(null);
+    setActiveAugmentId(null);
     setSetupDraftState(null);
     setRulesOpen(false);
     replayIndexRef.current = null;
@@ -1066,6 +1412,11 @@ export default function GameApp({ hasRoom = false }: { hasRoom?: boolean }) {
   useEffect(() => {
     let cancelled = false;
     const session = ++roomSessionRef.current;
+    if (!user) {
+      return () => {
+        cancelled = true;
+      };
+    }
     void (async () => {
       let code = "";
       try {
@@ -1174,7 +1525,7 @@ export default function GameApp({ hasRoom = false }: { hasRoom?: boolean }) {
     return () => {
       cancelled = true;
     };
-  }, []);
+  }, [user]);
 
   useEffect(() => {
     if (!room?.code) return;
@@ -1216,7 +1567,10 @@ export default function GameApp({ hasRoom = false }: { hasRoom?: boolean }) {
     };
   }, [room?.code, room?.viewer, token]);
 
-  async function createRoom() {
+  async function createRoom(
+    gameMode: "classic" | "augment" = "classic",
+    spectatorPolicy: "hidden" | "full" = "hidden",
+  ) {
     if (creatingRef.current) return;
     creatingRef.current = true;
     clearRoom();
@@ -1226,7 +1580,11 @@ export default function GameApp({ hasRoom = false }: { hasRoom?: boolean }) {
     setCreating(true);
     setFatalError(null);
     try {
-      const response = await fetch("/api/rooms", { method: "POST" });
+      const response = await fetch("/api/rooms", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ gameMode, spectatorPolicy }),
+      });
       const created = (await parseResponse(response)) as unknown as CreateRoomEnvelope;
       if (session !== roomSessionRef.current) return;
       const playerSaved = writeLocalValue(roomTokenKey(created.code), created.playerToken);
@@ -1273,9 +1631,95 @@ export default function GameApp({ hasRoom = false }: { hasRoom?: boolean }) {
     }
   }
 
+  async function startMatchmaking() {
+    try {
+      const response = await fetch("/api/matchmaking", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ mode: "hex_ranked" }),
+      });
+      const payload = (await parseResponse(response)) as MatchmakingEnvelope;
+      setMatchmaking(payload);
+      showToast(payload.state === "matched" ? "已找到对手，正在创建棋局。" : "已开始匹配。");
+      if (payload.state === "matched" && payload.match?.game.status === "ready" && payload.match.game.code) {
+        await enterAuthenticatedRoom(payload.match.game.code);
+      }
+    } catch (error) {
+      showToast(error instanceof RequestError && error.code === "MATCHMAKING_BUSY" ? "匹配服务正忙，请稍后重试。" : "暂时无法开始匹配。");
+    }
+  }
+
+  async function cancelMatchmaking() {
+    try {
+      const response = await fetch("/api/matchmaking", { method: "DELETE" });
+      setMatchmaking((await parseResponse(response)) as MatchmakingEnvelope);
+      showToast("已取消匹配。");
+    } catch {
+      showToast("取消匹配失败，请重试。");
+    }
+  }
+
+  async function requestFriend(handle: string) {
+    try {
+      await parseResponse(await fetch("/api/friends/requests", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ handle }),
+      }));
+      await refreshAccountAndFriends();
+      showToast("好友请求已发送。");
+    } catch (error) {
+      const code = error instanceof RequestError ? error.code : "";
+      const message = code === "PLAYER_NOT_FOUND" ? "没有找到这个玩家昵称。" : code === "ALREADY_FRIENDS" ? "你们已经是好友。" : "好友请求没有发送成功。";
+      showToast(message);
+    }
+  }
+
+  async function acceptFriend(requestId: string) {
+    try {
+      await parseResponse(await fetch(`/api/friends/requests/${requestId}/accept`, { method: "POST" }));
+      await refreshAccountAndFriends();
+      showToast("已添加好友。");
+    } catch {
+      showToast("接受好友请求失败。");
+    }
+  }
+
+  async function watchFriendMatch(matchId: string) {
+    if (watchingMatchRef.current) return;
+    watchingMatchRef.current = matchId;
+    setWatchingMatchId(matchId);
+    let session: number | null = null;
+    try {
+      const response = await fetch(`/api/friends/matches/${matchId}`, { cache: "no-store" });
+      const payload = (await parseResponse(response)) as { game: { status: string; code: string | null } };
+      if (payload.game.status !== "ready" || !payload.game.code) {
+        showToast("好友对局正在创建，请稍后再试。");
+        return;
+      }
+      clearRoom();
+      session = roomSessionRef.current;
+      setLoading(true);
+      setFatalError(null);
+      window.history.replaceState(null, "", `/?room=${payload.game.code}&watch=1&match=${encodeURIComponent(matchId)}`);
+      await loadInitialRoom(payload.game.code, null, session);
+    } catch (error) {
+      if (session !== null && session !== roomSessionRef.current) return;
+      if (session !== null) window.history.replaceState(null, "", "/");
+      const unavailable = error instanceof RequestError && [403, 404, 409].includes(error.status);
+      showToast(unavailable
+        ? "这局当前不可观战，或你还不是参赛者的好友。"
+        : "暂时无法载入好友对局，请重试。");
+    } finally {
+      if (session === null || session === roomSessionRef.current) setLoading(false);
+      if (watchingMatchRef.current === matchId) watchingMatchRef.current = null;
+      setWatchingMatchId((current) => current === matchId ? null : current);
+    }
+  }
+
   async function performAction(action: PlayerAction) {
     const current = roomRef.current;
-    if (!current || !token || !isPlayer(current.viewer) || busyRef.current) return;
+    if (!current || !isPlayer(current.viewer) || busyRef.current) return;
     const session = roomSessionRef.current;
     busyRef.current = true;
     setBusy(true);
@@ -1286,6 +1730,9 @@ export default function GameApp({ hasRoom = false }: { hasRoom?: boolean }) {
       acceptRoom(next);
       setConnection("live");
       setSelectedPieceId(null);
+      if (["augment_move", "augment_exchange", "augment_recon"].includes(action.type)) {
+        setActiveAugmentId(null);
+      }
     } catch (error) {
       if (session !== roomSessionRef.current || roomRef.current?.code !== current.code) return;
       if (error instanceof RequestError && error.status === 409) {
@@ -1333,6 +1780,14 @@ export default function GameApp({ hasRoom = false }: { hasRoom?: boolean }) {
     setupDraftState.side === setupSide
       ? setupDraftState.locations
       : null;
+  const selectedOpeningAugment =
+    room && setupSide
+      ? room.snapshot.augment?.draft.rounds[0]?.players[setupSide].selectedId ?? null
+      : null;
+  const setupAugmentIds = useMemo(
+    () => selectedOpeningAugment ? [selectedOpeningAugment] : [],
+    [selectedOpeningAugment],
+  );
   const renderPieces = useMemo(() => {
     if (!room || !setupSide || room.snapshot.phase !== "setup" || !activeSetupDraft) {
       return room?.snapshot.pieces ?? [];
@@ -1369,7 +1824,37 @@ export default function GameApp({ hasRoom = false }: { hasRoom?: boolean }) {
   })();
 
   const legalTargets = useMemo(() => {
-    if (!room || !selectedPieceId || !isPlayer(room.viewer)) return [] as Position[];
+    if (!room || !isPlayer(room.viewer)) return [] as Position[];
+    if (room.snapshot.phase === "playing" && activeAugmentId) {
+      const effect = getAugmentDefinition(activeAugmentId).effect;
+      if (effect.kind === "reconnaissance") {
+        return room.snapshot.pieces
+          .filter((piece) => piece.alive && piece.side !== room.viewer && piece.type === null)
+          .map((piece) => ({ row: piece.row, col: piece.col }));
+      }
+      if (!selectedPieceId || !selectedPosition) return [] as Position[];
+      if (effect.kind === "movement") {
+        return getProjectedAugmentLegalTargets(
+          room.snapshot,
+          room.viewer,
+          activeAugmentId,
+          selectedPosition,
+        );
+      }
+      if (effect.kind === "exchange") {
+        return room.snapshot.pieces
+          .filter((piece) => piece.alive && piece.side === room.viewer && piece.id !== selectedPieceId)
+          .filter((piece) => !getProjectedAugmentExchangeViolation(
+            room.snapshot,
+            room.viewer as Side,
+            activeAugmentId,
+            selectedPosition,
+            piece,
+          ))
+          .map((piece) => ({ row: piece.row, col: piece.col }));
+      }
+    }
+    if (!selectedPieceId) return [] as Position[];
     if (room.snapshot.phase === "playing" && selectedPosition) {
       return getProjectedLegalTargets(room.snapshot, room.viewer, selectedPosition);
     }
@@ -1382,11 +1867,12 @@ export default function GameApp({ hasRoom = false }: { hasRoom?: boolean }) {
             activeSetupDraft,
             selectedPieceId,
             position,
+            setupAugmentIds,
           ),
       );
     }
     return [] as Position[];
-  }, [activeSetupDraft, room, selectedPieceId, selectedPosition]);
+  }, [activeAugmentId, activeSetupDraft, room, selectedPieceId, selectedPosition, setupAugmentIds]);
 
   const targetKeys = useMemo(() => new Set(legalTargets.map(positionKey)), [legalTargets]);
 
@@ -1402,6 +1888,7 @@ export default function GameApp({ hasRoom = false }: { hasRoom?: boolean }) {
       activeSetupDraft,
       pieceId,
       position,
+      setupAugmentIds,
     );
     if (violation) {
       showToast(ERROR_TEXT[violation] ?? ERROR_TEXT.INVALID_LAYOUT);
@@ -1413,6 +1900,7 @@ export default function GameApp({ hasRoom = false }: { hasRoom?: boolean }) {
       activeSetupDraft,
       pieceId,
       position,
+      setupAugmentIds,
     );
     setSetupDraftState({ roomCode: room.code, side: setupSide, locations });
     setSelectedPieceId(null);
@@ -1432,6 +1920,21 @@ export default function GameApp({ hasRoom = false }: { hasRoom?: boolean }) {
       return;
     }
     const from = { row: piece.row, col: piece.col };
+    if (activeAugmentId) {
+      const effect = getAugmentDefinition(activeAugmentId).effect;
+      if (effect.kind === "movement") {
+        const violation = getProjectedAugmentMoveViolation(
+          room.snapshot,
+          room.viewer,
+          activeAugmentId,
+          from,
+          position,
+        );
+        if (violation) showToast(ERROR_TEXT[violation] ?? "这个军令不能这样使用。");
+        else void performAction({ type: "augment_move", augmentId: activeAugmentId, from, to: position });
+        return;
+      }
+    }
     const violation = getProjectedMoveViolation(room.snapshot, room.viewer, from, position);
     if (violation) showToast(ERROR_TEXT[violation] ?? ERROR_TEXT.ACTION_FAILED);
     else void performAction({ type: "move", from, to: position });
@@ -1484,6 +1987,10 @@ export default function GameApp({ hasRoom = false }: { hasRoom?: boolean }) {
   function beginBoardPieceDrag(pieceId: string, position: Position) {
     dragDroppedRef.current = false;
     if (!room || !isPlayer(room.viewer) || movementAnimation) return false;
+    if (activeAugmentId) {
+      const effect = getAugmentDefinition(activeAugmentId).effect;
+      if (effect.kind === "exchange" || effect.kind === "reconnaissance") return false;
+    }
     if (room.snapshot.phase === "setup") {
       if (room.snapshot.ready[room.viewer]) {
         showToast(ERROR_TEXT.LAYOUT_LOCKED);
@@ -1530,11 +2037,49 @@ export default function GameApp({ hasRoom = false }: { hasRoom?: boolean }) {
       showToast(ERROR_TEXT.GAME_NOT_STARTED);
       return;
     }
+    if (activeAugmentId) {
+      const effect = getAugmentDefinition(activeAugmentId).effect;
+      if (effect.kind === "reconnaissance") {
+        if (!piece || piece.side === room.viewer || !targetKeys.has(positionKey(position))) {
+          showToast("请选择一枚尚未侦察的敌方棋子。");
+        } else {
+          void performAction({ type: "augment_recon", augmentId: activeAugmentId, target: position });
+        }
+        return;
+      }
+    }
     if (room.snapshot.turn !== room.viewer) {
       showToast(ERROR_TEXT.NOT_YOUR_TURN);
       return;
     }
     if (piece?.side === room.viewer) {
+      if (
+        activeAugmentId &&
+        selectedPieceId &&
+        piece.id !== selectedPieceId &&
+        getAugmentDefinition(activeAugmentId).effect.kind === "exchange"
+      ) {
+        const fromPiece = room.snapshot.pieces.find((candidate) => candidate.id === selectedPieceId);
+        if (!fromPiece) {
+          setSelectedPieceId(piece.id);
+          return;
+        }
+        const violation = getProjectedAugmentExchangeViolation(
+          room.snapshot,
+          room.viewer,
+          activeAugmentId,
+          fromPiece,
+          position,
+        );
+        if (violation) showToast(ERROR_TEXT[violation] ?? "这两枚棋子不能执行换防。");
+        else void performAction({
+          type: "augment_exchange",
+          augmentId: activeAugmentId,
+          from: { row: fromPiece.row, col: fromPiece.col },
+          to: position,
+        });
+        return;
+      }
       if (piece.id === selectedPieceId) {
         setSelectedPieceId(null);
       } else {
@@ -1576,7 +2121,7 @@ export default function GameApp({ hasRoom = false }: { hasRoom?: boolean }) {
       showToast(ERROR_TEXT.LAYOUT_LOCKED);
       return;
     }
-    const locations = randomizeSetupDraft(room.snapshot.pieces, setupSide);
+    const locations = randomizeSetupDraft(room.snapshot.pieces, setupSide, setupAugmentIds);
     setSetupDraftState({ roomCode: room.code, side: setupSide, locations });
     setSelectedPieceId(null);
   }
@@ -1587,7 +2132,7 @@ export default function GameApp({ hasRoom = false }: { hasRoom?: boolean }) {
       void performAction({ type: "ready", value: false });
       return;
     }
-    if (!isValidSetupDraft(room.snapshot.pieces, setupSide, activeSetupDraft, true)) {
+    if (!isValidSetupDraft(room.snapshot.pieces, setupSide, activeSetupDraft, true, setupAugmentIds)) {
       showToast(
         placedSetupCount !== undefined && placedSetupCount < 25
           ? `还需放置 ${25 - placedSetupCount} 枚棋子。`
@@ -1595,8 +2140,26 @@ export default function GameApp({ hasRoom = false }: { hasRoom?: boolean }) {
       );
       return;
     }
-    const layout = setupDraftToLayout(room.snapshot.pieces, setupSide, activeSetupDraft);
+    const layout = setupDraftToLayout(room.snapshot.pieces, setupSide, activeSetupDraft, setupAugmentIds);
     void performAction({ type: "ready", value: true, layout });
+  }
+
+  function activateAugment(augmentId: AugmentId) {
+    const effect = getAugmentDefinition(augmentId).effect;
+    if (!["movement", "exchange", "reconnaissance"].includes(effect.kind)) {
+      showToast("这张强化会在满足条件时自动生效。");
+      return;
+    }
+    setSelectedPieceId(null);
+    setActiveAugmentId((current) => current === augmentId ? null : augmentId);
+    if (effect.kind === "reconnaissance") showToast("请在棋盘上选择一枚未知敌子。");
+    else if (effect.kind === "exchange") showToast("依次选择两枚可换防的己方棋子。");
+    else showToast("先选择己方棋子，再选择高亮目标。");
+  }
+
+  function requestResign() {
+    if (!room || !isPlayer(room.viewer) || !["playing", "augment_draft"].includes(room.snapshot.phase)) return;
+    if (window.confirm("确定认输并结束本局吗？")) void performAction({ type: "resign" });
   }
 
   async function copyLink(kind: "player" | "spectator") {
@@ -1605,7 +2168,9 @@ export default function GameApp({ hasRoom = false }: { hasRoom?: boolean }) {
     const link = kind === "player" && inviteToken ? `${base}#invite=${inviteToken}` : `${base}&watch=1`;
     try {
       await navigator.clipboard.writeText(link);
-      showToast(kind === "player" ? "玩家邀请已复制" : "明牌观战链接已复制");
+      showToast(kind === "player"
+        ? "玩家邀请已复制"
+        : `${room.spectatorPolicy === "full" ? "明牌" : "安全"}观战链接已复制`);
     } catch {
       showToast("复制失败，请允许剪贴板权限后重试。");
     }
@@ -1621,17 +2186,41 @@ export default function GameApp({ hasRoom = false }: { hasRoom?: boolean }) {
 
   if (loading) {
     return (
-      <main className="loading-screen">
-        <span className="loading-mark">Q</span>
-        <p>正在展开棋盘</p>
+      <main className="loading-screen" aria-busy="true">
+        <span className="loading-mark" aria-hidden="true">令</span>
+        <p role="status" aria-live="polite">正在展开棋盘</p>
       </main>
     );
   }
 
   if (!room) {
+    if (!user) {
+      return (
+        <>
+          <SignInLanding signInPath={signInPath} />
+          {fatalError ? <div className="toast error-toast" role="alert" aria-live="assertive">{fatalError}</div> : null}
+        </>
+      );
+    }
     return (
       <>
-        <Landing onCreate={createRoom} creating={creating} onOpen={openRoom} />
+        <Landing
+          user={user}
+          signOutPath={signOutPath}
+          account={account}
+          recentMatches={recentMatches}
+          friends={friends}
+          matchmaking={matchmaking}
+          watchingMatchId={watchingMatchId}
+          onCreate={createRoom}
+          creating={creating}
+          onOpen={openRoom}
+          onMatchmaking={startMatchmaking}
+          onCancelMatchmaking={cancelMatchmaking}
+          onFriendRequest={requestFriend}
+          onAcceptFriend={acceptFriend}
+          onWatchFriend={watchFriendMatch}
+        />
         {fatalError ? <div className="toast error-toast" role="alert" aria-live="assertive">{fatalError}</div> : null}
       </>
     );
@@ -1649,6 +2238,7 @@ export default function GameApp({ hasRoom = false }: { hasRoom?: boolean }) {
         from: activeReplayFrame.move.from,
         to: activeReplayFrame.move.to,
         result: activeReplayFrame.move.result,
+        augmentId: activeReplayFrame.move.augmentId,
       }
     : undefined;
   const latestOpponentMove = latestOpponentMovementEvent(game.events, room.viewer);
@@ -1698,7 +2288,7 @@ export default function GameApp({ hasRoom = false }: { hasRoom?: boolean }) {
     );
   };
   const timeControlMinutes = game.clock ? Math.round(game.clock.initialMs / 60_000) : null;
-  const timeControlLocked = game.ready.black || game.ready.white;
+  const timeControlLocked = game.ready.black || game.ready.white || Boolean(game.clock?.incrementMs);
   const aliveCount = (side: Side) => game.pieces.filter((piece) => piece.alive && piece.side === side).length;
   const replayAliveCount = (side: Side) =>
     displayedPieces.filter((piece) => piece.alive && piece.side === side).length;
@@ -1709,21 +2299,46 @@ export default function GameApp({ hasRoom = false }: { hasRoom?: boolean }) {
   const boardPieceCount = (side: Side) => activeReplayFrame ? replayAliveCount(side) : visiblePieceCount(side);
   const seatState = (side: Side) => {
     if (game.phase === "setup") return game.ready[side] ? "已锁定" : game.joined[side] ? "布阵中" : "未进入";
+    if (game.phase === "augment_draft") {
+      const draft = game.augment?.draft.rounds.find((round) => round.number === game.augment?.draft.activeRound);
+      return draft?.players[side].locked ? "已选令" : "选令中";
+    }
     if (game.phase === "finished") return !game.winner ? "和棋" : game.winner === side ? "获胜" : "落败";
     return game.turn === side ? "行动" : "等待";
   };
   const lastEvents = [...game.events].reverse().slice(0, 6);
+  const activeDraftRound = game.augment?.draft.activeRound
+    ? game.augment.draft.rounds.find((round) => round.number === game.augment?.draft.activeRound) ?? null
+    : null;
+  const viewerDraft = viewerSide && activeDraftRound ? activeDraftRound.players[viewerSide] : null;
+  const opponentDraft = viewerSide && activeDraftRound
+    ? activeDraftRound.players[viewerSide === "black" ? "white" : "black"]
+    : null;
+  const draftOptions = viewerDraft?.options?.map(getAugmentDefinition) ?? [];
+  const showAugmentDraft = Boolean(
+    viewerSide &&
+      activeDraftRound &&
+      viewerDraft?.options &&
+      (!viewerDraft.locked || game.phase === "augment_draft"),
+  );
+  const augmentRailItems = (side: Side) =>
+    (game.augment?.draft.loadouts[side] ?? []).map((id) => ({
+      augment: getAugmentDefinition(id),
+      triggerCount: game.augment?.triggerCounts[side][id] ?? 0,
+    }));
+  const primaryRailSide: Side = viewerSide ?? "black";
+  const secondaryRailSide: Side = otherSide(primaryRailSide);
 
   return (
     <main className="room-page">
       <header className="room-header">
         <button className="wordmark wordmark-button" type="button" onClick={leaveRoom}>
-          <span className="wordmark-mark">Q</span>
-          <span>The Queen&apos;s Gambit</span>
+          <span className="wordmark-mark">令</span>
+          <span>军令 · 陆战棋</span>
         </button>
         <div className="room-identity">
           <span className="room-code">{displayCode(room.code)}</span>
-          <span className={`connection ${connection}`}>{connection === "offline" ? "正在重连" : room.viewer === "spectator" ? "明牌观战" : sideName(room.viewer)}</span>
+          <span className={`connection ${connection}`}>{connection === "offline" ? "正在重连" : room.viewer === "spectator" ? room.spectatorPolicy === "full" ? "明牌观战" : "安全观战" : sideName(room.viewer)}</span>
         </div>
         <div className="header-actions">
           {replayFrames.length ? (
@@ -1768,12 +2383,42 @@ export default function GameApp({ hasRoom = false }: { hasRoom?: boolean }) {
         </div>
       </header>
 
+      {showAugmentDraft && activeDraftRound && viewerDraft ? (
+        <div className="augment-draft-overlay" role="dialog" aria-modal="true" aria-label="强化选择">
+          <AugmentDraft
+            round={activeDraftRound.number}
+            options={draftOptions}
+            selectedId={viewerDraft.selectedId}
+            locked={viewerDraft.locked}
+            opponentLocked={opponentDraft?.locked ?? false}
+            refreshUsed={viewerDraft.refreshed}
+            seenCount={game.augment?.draft.seenIds?.length ?? 0}
+            deadlineAt={game.augment?.draftDeadlineAt ?? null}
+            pending={busy}
+            onSelect={(augmentId) => void performAction({ type: "augment_select", augmentId })}
+            onRefresh={(slot: AugmentSlot) => void performAction({ type: "augment_refresh", slot })}
+            onConfirm={() => void performAction({ type: "augment_lock" })}
+            onResign={game.phase === "augment_draft" ? requestResign : undefined}
+          />
+        </div>
+      ) : null}
+
       <section className={`game-shell ${game.phase === "setup" ? "is-setup" : ""}`}>
         <aside className="side-panel setup-panel">
           <h2>{statusText(room, placedSetupCount)}</h2>
+          {game.augment ? (
+            <AugmentRail
+              label={viewerSide ? "我的" : sideName(primaryRailSide)}
+              items={augmentRailItems(primaryRailSide)}
+              activeId={viewerSide === primaryRailSide ? activeAugmentId : null}
+              canActivate={Boolean(viewerSide === primaryRailSide && game.phase === "playing")}
+              pending={busy}
+              onActivate={viewerSide === primaryRailSide ? activateAugment : undefined}
+            />
+          ) : null}
           {game.phase === "setup" && timeControlMinutes !== null ? (
             <div className="time-control-card">
-              {room.viewer === "black" ? (
+              {room.viewer === "black" && room.roomKind !== "ranked" ? (
                 <form
                   className="time-control-form"
                   key={`${room.code}-${game.clock?.initialMs}`}
@@ -1810,7 +2455,7 @@ export default function GameApp({ hasRoom = false }: { hasRoom?: boolean }) {
                   <strong>{timeControlMinutes} 分钟</strong>
                 </div>
               )}
-              <small>{timeControlLocked ? "限时已锁定" : room.viewer === "black" ? "房主可在确认布阵前修改" : "由房主设置"}</small>
+              <small>{room.roomKind === "ranked" ? "排位标准：合法落子扣时后余时≤5:00，则增加 5 秒" : timeControlLocked ? "限时已锁定" : room.viewer === "black" ? "房主可在确认布阵前修改" : "由房主设置"}</small>
             </div>
           ) : null}
           {viewerSide && game.phase === "setup" ? (
@@ -1840,22 +2485,24 @@ export default function GameApp({ hasRoom = false }: { hasRoom?: boolean }) {
           {viewerSide && game.phase === "setup" ? (
             <div className="setup-actions">
               <button className="button secondary" type="button" disabled={busy || game.ready[viewerSide]} onClick={randomizeLocalSetup}>随机布阵</button>
-              <button className="button primary" type="button" disabled={busy} onClick={toggleSetupReady}>
-                {game.ready[viewerSide] ? "撤销确认" : "完成布阵"}
+              <button
+                className="button primary"
+                type="button"
+                disabled={busy || Boolean(game.augment && !game.augment.draft.rounds[0]?.players[viewerSide].locked)}
+                onClick={toggleSetupReady}
+              >
+                {game.ready[viewerSide]
+                  ? "撤销确认"
+                  : game.augment && !game.augment.draft.rounds[0]?.players[viewerSide].locked
+                    ? "先锁定强化"
+                    : "完成布阵"}
               </button>
             </div>
           ) : null}
-          {viewerSide && game.phase === "playing" ? (
+          {viewerSide && (game.phase === "playing" || game.phase === "augment_draft") ? (
             <details className="quiet-menu">
               <summary>本局选项</summary>
-               <button
-                 type="button"
-                 onClick={() => {
-                   if (window.confirm("确定认输并结束本局吗？")) void performAction({ type: "resign" });
-                 }}
-               >
-                 认输
-               </button>
+              <button type="button" disabled={busy} onClick={requestResign}>认输</button>
             </details>
           ) : null}
         </aside>
@@ -1917,11 +2564,17 @@ export default function GameApp({ hasRoom = false }: { hasRoom?: boolean }) {
         </section>
 
         <aside className="side-panel activity-panel">
+          {game.augment ? (
+            <AugmentRail
+              label={sideName(secondaryRailSide)}
+              items={augmentRailItems(secondaryRailSide)}
+            />
+          ) : null}
           <div className="invite-block">
             {room.viewer === "black" && inviteToken && !game.joined.white ? (
               <button className="button primary compact" type="button" onClick={() => void copyLink("player")}>复制玩家邀请</button>
             ) : null}
-            <button className="button secondary compact" type="button" onClick={() => void copyLink("spectator")}>复制明牌观战链接</button>
+            <button className="button secondary compact" type="button" onClick={() => void copyLink("spectator")}>复制{room.spectatorPolicy === "full" ? "明牌" : "安全"}观战链接</button>
           </div>
           <div className="activity-block">
             <div className="panel-title-row"><strong>战报</strong><span>{game.moveNumber} 手</span></div>
@@ -1946,25 +2599,54 @@ export default function GameApp({ hasRoom = false }: { hasRoom?: boolean }) {
           setRulesOpen(false);
           rulesTriggerRef.current?.focus();
         }}
-      >
+        >
         <div className="rules-dialog-header">
-          <h2 id="game-rules-title" ref={rulesTitleRef} tabIndex={-1}>暗军棋规则</h2>
+          <h2 id="game-rules-title" ref={rulesTitleRef} tabIndex={-1}>
+            {game.mode === "augment" ? "强化陆战棋规则" : "经典暗军棋规则"}
+          </h2>
           <form method="dialog">
             <button className="rules-close" type="submit">关闭</button>
           </form>
         </div>
         <div className="rules-list">
           <section>
+            <h3>本局模式</h3>
+            <p>
+              {game.mode === "augment"
+                ? "本局为强化模式：经典棋盘与基础规则不变，另外加入两轮公开强化。"
+                : "本局为经典模式：完全沿用原版布阵、移动、交战与胜负规则，不生成或使用强化。"}
+            </p>
+          </section>
+          <section>
             <h3>目标</h3>
             <p>夺取对方军旗、使对方无合法着法、用尽对局时间，或对方认输即可获胜。没有自动和棋或回合上限。</p>
           </section>
           <section>
-            <h3>暗棋</h3>
-            <p>两名玩家看不到对手棋型，已经暴露的军旗除外；观战者可以看见双方全部棋型。</p>
+            <h3>暗棋与观战</h3>
+            <p>
+              两名玩家看不到对手棋型，规则已公开的身份除外。
+              {room.roomKind === "ranked"
+                ? " 排位好友观战只显示好友一方本来可见的信息，不会暴露其对手暗子。"
+                : room.spectatorPolicy === "full"
+                  ? " 本私人房在开局前启用了明牌观战，观众可见双方棋型；该房不计排位。"
+                  : " 本私人房使用安全观战，观众在终局前看不到双方暗子。"}
+            </p>
           </section>
           <section>
             <h3>布阵</h3>
-            <p>棋子只能放在本方兵站或大本营，行营必须留空。军旗只能在大本营；地雷只能在最后两排；炸弹不能在第一排。双方确认后随机决定先手。</p>
+            <p>棋子只能放在本方兵站或大本营，行营必须留空。军旗只能在大本营；地雷只能在最后两排；炸弹不能在第一排。强化局中，仅已选择的“前置炸弹”或“纵深布雷”可以提供牌面写明的单枚例外。双方确认后随机决定先手。</p>
+          </section>
+          <section>
+            <h3>强化选择</h3>
+            <p>强化局每轮双方获得同一花色、同一强度的三张候选，但具体牌可以不同。每人每轮可刷新其中一张；本局见过或刷掉的牌不会再次出现。候选与未公开选择仅本人可见。</p>
+          </section>
+          <section>
+            <h3>两轮公开</h3>
+            <p>第一项强化在布阵时选择，双方都确认阵型后同时亮出。完成前 9 手后、执行第 10 手前暂停棋钟并选择第二项；双方锁定后同时亮出，再恢复原行动方。已公开强化始终显示在牌桌旁。</p>
+          </section>
+          <section>
+            <h3>强化次数</h3>
+            <p>主动强化需从牌桌旁启用，自动强化会在条件满足时结算。牌面显示已触发次数；只有达到总次数才标为“已耗尽”。非法请求、取消或网络失败不会消耗次数。</p>
           </section>
           <section>
             <h3>移动</h3>
@@ -1992,11 +2674,22 @@ export default function GameApp({ hasRoom = false }: { hasRoom?: boolean }) {
           </section>
           <section>
             <h3>复盘</h3>
-            <p>观战者可以随时查看双方明棋回放；两名玩家需等本局结束后再查看，避免暗子身份提前暴露。</p>
+            <p>{room.spectatorPolicy === "full" && room.roomKind !== "ranked" ? "本私人明牌观战房允许观众查看进行中的完整回放。" : "安全观战与排位观战在终局前不提供完整明棋回放。"} 两名玩家需等本局结束后再查看完整复盘，避免暗子身份提前暴露。</p>
           </section>
           <section>
             <h3>用时</h3>
-            <p>默认每方 20 分钟，房主可在任何一方确认布阵前修改。对局开始后只计算当前行动方的时间；剩余时间归零立即判负。</p>
+            <p>
+              {room.roomKind === "ranked"
+                ? "排位每方初始 10 分钟。一次合法落子扣除本步思考时间后，若该方余时不超过 5 分钟，则增加 5 秒。强化选择期间棋钟暂停。"
+                : game.clock
+                  ? `本私人房每方初始 ${Math.round(game.clock.initialMs / 60_000)} 分钟；房主可在任何一方确认布阵前修改。`
+                  : "本私人房不设棋钟。"}
+              对局只计算当前行动方时间；余时归零立即判负。
+            </p>
+          </section>
+          <section>
+            <h3>排位与认输</h3>
+            <p>只有服务器匹配并正式结算的排位局改变分数；经典好友房和强化好友房均不改变排位分。对局进行中或第二轮强化选择时都可以从“本局选项”认输。</p>
           </section>
         </div>
       </dialog>

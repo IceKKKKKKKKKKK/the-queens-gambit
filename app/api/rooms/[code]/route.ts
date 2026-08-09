@@ -1,24 +1,40 @@
-import { projectGame, settleExpiredClock } from "../../../../lib/game";
+import {
+  projectGame,
+  settleExpiredAugmentDraft,
+  settleExpiredClock,
+} from "../../../../lib/game";
+import { getOrCreatePlatformUser, PlatformError } from "../../../../db/platform";
+import { IdentityError, requireAuthenticatedIdentity } from "../../../../lib/identity";
 import {
   bearerToken,
+  ensureRoomResultRecorded,
   getRoom,
   isExpiredRoom,
   normalizeRoomCode,
   parseRoomState,
+  rankedSpectatorPerspective,
   updateRoomState,
-  viewerForToken,
+  viewerForAuthenticatedUser,
 } from "../../../../db/rooms";
 
 const responseHeaders = {
   "Cache-Control": "no-store",
-  Vary: "Authorization",
+  Vary: "Authorization, oai-authenticated-user-id, oai-authenticated-user-email",
 };
+
+function identityErrorResponse(error: unknown) {
+  if (error instanceof IdentityError || error instanceof PlatformError) {
+    return Response.json({ error: error.code }, { status: error.status, headers: responseHeaders });
+  }
+  return null;
+}
 
 export async function GET(
   request: Request,
   context: { params: Promise<{ code: string }> },
 ) {
   try {
+    const user = await getOrCreatePlatformUser(requireAuthenticatedIdentity(request));
     const { code: rawCode } = await context.params;
     const code = normalizeRoomCode(rawCode);
     const row = await getRoom(code);
@@ -35,9 +51,25 @@ export async function GET(
 
     let viewer;
     try {
-      viewer = await viewerForToken(row, token);
-    } catch {
-      return Response.json({ error: "INVALID_PLAYER_TOKEN" }, { status: 401, headers: responseHeaders });
+      viewer = await viewerForAuthenticatedUser(row, user.id, token);
+    } catch (error) {
+      const codeValue = error instanceof Error ? error.message : "INVALID_PLAYER_TOKEN";
+      return Response.json(
+        { error: codeValue === "ROOM_IDENTITY_CONFLICT" ? codeValue : "INVALID_PLAYER_TOKEN" },
+        { status: 401, headers: responseHeaders },
+      );
+    }
+
+    let spectatorPerspective: "black" | "white" | null = null;
+    if (viewer === "spectator" && row.room_kind === "ranked") {
+      try {
+        spectatorPerspective = await rankedSpectatorPerspective(row, user.id);
+      } catch {
+        return Response.json(
+          { error: "RANKED_SPECTATOR_FORBIDDEN" },
+          { status: 403, headers: responseHeaders },
+        );
+      }
     }
 
     let activeRow = row;
@@ -45,12 +77,18 @@ export async function GET(
     let nowMs = Date.now();
     let clockStateResolved = false;
     for (let attempt = 0; attempt < 3; attempt += 1) {
-      if (!settleExpiredClock(state, nowMs)) {
+      const stateChanged =
+        settleExpiredAugmentDraft(state, nowMs) || settleExpiredClock(state, nowMs);
+      if (!stateChanged) {
         clockStateResolved = true;
         break;
       }
       if (await updateRoomState(activeRow, state, activeRow.version)) {
-        activeRow = { ...activeRow, version: activeRow.version + 1 };
+        activeRow = {
+          ...activeRow,
+          state_json: JSON.stringify(state),
+          version: activeRow.version + 1,
+        };
         clockStateResolved = true;
         break;
       }
@@ -72,6 +110,18 @@ export async function GET(
       );
     }
 
+
+    if (state.phase === "finished" && !activeRow.result_recorded) {
+      try {
+        if (await ensureRoomResultRecorded(activeRow, state)) {
+          activeRow = { ...activeRow, result_recorded: 1 };
+        }
+      } catch {
+        // The authoritative game is already committed. A later read retries the
+        // idempotent platform settlement without withholding the finished game.
+      }
+    }
+
     const sinceValue = new URL(request.url).searchParams.get("since");
     const since = sinceValue === null ? null : Number(sinceValue);
     if (
@@ -88,11 +138,25 @@ export async function GET(
         code: activeRow.code,
         version: activeRow.version,
         viewer,
-        snapshot: projectGame(state, viewer, nowMs),
+        spectatorPerspective,
+        roomKind: activeRow.room_kind,
+        gameMode: activeRow.game_mode,
+        spectatorPolicy: activeRow.spectator_policy,
+        snapshot: projectGame(state, viewer, nowMs, {
+          spectatorPolicy:
+            viewer === "spectator"
+              ? activeRow.room_kind === "ranked"
+                ? "hidden"
+                : activeRow.spectator_policy
+              : undefined,
+          spectatorPerspective,
+        }),
       },
       { headers: responseHeaders },
     );
-  } catch {
+  } catch (error) {
+    const identityResponse = identityErrorResponse(error);
+    if (identityResponse) return identityResponse;
     return Response.json({ error: "ROOM_READ_FAILED" }, { status: 500, headers: responseHeaders });
   }
 }

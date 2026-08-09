@@ -2,25 +2,30 @@ import {
   applyPlayerAction,
   GameRuleError,
   projectGame,
+  settleExpiredAugmentDraft,
   type PlayerAction,
   type Position,
   type SetupPlacement,
 } from "../../../../../lib/game";
+import { isAugmentId } from "../../../../../lib/augments";
+import { getOrCreatePlatformUser, PlatformError } from "../../../../../db/platform";
+import { IdentityError, requireAuthenticatedIdentity } from "../../../../../lib/identity";
 import { RequestBodyTooLargeError, readBoundedJson } from "../../../../../lib/request";
 import {
   bearerToken,
+  ensureRoomResultRecorded,
   getRoom,
   isExpiredRoom,
   isPlayer,
   normalizeRoomCode,
   parseRoomState,
   updateRoomState,
-  viewerForToken,
+  viewerForAuthenticatedUser,
 } from "../../../../../db/rooms";
 
 const responseHeaders = {
   "Cache-Control": "no-store",
-  Vary: "Authorization",
+  Vary: "Authorization, oai-authenticated-user-id, oai-authenticated-user-email",
 };
 
 function isPosition(value: unknown): value is Position {
@@ -58,6 +63,36 @@ function parseAction(value: unknown): PlayerAction | null {
   if ((action.type === "swap" || action.type === "move") && isPosition(action.from) && isPosition(action.to)) {
     return { type: action.type, from: action.from, to: action.to };
   }
+  if (action.type === "augment_select" && isAugmentId(action.augmentId)) {
+    return { type: "augment_select", augmentId: action.augmentId };
+  }
+  if (
+    action.type === "augment_refresh" &&
+    (action.slot === 0 || action.slot === 1 || action.slot === 2)
+  ) {
+    return { type: "augment_refresh", slot: action.slot };
+  }
+  if (action.type === "augment_lock") return { type: "augment_lock" };
+  if (
+    (action.type === "augment_move" || action.type === "augment_exchange") &&
+    isAugmentId(action.augmentId) &&
+    isPosition(action.from) &&
+    isPosition(action.to)
+  ) {
+    return {
+      type: action.type,
+      augmentId: action.augmentId,
+      from: action.from,
+      to: action.to,
+    };
+  }
+  if (
+    action.type === "augment_recon" &&
+    isAugmentId(action.augmentId) &&
+    isPosition(action.target)
+  ) {
+    return { type: "augment_recon", augmentId: action.augmentId, target: action.target };
+  }
   return null;
 }
 
@@ -66,9 +101,11 @@ export async function POST(
   context: { params: Promise<{ code: string }> },
 ) {
   try {
+    const user = await getOrCreatePlatformUser(requireAuthenticatedIdentity(request));
+    const authorizationPresent = request.headers.has("authorization");
     const token = bearerToken(request);
-    if (!token) {
-      return Response.json({ error: "PLAYER_TOKEN_REQUIRED" }, { status: 401, headers: responseHeaders });
+    if (authorizationPresent && !token) {
+      return Response.json({ error: "INVALID_PLAYER_TOKEN" }, { status: 401, headers: responseHeaders });
     }
 
     const { code: rawCode } = await context.params;
@@ -81,9 +118,13 @@ export async function POST(
 
     let viewer;
     try {
-      viewer = await viewerForToken(row, token);
-    } catch {
-      return Response.json({ error: "INVALID_PLAYER_TOKEN" }, { status: 401, headers: responseHeaders });
+      viewer = await viewerForAuthenticatedUser(row, user.id, token);
+    } catch (error) {
+      const codeValue = error instanceof Error ? error.message : "INVALID_PLAYER_TOKEN";
+      return Response.json(
+        { error: codeValue === "ROOM_IDENTITY_CONFLICT" ? codeValue : "INVALID_PLAYER_TOKEN" },
+        { status: 401, headers: responseHeaders },
+      );
     }
     if (!isPlayer(viewer)) {
       return Response.json({ error: "PLAYER_TOKEN_REQUIRED" }, { status: 401, headers: responseHeaders });
@@ -111,10 +152,29 @@ export async function POST(
       return Response.json({ error: "VERSION_CONFLICT" }, { status: 409, headers: responseHeaders });
     }
 
-    let nextState;
     const nowMs = Date.now();
+    const currentState = parseRoomState(row);
+    if (settleExpiredAugmentDraft(currentState, nowMs)) {
+      const settled = await updateRoomState(row, currentState, expectedVersion as number);
+      if (!settled) {
+        return Response.json({ error: "VERSION_CONFLICT" }, { status: 409, headers: responseHeaders });
+      }
+      if (currentState.phase === "finished" && !row.result_recorded) {
+        try {
+          await ensureRoomResultRecorded(row, currentState);
+        } catch {
+          // A later room read retries this idempotent settlement.
+        }
+      }
+      return Response.json(
+        { error: "VERSION_CONFLICT" },
+        { status: 409, headers: responseHeaders },
+      );
+    }
+
+    let nextState;
     try {
-      nextState = applyPlayerAction(parseRoomState(row), viewer, action, nowMs);
+      nextState = applyPlayerAction(currentState, viewer, action, nowMs);
     } catch (error) {
       if (error instanceof GameRuleError) {
         return Response.json({ error: error.code }, { status: 422, headers: responseHeaders });
@@ -126,16 +186,29 @@ export async function POST(
     if (!updated) {
       return Response.json({ error: "VERSION_CONFLICT" }, { status: 409, headers: responseHeaders });
     }
+    if (nextState.phase === "finished" && !row.result_recorded) {
+      try {
+        await ensureRoomResultRecorded(row, nextState);
+      } catch {
+        // A later room read retries this idempotent settlement.
+      }
+    }
     return Response.json(
       {
         code: row.code,
         version: (expectedVersion as number) + 1,
         viewer,
+        roomKind: row.room_kind,
+        gameMode: row.game_mode,
+        spectatorPolicy: row.spectator_policy,
         snapshot: projectGame(nextState, viewer, nowMs),
       },
       { headers: responseHeaders },
     );
-  } catch {
+  } catch (error) {
+    if (error instanceof IdentityError || error instanceof PlatformError) {
+      return Response.json({ error: error.code }, { status: error.status, headers: responseHeaders });
+    }
     return Response.json({ error: "ACTION_FAILED" }, { status: 500, headers: responseHeaders });
   }
 }

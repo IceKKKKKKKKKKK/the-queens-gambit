@@ -1,0 +1,1 @@
+CREATE UNIQUE INDEX `platform_matches_game_code_idx` ON `platform_matches` (`game_code`);

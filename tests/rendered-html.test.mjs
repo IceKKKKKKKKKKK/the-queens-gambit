@@ -15,14 +15,14 @@ async function render() {
   );
 }
 
-test("server-renders the minimal game entrance", async () => {
+test("server-renders the authenticated game entrance", async () => {
   const response = await render();
   assert.equal(response.status, 200);
   assert.match(response.headers.get("content-type") ?? "", /^text\/html\b/i);
   const html = await response.text();
-  assert.match(html, /<title>The Queen's Gambit<\/title>/i);
-  assert.match(html, /创建棋局/);
-  assert.match(html, /房间码/);
+  assert.match(html, /<title>军令 · 在线暗军棋<\/title>/i);
+  assert.match(html, /使用邮箱登录/);
+  assert.match(html, /经典规则 · 军令强化/);
   assert.doesNotMatch(html, /把战场|PRIVATE ROOMS|codex-preview|react-loading-skeleton/i);
 });
 
@@ -33,7 +33,7 @@ test("starter preview and promotional copy stay removed", async () => {
     readFile(new URL("../app/globals.css", import.meta.url), "utf8"),
     readFile(new URL("../package.json", import.meta.url), "utf8"),
   ]);
-  assert.match(page, /<GameApp hasRoom=/);
+  assert.match(page, /<GameApp[\s\S]*hasRoom=/);
   assert.doesNotMatch(`${page}${layout}${css}${packageJson}`, /codex-preview|react-loading-skeleton|把战场|PRIVATE ROOMS/i);
   await assert.rejects(access(new URL("../app/_sites-preview", templateRoot)));
 });

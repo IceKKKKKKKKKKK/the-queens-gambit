@@ -1,5 +1,31 @@
-export const RULES_VERSION = "classic-duel-dark-v2";
+import {
+  AugmentRuleError,
+  beginSecondAugmentDraft,
+  createAugmentDraftState,
+  getAugmentDefinition,
+  isSecondAugmentDraftDue,
+  lockAugmentSelection,
+  projectAugmentDraft,
+  refreshAugmentOption,
+  revealCurrentAugmentRound,
+  selectAugment,
+  type AugmentDraftState,
+  type AugmentId,
+  type AugmentSlot,
+  type ProjectedAugmentDraft,
+} from "./augments.ts";
+
+export const CLASSIC_RULES_VERSION = "classic-duel-dark-v2" as const;
+export const AUGMENT_RULES_VERSION = "augment-duel-dark-v1" as const;
+export const RULES_VERSION = CLASSIC_RULES_VERSION;
+export type RulesVersion = typeof CLASSIC_RULES_VERSION | typeof AUGMENT_RULES_VERSION;
+export type GameMode = "classic" | "augment";
 export const DEFAULT_TIME_CONTROL_MINUTES = 20;
+export const RANKED_TIME_CONTROL_MINUTES = 10;
+export const RANKED_INCREMENT_THRESHOLD_MS = 5 * 60 * 1000;
+export const RANKED_INCREMENT_MS = 5 * 1000;
+export const AUGMENT_DRAFT_TIMEOUT_MS = 45 * 1000;
+export const SECOND_AUGMENT_DRAFT_DURATION_MS = AUGMENT_DRAFT_TIMEOUT_MS;
 export const MIN_TIME_CONTROL_MINUTES = 1;
 export const MAX_TIME_CONTROL_MINUTES = 180;
 
@@ -52,19 +78,32 @@ export interface PublicEvent {
   actor: Side;
   from?: Position;
   to?: Position;
-  result: BattleResult | "ready" | "unready" | "resigned" | "game_started" | "timeout";
+  result:
+    | BattleResult
+    | "ready"
+    | "unready"
+    | "resigned"
+    | "game_started"
+    | "timeout"
+    | "augment_used"
+    | "augment_revealed";
+  augmentId?: AugmentId;
 }
 
 export interface GameClock {
   initialMs: number;
   remainingMs: Record<Side, number>;
   turnStartedAt: number | null;
+  incrementMs?: number;
+  incrementThresholdMs?: number;
 }
 
 export interface PublicClock {
   initialMs: number;
   remainingMs: Record<Side, number>;
   running: Side | null;
+  incrementMs?: number;
+  incrementThresholdMs?: number;
 }
 
 export interface ReplayMove {
@@ -73,6 +112,10 @@ export interface ReplayMove {
   from: Position;
   to: Position;
   result: BattleResult;
+  kind?: "move" | "exchange";
+  augmentId?: AugmentId;
+  secondaryFrom?: Position;
+  secondaryTo?: Position;
 }
 
 export interface ReplayArchive {
@@ -88,9 +131,30 @@ export interface ReplayFrame {
   pieces: PublicPiece[];
 }
 
+export interface AugmentRuntimeState {
+  draft: AugmentDraftState;
+  usedBySide: Record<Side, AugmentId[]>;
+  triggerCounts: Record<Side, Partial<Record<AugmentId, number>>>;
+  permanentReveals: Record<Side, string[]>;
+  temporaryReveals: Record<Side, string[]>;
+  pendingRecon: Record<Side, { augmentId: AugmentId; remaining: number } | null>;
+  extraMove: Record<Side, { augmentId: AugmentId; excludedPieceId: string } | null>;
+  resumeTurn: Side | null;
+  draftDeadlineAt: number | null;
+}
+
+export interface ProjectedAugmentRuntime {
+  draft: ProjectedAugmentDraft;
+  usedBySide: Record<Side, AugmentId[]>;
+  triggerCounts: Record<Side, Partial<Record<AugmentId, number>>>;
+  pendingRecon: { augmentId: AugmentId; remaining: number } | null;
+  extraMove: { augmentId: AugmentId; excludedPieceId: string } | null;
+  draftDeadlineAt: number | null;
+}
+
 export interface GameState {
-  rulesVersion: typeof RULES_VERSION;
-  phase: "setup" | "playing" | "finished";
+  rulesVersion: RulesVersion;
+  phase: "setup" | "playing" | "augment_draft" | "finished";
   joined: Record<Side, boolean>;
   ready: Record<Side, boolean>;
   firstTurn: Side;
@@ -103,10 +167,11 @@ export interface GameState {
   moveNumber: number;
   replay: ReplayArchive | null;
   clock: GameClock | null;
+  augment?: AugmentRuntimeState | null;
 }
 
 export interface ProjectedGame {
-  rulesVersion: typeof RULES_VERSION;
+  rulesVersion: RulesVersion;
   phase: GameState["phase"];
   joined: Record<Side, boolean>;
   ready: Record<Side, boolean>;
@@ -119,6 +184,8 @@ export interface ProjectedGame {
   moveNumber: number;
   replay: ReplayArchive | null;
   clock: PublicClock | null;
+  mode: GameMode;
+  augment: ProjectedAugmentRuntime | null;
 }
 
 export type MovementAnimationOutcome = "move" | "capture" | "repelled" | "mutual";
@@ -149,6 +216,12 @@ export type PlayerAction =
   | { type: "ready"; value: boolean; layout?: SetupPlacement[] }
   | { type: "move"; from: Position; to: Position }
   | { type: "set_time_control"; minutes: number }
+  | { type: "augment_select"; augmentId: AugmentId }
+  | { type: "augment_refresh"; slot: AugmentSlot }
+  | { type: "augment_lock" }
+  | { type: "augment_move"; augmentId: AugmentId; from: Position; to: Position }
+  | { type: "augment_exchange"; augmentId: AugmentId; from: Position; to: Position }
+  | { type: "augment_recon"; augmentId: AugmentId; target: Position }
   | { type: "resign" };
 
 export const PIECE_INFO: Record<
@@ -316,8 +389,9 @@ export function movementAnimationForTransition(
       }
       outcome = "capture";
     } else if (event.result === "defender_survives") {
+      const retreated = event.augmentId === "spade-tactical-retreat";
       if (
-        attackerAfter.alive ||
+        attackerAfter.alive !== retreated ||
         !samePosition(attackerAfter, event.from) ||
         !defenderAfter.alive
       ) {
@@ -418,7 +492,19 @@ export function setupSlots(side: Side) {
   );
 }
 
-export function isAllowedSetupPosition(type: PieceType, side: Side, position: Position) {
+function hasSetupAugment(augmentIds: readonly AugmentId[], mode: "forward_bomb" | "deep_mine") {
+  return augmentIds.some((id) => {
+    const effect = getAugmentDefinition(id).effect;
+    return effect.kind === "setup" && effect.mode === mode;
+  });
+}
+
+export function isAllowedSetupPosition(
+  type: PieceType,
+  side: Side,
+  position: Position,
+  augmentIds: readonly AugmentId[] = [],
+) {
   if (!isInsideBoard(position) || !isSetupPosition(side, position) || isCamp(position)) {
     return false;
   }
@@ -426,10 +512,13 @@ export function isAllowedSetupPosition(type: PieceType, side: Side, position: Po
     return isHeadquarters(position) && (side === "black" ? position.row === 11 : position.row === 0);
   }
   if (type === "mine") {
-    return side === "black" ? position.row >= 10 : position.row <= 1;
+    const classic = side === "black" ? position.row >= 10 : position.row <= 1;
+    const thirdRow = side === "black" ? position.row === 9 : position.row === 2;
+    return classic || (thirdRow && hasSetupAugment(augmentIds, "deep_mine"));
   }
   if (type === "bomb") {
-    return side === "black" ? position.row !== 6 : position.row !== 5;
+    const isFrontRow = side === "black" ? position.row === 6 : position.row === 5;
+    return !isFrontRow || hasSetupAugment(augmentIds, "forward_bomb");
   }
   return true;
 }
@@ -522,6 +611,24 @@ function makeSidePieces(side: Side): Piece[] {
   );
 }
 
+export function gameModeForState(state: Pick<GameState, "rulesVersion">): GameMode {
+  return state.rulesVersion === AUGMENT_RULES_VERSION ? "augment" : "classic";
+}
+
+function createAugmentRuntime(): AugmentRuntimeState {
+  return {
+    draft: createAugmentDraftState(),
+    usedBySide: { black: [], white: [] },
+    triggerCounts: { black: {}, white: {} },
+    permanentReveals: { black: [], white: [] },
+    temporaryReveals: { black: [], white: [] },
+    pendingRecon: { black: null, white: null },
+    extraMove: { black: null, white: null },
+    resumeTurn: null,
+    draftDeadlineAt: null,
+  };
+}
+
 export function createInitialGame(): GameState {
   const initialMs = DEFAULT_TIME_CONTROL_MINUTES * 60 * 1000;
   return {
@@ -546,7 +653,31 @@ export function createInitialGame(): GameState {
   };
 }
 
-export function validateSideSetup(pieces: Piece[], side: Side) {
+export function createAugmentGame(options: { ranked?: boolean } = {}): GameState {
+  const initialMs = (options.ranked ? RANKED_TIME_CONTROL_MINUTES : DEFAULT_TIME_CONTROL_MINUTES) * 60 * 1000;
+  return {
+    ...createInitialGame(),
+    rulesVersion: AUGMENT_RULES_VERSION,
+    clock: {
+      initialMs,
+      remainingMs: { black: initialMs, white: initialMs },
+      turnStartedAt: null,
+      ...(options.ranked
+        ? {
+            incrementMs: RANKED_INCREMENT_MS,
+            incrementThresholdMs: RANKED_INCREMENT_THRESHOLD_MS,
+          }
+        : {}),
+    },
+    augment: createAugmentRuntime(),
+  };
+}
+
+export function validateSideSetup(
+  pieces: Piece[],
+  side: Side,
+  augmentIds: readonly AugmentId[] = [],
+) {
   const sidePieces = pieces.filter((piece) => piece.side === side && piece.alive);
   if (sidePieces.length !== 25) return false;
   const occupied = new Set(sidePieces.map(positionKey));
@@ -554,24 +685,37 @@ export function validateSideSetup(pieces: Piece[], side: Side) {
   for (const type of PIECE_TYPES) {
     if (sidePieces.filter((piece) => piece.type === type).length !== PIECE_INFO[type].count) return false;
   }
-  return sidePieces.every((piece) => isAllowedSetupPosition(piece.type, side, piece));
+  if (!sidePieces.every((piece) => isAllowedSetupPosition(piece.type, side, piece, augmentIds))) {
+    return false;
+  }
+  const frontRow = side === "black" ? 6 : 5;
+  const thirdRow = side === "black" ? 9 : 2;
+  const frontBombs = sidePieces.filter((piece) => piece.type === "bomb" && piece.row === frontRow).length;
+  const deepMines = sidePieces.filter((piece) => piece.type === "mine" && piece.row === thirdRow).length;
+  return frontBombs <= (hasSetupAugment(augmentIds, "forward_bomb") ? 1 : 0) &&
+    deepMines <= (hasSetupAugment(augmentIds, "deep_mine") ? 1 : 0);
 }
 
 function alivePieceAt(state: GameState, position: Position) {
   return state.pieces.find((piece) => piece.alive && samePosition(piece, position));
 }
 
-function setupPositionViolation(type: PieceType, side: Side, position: Position) {
+function setupPositionViolation(
+  type: PieceType,
+  side: Side,
+  position: Position,
+  augmentIds: readonly AugmentId[] = [],
+) {
   if (!isInsideBoard(position) || !isSetupPosition(side, position) || isCamp(position)) {
     return "INVALID_LAYOUT";
   }
-  if (type === "flag" && !isAllowedSetupPosition(type, side, position)) {
+  if (type === "flag" && !isAllowedSetupPosition(type, side, position, augmentIds)) {
     return "FLAG_MUST_BE_HEADQUARTERS";
   }
-  if (type === "mine" && !isAllowedSetupPosition(type, side, position)) {
+  if (type === "mine" && !isAllowedSetupPosition(type, side, position, augmentIds)) {
     return "MINE_BACK_TWO_ROWS";
   }
-  if (type === "bomb" && !isAllowedSetupPosition(type, side, position)) {
+  if (type === "bomb" && !isAllowedSetupPosition(type, side, position, augmentIds)) {
     return "BOMB_NOT_FRONT_ROW";
   }
   return null;
@@ -590,11 +734,12 @@ export function createSetupDraft(
   pieces: readonly SetupPieceLike[],
   side: Side,
   useCurrentLayout = false,
+  augmentIds: readonly AugmentId[] = [],
 ): SetupDraft {
   return Object.fromEntries(
     ownSetupPieces(pieces, side).map((piece) => [
       piece.id,
-      useCurrentLayout && isAllowedSetupPosition(piece.type, side, piece)
+      useCurrentLayout && isAllowedSetupPosition(piece.type, side, piece, augmentIds)
         ? { row: piece.row, col: piece.col }
         : null,
     ]),
@@ -606,6 +751,7 @@ export function isValidSetupDraft(
   side: Side,
   draft: SetupDraft,
   requireComplete = false,
+  augmentIds: readonly AugmentId[] = [],
 ) {
   const ownPieces = ownSetupPieces(pieces, side);
   const expectedIds = new Set(ownPieces.map((piece) => piece.id));
@@ -619,10 +765,17 @@ export function isValidSetupDraft(
       if (requireComplete) return false;
       continue;
     }
-    if (!position || setupPositionViolation(piece.type, side, position)) return false;
+    if (!position || setupPositionViolation(piece.type, side, position, augmentIds)) return false;
     const key = positionKey(position);
     if (occupied.has(key)) return false;
     occupied.add(key);
+  }
+  if (setupExceptionQuotaViolation(ownPieces, side, (piece) => draft[piece.id], augmentIds)) {
+    return false;
+  }
+  if (requireComplete) {
+    const materialized = ownPieces.map((piece) => ({ ...piece, ...draft[piece.id] })) as Piece[];
+    if (!validateSideSetup(materialized, side, augmentIds)) return false;
   }
   return true;
 }
@@ -633,6 +786,7 @@ export function getSetupDraftPlacementViolation(
   draft: SetupDraft,
   pieceId: string,
   to: Position,
+  augmentIds: readonly AugmentId[] = [],
 ): string | null {
   if (!isInsideBoard(to)) return "POSITION_OUT_OF_BOUNDS";
   if (!isSetupPosition(side, to)) return "INVALID_LAYOUT";
@@ -648,13 +802,22 @@ export function getSetupDraftPlacementViolation(
     const position = draft[candidate.id];
     return Boolean(position && samePosition(position, to));
   });
-  const activeViolation = setupPositionViolation(piece.type, side, to);
+  const activeViolation = setupPositionViolation(piece.type, side, to, augmentIds);
   if (activeViolation) return activeViolation;
   if (from && target) {
-    const displacedViolation = setupPositionViolation(target.type, side, from);
+    const displacedViolation = setupPositionViolation(target.type, side, from, augmentIds);
     if (displacedViolation) return displacedViolation;
   }
-  return null;
+  return setupExceptionQuotaViolation(
+    ownPieces,
+    side,
+    (candidate) => {
+      if (candidate.id === piece.id) return to;
+      if (target && candidate.id === target.id) return from;
+      return draft[candidate.id];
+    },
+    augmentIds,
+  );
 }
 
 export function applySetupDraftPlacement(
@@ -663,8 +826,9 @@ export function applySetupDraftPlacement(
   draft: SetupDraft,
   pieceId: string,
   to: Position,
+  augmentIds: readonly AugmentId[] = [],
 ) {
-  const violation = getSetupDraftPlacementViolation(pieces, side, draft, pieceId, to);
+  const violation = getSetupDraftPlacementViolation(pieces, side, draft, pieceId, to, augmentIds);
   if (violation) throw new GameRuleError(violation);
   const ownPieces = ownSetupPieces(pieces, side);
   const from = draft[pieceId];
@@ -677,7 +841,11 @@ export function applySetupDraftPlacement(
   return next;
 }
 
-export function randomizeSetupDraft(pieces: readonly SetupPieceLike[], side: Side) {
+export function randomizeSetupDraft(
+  pieces: readonly SetupPieceLike[],
+  side: Side,
+  augmentIds: readonly AugmentId[] = [],
+) {
   const ownPieces = ownSetupPieces(pieces, side);
   if (ownPieces.length !== 25) throw new GameRuleError("INVALID_LAYOUT");
   for (const type of PIECE_TYPES) {
@@ -687,13 +855,28 @@ export function randomizeSetupDraft(pieces: readonly SetupPieceLike[], side: Sid
   }
 
   const available = setupSlots(side);
-  const draft = createSetupDraft(pieces, side);
+  const draft = createSetupDraft(pieces, side, false, augmentIds);
+  let forwardBombsPlaced = 0;
+  let deepMinesPlaced = 0;
+  const frontRow = side === "black" ? 6 : 5;
+  const thirdRow = side === "black" ? 9 : 2;
   const placePiece = (piece: SetupPieceLike & { type: PieceType }) => {
-    const choices = available.filter((position) => isAllowedSetupPosition(piece.type, side, position));
+    const choices = available.filter((position) => {
+      if (!isAllowedSetupPosition(piece.type, side, position, augmentIds)) return false;
+      if (piece.type === "bomb" && position.row === frontRow && forwardBombsPlaced >= 1) {
+        return false;
+      }
+      if (piece.type === "mine" && position.row === thirdRow && deepMinesPlaced >= 1) {
+        return false;
+      }
+      return true;
+    });
     if (!choices.length) throw new GameRuleError("INVALID_LAYOUT");
     const chosen = choices[randomIndex(choices.length)];
     available.splice(available.findIndex((position) => samePosition(position, chosen)), 1);
     draft[piece.id] = { ...chosen };
+    if (piece.type === "bomb" && chosen.row === frontRow) forwardBombsPlaced += 1;
+    if (piece.type === "mine" && chosen.row === thirdRow) deepMinesPlaced += 1;
   };
 
   for (const type of ["flag", "mine", "bomb"] as PieceType[]) {
@@ -713,8 +896,9 @@ export function setupDraftToLayout(
   pieces: readonly SetupPieceLike[],
   side: Side,
   draft: SetupDraft,
+  augmentIds: readonly AugmentId[] = [],
 ) {
-  if (!isValidSetupDraft(pieces, side, draft, true)) {
+  if (!isValidSetupDraft(pieces, side, draft, true, augmentIds)) {
     const incomplete = ownSetupPieces(pieces, side).some((piece) => draft[piece.id] === null);
     throw new GameRuleError(incomplete ? "INCOMPLETE_LAYOUT" : "INVALID_LAYOUT");
   }
@@ -728,6 +912,7 @@ export function getSubmittedSetupLayoutViolation(
   pieces: readonly Piece[],
   side: Side,
   layout: readonly SetupPlacement[],
+  augmentIds: readonly AugmentId[] = [],
 ) {
   const ownPieces = pieces.filter((piece) => piece.alive && piece.side === side);
   if (layout.length !== ownPieces.length) return "INCOMPLETE_LAYOUT";
@@ -740,14 +925,15 @@ export function getSubmittedSetupLayoutViolation(
   for (const piece of ownPieces) {
     const placement = byId.get(piece.id);
     if (!placement) return "PIECE_NOT_AVAILABLE";
-    const violation = setupPositionViolation(piece.type, side, placement);
+    const violation = setupPositionViolation(piece.type, side, placement, augmentIds);
     if (violation) return violation;
     const key = positionKey(placement);
     if (occupied.has(key)) return "INVALID_LAYOUT";
     occupied.add(key);
   }
   if (byId.size !== ownPieces.length) return "PIECE_NOT_AVAILABLE";
-  return null;
+  const materialized = ownPieces.map((piece) => ({ ...piece, ...byId.get(piece.id)! }));
+  return validateSideSetup(materialized, side, augmentIds) ? null : "INVALID_LAYOUT";
 }
 
 export function getSetupSwapViolation(
@@ -765,10 +951,43 @@ export function getSetupSwapViolation(
   const second = alivePieceAt(state, to);
   if (!first || !second) return "INVALID_SWAP";
   if (first.side !== side || second.side !== side) return "NOT_YOUR_PIECE";
-  return (
-    setupPositionViolation(first.type, side, to) ??
-    setupPositionViolation(second.type, side, from)
+  const augmentIds = selectedSetupAugments(state, side);
+  const positionalViolation =
+    setupPositionViolation(first.type, side, to, augmentIds) ??
+    setupPositionViolation(second.type, side, from, augmentIds);
+  if (positionalViolation) return positionalViolation;
+  const ownPieces = state.pieces.filter((piece) => piece.alive && piece.side === side);
+  return setupExceptionQuotaViolation(
+    ownPieces,
+    side,
+    (candidate) => candidate.id === first.id ? to : candidate.id === second.id ? from : candidate,
+    augmentIds,
   );
+}
+
+function setupExceptionQuotaViolation(
+  pieces: readonly (SetupPieceLike & { type: PieceType })[],
+  side: Side,
+  positionFor: (piece: SetupPieceLike & { type: PieceType }) => Position | null,
+  augmentIds: readonly AugmentId[],
+) {
+  const frontRow = side === "black" ? 6 : 5;
+  const thirdRow = side === "black" ? 9 : 2;
+  let frontBombs = 0;
+  let deepMines = 0;
+  for (const piece of pieces) {
+    const position = positionFor(piece);
+    if (!position) continue;
+    if (piece.type === "bomb" && position.row === frontRow) frontBombs += 1;
+    if (piece.type === "mine" && position.row === thirdRow) deepMines += 1;
+  }
+  if (frontBombs > (hasSetupAugment(augmentIds, "forward_bomb") ? 1 : 0)) {
+    return "BOMB_NOT_FRONT_ROW";
+  }
+  if (deepMines > (hasSetupAugment(augmentIds, "deep_mine") ? 1 : 0)) {
+    return "MINE_BACK_TWO_ROWS";
+  }
+  return null;
 }
 
 export function getProjectedSetupSwapViolation(
@@ -777,7 +996,7 @@ export function getProjectedSetupSwapViolation(
   from: Position,
   to: Position,
 ) {
-  return getSetupSwapViolation(projectedMovementState(game), side, from, to);
+  return getSetupSwapViolation(projectedAugmentState(game, side), side, from, to);
 }
 
 function railNeighbors(position: Position) {
@@ -865,6 +1084,9 @@ export function getMoveViolation(
   const piece = alivePieceAt(state, from);
   if (!piece) return "NO_PIECE_AT_SOURCE";
   if (piece.side !== side) return "NOT_YOUR_PIECE";
+  if (state.augment?.pendingRecon[side]) return "RECON_SELECTION_REQUIRED";
+  const extraMove = state.augment?.extraMove[side];
+  if (extraMove && piece.id === extraMove.excludedPieceId) return "EXTRA_MOVE_DIFFERENT_PIECE";
   if (piece.type === "flag") return "FLAG_CANNOT_MOVE";
   if (piece.type === "mine") return "MINE_CANNOT_MOVE";
   if (isHeadquarters(from)) return "HEADQUARTERS_LOCKED";
@@ -925,12 +1147,258 @@ export function getProjectedMoveViolation(
   from: Position,
   to: Position,
 ) {
+  if (game.augment?.pendingRecon) return "RECON_SELECTION_REQUIRED";
+  const piece = game.pieces.find(
+    (candidate) => candidate.alive && candidate.side === side && samePosition(candidate, from),
+  );
+  if (game.augment?.extraMove && piece?.id === game.augment.extraMove.excludedPieceId) {
+    return "EXTRA_MOVE_DIFFERENT_PIECE";
+  }
   return getMoveViolation(projectedMovementState(game), side, from, to);
 }
 
 export function getProjectedLegalTargets(game: ProjectedGame, side: Side, from: Position) {
-  const movementState = projectedMovementState(game);
-  return getLegalTargets(movementState, side, from);
+  const targets: Position[] = [];
+  for (let row = 0; row < 12; row += 1) {
+    for (let col = 0; col < 5; col += 1) {
+      const to = { row, col };
+      if (getProjectedMoveViolation(game, side, from, to) === null) targets.push(to);
+    }
+  }
+  return targets;
+}
+
+function requireAugmentState(state: GameState) {
+  if (state.rulesVersion !== AUGMENT_RULES_VERSION || !state.augment) {
+    throw new GameRuleError("AUGMENT_MODE_REQUIRED");
+  }
+  return state.augment;
+}
+
+function selectedSetupAugments(state: GameState, side: Side): AugmentId[] {
+  if (!state.augment) return [];
+  return [...state.augment.draft.loadouts[side]];
+}
+
+function ownsAugment(state: GameState, side: Side, augmentId: AugmentId) {
+  return Boolean(state.augment?.draft.loadouts[side].includes(augmentId));
+}
+
+function augmentUses(state: GameState, side: Side, augmentId: AugmentId) {
+  return state.augment?.triggerCounts[side][augmentId] ?? 0;
+}
+
+function augmentAvailable(state: GameState, side: Side, augmentId: AugmentId) {
+  return ownsAugment(state, side, augmentId) &&
+    augmentUses(state, side, augmentId) < getAugmentDefinition(augmentId).charges;
+}
+
+function markAugmentUse(
+  state: GameState,
+  side: Side,
+  augmentId: AugmentId,
+  movement?: { from: Position; to: Position },
+) {
+  const augment = requireAugmentState(state);
+  augment.triggerCounts[side][augmentId] = augmentUses(state, side, augmentId) + 1;
+  if (!augment.usedBySide[side].includes(augmentId)) augment.usedBySide[side].push(augmentId);
+  addEvent(state, {
+    actor: side,
+    result: "augment_used",
+    augmentId,
+    ...(movement ? { from: { ...movement.from }, to: { ...movement.to } } : {}),
+  });
+}
+
+function directionKey(from: Position, to: Position) {
+  return `${Math.sign(to.row - from.row)},${Math.sign(to.col - from.col)}`;
+}
+
+function railTurnCanReach(state: GameState, from: Position, to: Position) {
+  const queue: Array<{ position: Position; direction: string | null; turns: number }> = [
+    { position: from, direction: null, turns: 0 },
+  ];
+  const visited = new Set<string>([`${positionKey(from)}:*:0`]);
+  while (queue.length) {
+    const current = queue.shift()!;
+    for (const neighbor of railNeighbors(current.position)) {
+      const direction = directionKey(current.position, neighbor);
+      const turns = current.direction && current.direction !== direction ? current.turns + 1 : current.turns;
+      if (turns > 1) continue;
+      if (samePosition(neighbor, to)) return true;
+      if (alivePieceAt(state, neighbor)) continue;
+      const key = `${positionKey(neighbor)}:${direction}:${turns}`;
+      if (visited.has(key)) continue;
+      visited.add(key);
+      queue.push({ position: neighbor, direction, turns });
+    }
+  }
+  return false;
+}
+
+function isFriendlyHalfCamp(side: Side, position: Position) {
+  return isCamp(position) && (side === "black" ? position.row >= 6 : position.row <= 5);
+}
+
+export function getAugmentMoveViolation(
+  state: GameState,
+  side: Side,
+  augmentId: AugmentId,
+  from: Position,
+  to: Position,
+): string | null {
+  if (state.phase !== "playing") return "GAME_NOT_STARTED";
+  if (state.turn !== side) return "NOT_YOUR_TURN";
+  if (state.augment?.pendingRecon[side]) return "RECON_SELECTION_REQUIRED";
+  if (state.augment?.extraMove[side]) return "EXTRA_MOVE_NORMAL_ONLY";
+  if (!augmentAvailable(state, side, augmentId)) return "AUGMENT_NOT_AVAILABLE";
+  const definition = getAugmentDefinition(augmentId);
+  if (definition.effect.kind !== "movement") return "AUGMENT_ACTION_MISMATCH";
+  if (!isInsideBoard(from) || !isInsideBoard(to)) return "POSITION_OUT_OF_BOUNDS";
+  if (samePosition(from, to)) return "SAME_POSITION";
+  const piece = alivePieceAt(state, from);
+  if (!piece) return "NO_PIECE_AT_SOURCE";
+  if (piece.side !== side) return "NOT_YOUR_PIECE";
+  if (piece.type === "flag") return "FLAG_CANNOT_MOVE";
+  if (piece.type === "mine") return "MINE_CANNOT_MOVE";
+  if (isHeadquarters(from)) return "HEADQUARTERS_LOCKED";
+  const target = alivePieceAt(state, to);
+  if (target?.side === side) return "DESTINATION_OCCUPIED_BY_ALLY";
+  if (target && isCamp(to)) return "CAMP_PROTECTED";
+
+  const mode = definition.effect.mode;
+  if (mode === "engineer_rail") {
+    return engineerCanReach(state, from, to) ? null : "AUGMENT_PATH_INVALID";
+  }
+  if (target) return "AUGMENT_REQUIRES_EMPTY_TARGET";
+  if (mode === "rail_turn") {
+    if (piece.type === "engineer") return "AUGMENT_PIECE_INELIGIBLE";
+    return railTurnCanReach(state, from, to) ? null : "AUGMENT_PATH_INVALID";
+  }
+  if (mode === "road_dash") {
+    for (let row = 0; row < 12; row += 1) {
+      for (let col = 0; col < 5; col += 1) {
+        const middle = { row, col };
+        if (isRoadEdge(from, middle) && isRoadEdge(middle, to) && !alivePieceAt(state, middle)) {
+          return null;
+        }
+      }
+    }
+    return "AUGMENT_PATH_INVALID";
+  }
+  if (mode === "rail_jump") {
+    const rowDelta = to.row - from.row;
+    const colDelta = to.col - from.col;
+    if (!((Math.abs(rowDelta) === 2 && colDelta === 0) || (Math.abs(colDelta) === 2 && rowDelta === 0))) {
+      return "AUGMENT_PATH_INVALID";
+    }
+    const middle = { row: from.row + rowDelta / 2, col: from.col + colDelta / 2 };
+    const jumped = alivePieceAt(state, middle);
+    return isRailEdge(from, middle) &&
+      isRailEdge(middle, to) &&
+      jumped?.side === side
+      ? null
+      : "AUGMENT_PATH_INVALID";
+  }
+  if (!isCamp(from) || !isFriendlyHalfCamp(side, to)) return "AUGMENT_PATH_INVALID";
+  return null;
+}
+
+export function getAugmentExchangeViolation(
+  state: GameState,
+  side: Side,
+  augmentId: AugmentId,
+  from: Position,
+  to: Position,
+) {
+  if (state.phase !== "playing") return "GAME_NOT_STARTED";
+  if (state.turn !== side) return "NOT_YOUR_TURN";
+  if (state.augment?.pendingRecon[side]) return "RECON_SELECTION_REQUIRED";
+  if (state.augment?.extraMove[side]) return "EXTRA_MOVE_NORMAL_ONLY";
+  if (!augmentAvailable(state, side, augmentId)) return "AUGMENT_NOT_AVAILABLE";
+  const definition = getAugmentDefinition(augmentId);
+  if (definition.effect.kind !== "exchange") return "AUGMENT_ACTION_MISMATCH";
+  const first = alivePieceAt(state, from);
+  const second = alivePieceAt(state, to);
+  if (!first || !second) return "INVALID_SWAP";
+  if (first.side !== side || second.side !== side) return "NOT_YOUR_PIECE";
+  if ([first.type, second.type].some((type) => type === "flag" || type === "mine")) {
+    return "AUGMENT_PIECE_INELIGIBLE";
+  }
+  if (isHeadquarters(first) || isHeadquarters(second)) return "HEADQUARTERS_LOCKED";
+  if (definition.effect.mode === "same_rank") {
+    return first.type === second.type ? null : "AUGMENT_PIECE_INELIGIBLE";
+  }
+  return isRoadEdge(from, to) ? null : "AUGMENT_PATH_INVALID";
+}
+
+function projectedAugmentState(game: ProjectedGame, side: Side): GameState {
+  const state = projectedMovementState(game);
+  if (!game.augment) return state;
+  state.augment = {
+    draft: {
+      catalogVersion: game.augment.draft.catalogVersion,
+      activeRound: null,
+      rounds: [],
+      seenBySide: { black: [], white: [] },
+      loadouts: {
+        black: [...game.augment.draft.loadouts.black],
+        white: [...game.augment.draft.loadouts.white],
+      },
+    },
+    usedBySide: {
+      black: [...game.augment.usedBySide.black],
+      white: [...game.augment.usedBySide.white],
+    },
+    triggerCounts: {
+      black: { ...game.augment.triggerCounts.black },
+      white: { ...game.augment.triggerCounts.white },
+    },
+    permanentReveals: { black: [], white: [] },
+    temporaryReveals: { black: [], white: [] },
+    pendingRecon: { black: null, white: null, [side]: game.augment.pendingRecon },
+    extraMove: { black: null, white: null, [side]: game.augment.extraMove },
+    resumeTurn: null,
+    draftDeadlineAt: game.augment.draftDeadlineAt,
+  };
+  return state;
+}
+
+export function getProjectedAugmentMoveViolation(
+  game: ProjectedGame,
+  side: Side,
+  augmentId: AugmentId,
+  from: Position,
+  to: Position,
+) {
+  return getAugmentMoveViolation(projectedAugmentState(game, side), side, augmentId, from, to);
+}
+
+export function getProjectedAugmentLegalTargets(
+  game: ProjectedGame,
+  side: Side,
+  augmentId: AugmentId,
+  from: Position,
+) {
+  const state = projectedAugmentState(game, side);
+  const targets: Position[] = [];
+  for (let row = 0; row < 12; row += 1) {
+    for (let col = 0; col < 5; col += 1) {
+      const to = { row, col };
+      if (getAugmentMoveViolation(state, side, augmentId, from, to) === null) targets.push(to);
+    }
+  }
+  return targets;
+}
+
+export function getProjectedAugmentExchangeViolation(
+  game: ProjectedGame,
+  side: Side,
+  augmentId: AugmentId,
+  from: Position,
+  to: Position,
+) {
+  return getAugmentExchangeViolation(projectedAugmentState(game, side), side, augmentId, from, to);
 }
 
 function hasAnyLegalMove(state: GameState, side: Side) {
@@ -938,6 +1406,39 @@ function hasAnyLegalMove(state: GameState, side: Side) {
   return state.pieces.some(
     (piece) => piece.alive && piece.side === side && getLegalTargets(stateForSide, side, piece).length > 0,
   );
+}
+
+function hasAnyLegalAction(state: GameState, side: Side) {
+  const stateForSide = { ...state, turn: side } as GameState;
+  if (hasAnyLegalMove(stateForSide, side)) return true;
+  if (stateForSide.augment?.pendingRecon[side]) {
+    return availableReconTargets(stateForSide, side).length > 0;
+  }
+  const ownPieces = stateForSide.pieces.filter(
+    (piece) => piece.alive && piece.side === side && piece.type !== "flag" && piece.type !== "mine",
+  );
+  for (const augmentId of stateForSide.augment?.draft.loadouts[side] ?? []) {
+    if (!augmentAvailable(stateForSide, side, augmentId)) continue;
+    const effect = getAugmentDefinition(augmentId).effect;
+    if (effect.kind === "movement") {
+      for (const piece of ownPieces) {
+        for (let row = 0; row < 12; row += 1) {
+          for (let col = 0; col < 5; col += 1) {
+            if (!getAugmentMoveViolation(stateForSide, side, augmentId, piece, { row, col })) return true;
+          }
+        }
+      }
+    } else if (effect.kind === "exchange") {
+      for (let first = 0; first < ownPieces.length; first += 1) {
+        for (let second = first + 1; second < ownPieces.length; second += 1) {
+          if (!getAugmentExchangeViolation(stateForSide, side, augmentId, ownPieces[first], ownPieces[second])) {
+            return true;
+          }
+        }
+      }
+    }
+  }
+  return false;
 }
 
 function addEvent(state: GameState, event: Omit<PublicEvent, "id">) {
@@ -998,6 +1499,10 @@ function projectClock(state: GameState, nowMs: number): PublicClock | null {
     },
     running:
       state.phase === "playing" && state.clock.turnStartedAt !== null ? state.turn : null,
+    ...(state.clock.incrementMs ? { incrementMs: state.clock.incrementMs } : {}),
+    ...(state.clock.incrementThresholdMs
+      ? { incrementThresholdMs: state.clock.incrementThresholdMs }
+      : {}),
   };
 }
 
@@ -1028,6 +1533,8 @@ function cloneReplayArchive(replay: ReplayArchive): ReplayArchive {
       ...move,
       from: { ...move.from },
       to: { ...move.to },
+      secondaryFrom: move.secondaryFrom ? { ...move.secondaryFrom } : undefined,
+      secondaryTo: move.secondaryTo ? { ...move.secondaryTo } : undefined,
     })),
   };
 }
@@ -1056,7 +1563,22 @@ export function buildReplayFrames(replay: ReplayArchive | null): ReplayFrame[] {
       ...recordedMove,
       from: { ...recordedMove.from },
       to: { ...recordedMove.to },
+      secondaryFrom: recordedMove.secondaryFrom ? { ...recordedMove.secondaryFrom } : undefined,
+      secondaryTo: recordedMove.secondaryTo ? { ...recordedMove.secondaryTo } : undefined,
     };
+    if (move.kind === "exchange" && move.secondaryFrom && move.secondaryTo) {
+      const first = pieces.find(
+        (piece) => piece.alive && piece.side === move.actor && samePosition(piece, move.from),
+      );
+      const second = pieces.find(
+        (piece) => piece.alive && piece.side === move.actor && samePosition(piece, move.secondaryFrom!),
+      );
+      if (!first || !second) break;
+      [first.row, second.row] = [second.row, first.row];
+      [first.col, second.col] = [second.col, first.col];
+      frames.push({ moveNumber: move.moveNumber, move, pieces: publicReplayPieces(pieces) });
+      continue;
+    }
     const attacker = pieces.find(
       (piece) => piece.alive && piece.side === move.actor && samePosition(piece, move.from),
     );
@@ -1073,7 +1595,7 @@ export function buildReplayFrames(replay: ReplayArchive | null): ReplayFrame[] {
       attacker.row = move.to.row;
       attacker.col = move.to.col;
     } else if (move.result === "defender_survives") {
-      attacker.alive = false;
+      if (move.augmentId !== "spade-tactical-retreat") attacker.alive = false;
     } else if (move.result === "both_removed") {
       attacker.alive = false;
       if (defender) defender.alive = false;
@@ -1099,14 +1621,194 @@ function revealFlagWhenCommanderFalls(state: GameState, piece: Piece | undefined
   if (piece?.type === "commander" && !piece.alive) state.revealedFlags[piece.side] = true;
 }
 
-function applyMove(state: GameState, side: Side, from: Position, to: Position) {
-  const violation = getMoveViolation(state, side, from, to);
+function randomAliveEnemyInFront(state: GameState, owner: Side) {
+  const enemy = otherSide(owner);
+  const rows = enemy === "black" ? [6, 7] : [4, 5];
+  const candidates = state.pieces.filter(
+    (piece) => piece.alive && piece.side === enemy && rows.includes(piece.row),
+  );
+  return candidates.length ? candidates[randomIndex(candidates.length)] : null;
+}
+
+function availableReconTargets(state: GameState, owner: Side) {
+  const augment = requireAugmentState(state);
+  const known = new Set([
+    ...augment.permanentReveals[owner],
+    ...augment.temporaryReveals[owner],
+  ]);
+  return state.pieces.filter(
+    (piece) => piece.alive && piece.side !== owner && !known.has(piece.id),
+  );
+}
+
+function applyAugmentRevealTriggers(state: GameState, roundNumber: 1 | 2) {
+  const augment = requireAugmentState(state);
+  const round = augment.draft.rounds.find((candidate) => candidate.number === roundNumber);
+  if (!round?.revealed) throw new GameRuleError("AUGMENT_ROUND_NOT_REVEALED");
+  for (const side of ["black", "white"] as const) {
+    const augmentId = round.players[side].selectedId;
+    if (!augmentId) continue;
+    const definition = getAugmentDefinition(augmentId);
+    const effect = definition.effect;
+    if (effect.kind === "reconnaissance" && effect.mode === "choose_enemy") {
+      const remaining = Math.min(effect.count, availableReconTargets(state, side).length);
+      if (remaining > 0) augment.pendingRecon[side] = { augmentId, remaining };
+      else markAugmentUse(state, side, augmentId);
+    } else if (effect.kind === "reconnaissance" && effect.mode === "frontline_random") {
+      const target = randomAliveEnemyInFront(state, side);
+      if (target && !augment.temporaryReveals[side].includes(target.id)) {
+        augment.temporaryReveals[side].push(target.id);
+      }
+      markAugmentUse(state, side, augmentId);
+    } else if (effect.kind === "clock" && effect.mode === "flat_bonus") {
+      if (state.clock) state.clock.remainingMs[side] += effect.bonusMs;
+      markAugmentUse(state, side, augmentId);
+    } else if (effect.kind === "setup") {
+      markAugmentUse(state, side, augmentId);
+    }
+  }
+  addEvent(state, { actor: state.turn, result: "augment_revealed" });
+}
+
+function maybeApplyLowTimeRescue(state: GameState, side: Side) {
+  if (!state.clock || state.phase !== "playing") return;
+  for (const augmentId of state.augment?.draft.loadouts[side] ?? []) {
+    const effect = getAugmentDefinition(augmentId).effect;
+    if (
+      effect.kind === "clock" &&
+      effect.mode === "low_time_rescue" &&
+      augmentAvailable(state, side, augmentId) &&
+      state.clock.remainingMs[side] < effect.thresholdMs
+    ) {
+      state.clock.remainingMs[side] += effect.bonusMs;
+      markAugmentUse(state, side, augmentId);
+    }
+  }
+}
+
+function applyPostMoveClockBonuses(state: GameState, side: Side) {
+  if (!state.clock) return;
+  if (
+    state.clock.incrementMs &&
+    state.clock.incrementThresholdMs &&
+    state.clock.remainingMs[side] <= state.clock.incrementThresholdMs
+  ) {
+    state.clock.remainingMs[side] = Math.min(
+      state.clock.incrementThresholdMs,
+      state.clock.remainingMs[side] + state.clock.incrementMs,
+    );
+  }
+  for (const augmentId of state.augment?.draft.loadouts[side] ?? []) {
+    const effect = getAugmentDefinition(augmentId).effect;
+    if (
+      effect.kind === "clock" &&
+      effect.mode === "move_increment" &&
+      augmentAvailable(state, side, augmentId)
+    ) {
+      state.clock.remainingMs[side] += effect.bonusMs;
+      markAugmentUse(state, side, augmentId);
+    }
+  }
+}
+
+function resolveTurnAfterSecondDraft(state: GameState) {
+  maybeApplyLowTimeRescue(state, state.turn);
+  if (hasAnyLegalAction(state, state.turn)) return;
+  const stalledSide = state.turn;
+  if (state.augment?.extraMove[stalledSide]) {
+    state.augment.extraMove[stalledSide] = null;
+    state.turn = otherSide(stalledSide);
+    maybeApplyLowTimeRescue(state, state.turn);
+    if (hasAnyLegalAction(state, state.turn)) return;
+    state.phase = "finished";
+    state.winner = stalledSide;
+    state.finishReason = "no_moves";
+    stopClock(state);
+    return;
+  }
+  state.phase = "finished";
+  state.winner = otherSide(stalledSide);
+  state.finishReason = "no_moves";
+  stopClock(state);
+}
+
+function finalizeSecondAugmentDraft(state: GameState, nowMs: number) {
+  const augment = requireAugmentState(state);
+  const activeRound = augment.draft.rounds.find(
+    (round) => round.number === augment.draft.activeRound,
+  );
+  if (!activeRound?.players.black.locked || !activeRound.players.white.locked) return false;
+  augment.draft = revealCurrentAugmentRound(augment.draft);
+  state.turn = augment.resumeTurn ?? state.turn;
+  augment.resumeTurn = null;
+  augment.draftDeadlineAt = null;
+  state.phase = "playing";
+  applyAugmentRevealTriggers(state, 2);
+  resolveTurnAfterSecondDraft(state);
+  if (state.phase === "playing" && state.clock) state.clock.turnStartedAt = nowMs;
+  return true;
+}
+
+export function settleExpiredAugmentDraft(state: GameState, nowMs = Date.now()) {
+  if (state.phase !== "augment_draft" || !state.augment) return false;
+  if (
+    typeof state.augment.draftDeadlineAt !== "number" ||
+    !Number.isFinite(state.augment.draftDeadlineAt)
+  ) {
+    state.augment.draftDeadlineAt = nowMs + SECOND_AUGMENT_DRAFT_DURATION_MS;
+    return true;
+  }
+  if (nowMs < state.augment.draftDeadlineAt) return false;
+  const round = state.augment.draft.rounds.find(
+    (candidate) => candidate.number === state.augment?.draft.activeRound,
+  );
+  if (!round) throw new GameRuleError("NO_ACTIVE_DRAFT");
+  for (const side of ["black", "white"] as const) {
+    if (round.players[side].locked) continue;
+    if (!round.players[side].selectedId) {
+      state.augment.draft = selectAugment(
+        state.augment.draft,
+        side,
+        round.players[side].options[0],
+      );
+    }
+    state.augment.draft = lockAugmentSelection(state.augment.draft, side);
+  }
+  finalizeSecondAugmentDraft(state, nowMs);
+  return true;
+}
+
+export const settleAugmentDraftDeadline = settleExpiredAugmentDraft;
+
+function beginSecondDraftIfDue(state: GameState, nowMs: number) {
+  if (!state.augment || !isSecondAugmentDraftDue(state.augment.draft, state.moveNumber)) return false;
+  state.augment.draft = beginSecondAugmentDraft(state.augment.draft);
+  state.augment.resumeTurn = state.turn;
+  state.augment.draftDeadlineAt = nowMs + AUGMENT_DRAFT_TIMEOUT_MS;
+  state.phase = "augment_draft";
+  stopClock(state);
+  return true;
+}
+
+function applyMove(
+  state: GameState,
+  side: Side,
+  from: Position,
+  to: Position,
+  augmentId?: AugmentId,
+  nowMs = Date.now(),
+) {
+  const violation = augmentId
+    ? getAugmentMoveViolation(state, side, augmentId, from, to)
+    : getMoveViolation(state, side, from, to);
   if (violation) throw new GameRuleError(violation);
   const replay = ensureReplayArchive(state);
   const attacker = alivePieceAt(state, from)!;
   const defender = alivePieceAt(state, to);
+  const movingPieceId = attacker.id;
   const attackedHeadquarters = Boolean(defender && isHeadquarters(to));
   let result: BattleResult = "move";
+  let resolutionAugmentId: AugmentId | undefined;
 
   if (!defender) {
     attacker.row = to.row;
@@ -1124,6 +1826,17 @@ function applyMove(state: GameState, side: Side, from: Position, to: Position) {
       state.finishReason = "flag";
       state.revealedFlags[defender.side] = true;
       result = "flag_captured";
+    } else if (
+      attacker.type === "engineer" &&
+      defender.type === "bomb" &&
+      augmentAvailable(state, side, "heart-bomb-disposal")
+    ) {
+      defender.alive = false;
+      attacker.row = to.row;
+      attacker.col = to.col;
+      result = "attacker_survives";
+      resolutionAugmentId = "heart-bomb-disposal";
+      markAugmentUse(state, side, "heart-bomb-disposal");
     } else if (attacker.type === "bomb" || defender.type === "bomb") {
       attacker.alive = false;
       defender.alive = false;
@@ -1155,6 +1868,41 @@ function applyMove(state: GameState, side: Side, from: Position, to: Position) {
         result = "both_removed";
       }
     }
+
+    if (
+      !attacker.alive &&
+      defender.alive &&
+      augmentAvailable(state, side, "spade-tactical-retreat")
+    ) {
+      attacker.alive = true;
+      result = "defender_survives";
+      resolutionAugmentId = "spade-tactical-retreat";
+      markAugmentUse(state, side, "spade-tactical-retreat");
+    }
+    if (
+      attacker.type === "engineer" &&
+      !attacker.alive &&
+      defender.alive &&
+      defender.type !== "mine" &&
+      augmentAvailable(state, side, "diamond-engineer-screen")
+    ) {
+      defender.alive = false;
+      result = "both_removed";
+      resolutionAugmentId = "diamond-engineer-screen";
+      markAugmentUse(state, side, "diamond-engineer-screen");
+    } else if (
+      defender.type === "engineer" &&
+      !defender.alive &&
+      attacker.alive &&
+      augmentAvailable(state, defender.side, "diamond-engineer-screen")
+    ) {
+      attacker.alive = false;
+      attacker.row = from.row;
+      attacker.col = from.col;
+      result = "both_removed";
+      resolutionAugmentId = "diamond-engineer-screen";
+      markAugmentUse(state, defender.side, "diamond-engineer-screen");
+    }
     revealFlagWhenCommanderFalls(state, attacker);
     revealFlagWhenCommanderFalls(state, defender);
     if (attackedHeadquarters && defender.type !== "flag") state.revealedFlags[defender.side] = true;
@@ -1167,16 +1915,51 @@ function applyMove(state: GameState, side: Side, from: Position, to: Position) {
     from: { ...from },
     to: { ...to },
     result,
+    ...(augmentId ?? resolutionAugmentId ? { augmentId: augmentId ?? resolutionAugmentId } : {}),
   });
-  addEvent(state, { actor: side, from, to, result });
+  if (augmentId) markAugmentUse(state, side, augmentId);
+  if (state.augment) {
+    for (const revealSide of ["black", "white"] as const) {
+      state.augment.temporaryReveals[revealSide] = state.augment.temporaryReveals[revealSide]
+        .filter((pieceId) => pieceId !== movingPieceId);
+    }
+  }
+  applyPostMoveClockBonuses(state, side);
+
+  const wasExtraMove = state.augment?.extraMove[side] ?? null;
+  if (wasExtraMove) state.augment!.extraMove[side] = null;
+  let grantedExtra = false;
+  if (!augmentId && !wasExtraMove && state.phase !== "finished") {
+    const captured = result === "attacker_survives";
+    const candidate = captured ? "spade-relentless-assault" : result === "move" ? "heart-initiative" : null;
+    if (candidate && augmentAvailable(state, side, candidate)) {
+      markAugmentUse(state, side, candidate);
+      state.augment!.extraMove[side] = { augmentId: candidate, excludedPieceId: movingPieceId };
+      grantedExtra = true;
+    }
+  }
+  addEvent(state, { actor: side, from, to, result, augmentId: augmentId ?? resolutionAugmentId });
   if (state.phase === "finished") return;
 
   const nextSide = otherSide(side);
-  state.turn = nextSide;
-  if (!hasAnyLegalMove(state, nextSide)) {
-    state.phase = "finished";
-    state.winner = side;
-    state.finishReason = "no_moves";
+  state.turn = grantedExtra ? side : nextSide;
+  if (beginSecondDraftIfDue(state, nowMs)) return;
+  maybeApplyLowTimeRescue(state, state.turn);
+  if (!hasAnyLegalAction(state, state.turn)) {
+    if (grantedExtra && state.augment?.extraMove[side]) {
+      state.augment.extraMove[side] = null;
+      state.turn = nextSide;
+      maybeApplyLowTimeRescue(state, nextSide);
+      if (!hasAnyLegalAction(state, nextSide)) {
+        state.phase = "finished";
+        state.winner = side;
+        state.finishReason = "no_moves";
+      }
+    } else {
+      state.phase = "finished";
+      state.winner = side;
+      state.finishReason = "no_moves";
+    }
   }
 }
 
@@ -1191,13 +1974,43 @@ export function applyPlayerAction(
 
   if (state.phase === "playing") {
     if (settleExpiredClock(state, nowMs)) return state;
-    commitRunningClock(state, nowMs);
+    if (["move", "augment_move", "augment_exchange", "resign"].includes(action.type)) {
+      commitRunningClock(state, nowMs);
+    }
+  }
+
+  if (
+    action.type === "augment_select" ||
+    action.type === "augment_refresh" ||
+    action.type === "augment_lock"
+  ) {
+    if (state.phase !== "setup" && state.phase !== "augment_draft") {
+      throw new GameRuleError("NO_ACTIVE_DRAFT");
+    }
+    const augment = requireAugmentState(state);
+    try {
+      if (action.type === "augment_select") {
+        augment.draft = selectAugment(augment.draft, side, action.augmentId);
+      } else if (action.type === "augment_refresh") {
+        augment.draft = refreshAugmentOption(augment.draft, side, action.slot);
+      } else {
+        augment.draft = lockAugmentSelection(augment.draft, side);
+        if (state.phase === "augment_draft") {
+          finalizeSecondAugmentDraft(state, nowMs);
+        }
+      }
+      return state;
+    } catch (error) {
+      if (error instanceof AugmentRuleError) throw new GameRuleError(error.code);
+      throw error;
+    }
   }
 
   if (action.type === "set_time_control") {
     if (side !== "black") throw new GameRuleError("HOST_ONLY_TIME_CONTROL");
     if (state.phase !== "setup") throw new GameRuleError("GAME_ALREADY_STARTED");
     if (state.ready.black || state.ready.white) throw new GameRuleError("TIME_CONTROL_LOCKED");
+    if (state.clock?.incrementMs) throw new GameRuleError("RANKED_TIME_CONTROL_LOCKED");
     if (
       !Number.isInteger(action.minutes) ||
       action.minutes < MIN_TIME_CONTROL_MINUTES ||
@@ -1218,7 +2031,7 @@ export function applyPlayerAction(
   if (action.type === "randomize") {
     if (state.phase !== "setup") throw new GameRuleError("GAME_ALREADY_STARTED");
     if (state.ready[side]) throw new GameRuleError("LAYOUT_LOCKED");
-    const draft = randomizeSetupDraft(state.pieces, side);
+    const draft = randomizeSetupDraft(state.pieces, side, selectedSetupAugments(state, side));
     for (const piece of state.pieces.filter((candidate) => candidate.alive && candidate.side === side)) {
       const position = draft[piece.id];
       if (!position) throw new GameRuleError("INVALID_LAYOUT");
@@ -1236,15 +2049,22 @@ export function applyPlayerAction(
     if (!first || !second) throw new GameRuleError("INVALID_SWAP");
     [first.row, second.row] = [second.row, first.row];
     [first.col, second.col] = [second.col, first.col];
-    if (!validateSideSetup(state.pieces, side)) throw new GameRuleError("INVALID_LAYOUT");
+    if (!validateSideSetup(state.pieces, side, selectedSetupAugments(state, side))) {
+      throw new GameRuleError("INVALID_LAYOUT");
+    }
     return state;
   }
 
   if (action.type === "ready") {
     if (state.phase !== "setup") throw new GameRuleError("GAME_ALREADY_STARTED");
     if (state.ready[side] === action.value) throw new GameRuleError("NO_STATE_CHANGE");
+    const setupAugments = selectedSetupAugments(state, side);
+    if (action.value && state.augment) {
+      const firstRound = state.augment.draft.rounds[0];
+      if (!firstRound.players[side].locked) throw new GameRuleError("AUGMENT_SELECTION_REQUIRED");
+    }
     if (action.value && action.layout) {
-      const violation = getSubmittedSetupLayoutViolation(state.pieces, side, action.layout);
+      const violation = getSubmittedSetupLayoutViolation(state.pieces, side, action.layout, setupAugments);
       if (violation) throw new GameRuleError(violation);
       const placements = new Map(action.layout.map((placement) => [placement.pieceId, placement]));
       for (const piece of state.pieces.filter((candidate) => candidate.alive && candidate.side === side)) {
@@ -1253,7 +2073,9 @@ export function applyPlayerAction(
         piece.col = placement.col;
       }
     }
-    if (action.value && !validateSideSetup(state.pieces, side)) throw new GameRuleError("INVALID_LAYOUT");
+    if (action.value && !validateSideSetup(state.pieces, side, setupAugments)) {
+      throw new GameRuleError("INVALID_LAYOUT");
+    }
     state.joined[side] = true;
     state.ready[side] = action.value;
     addEvent(state, { actor: side, result: action.value ? "ready" : "unready" });
@@ -1269,23 +2091,121 @@ export function applyPlayerAction(
         };
         state.clock.turnStartedAt = nowMs;
       }
+      if (state.augment) {
+        try {
+          state.augment.draft = revealCurrentAugmentRound(state.augment.draft);
+        } catch (error) {
+          if (error instanceof AugmentRuleError) throw new GameRuleError(error.code);
+          throw error;
+        }
+        applyAugmentRevealTriggers(state, 1);
+        maybeApplyLowTimeRescue(state, state.turn);
+      }
       addEvent(state, { actor: state.firstTurn, result: "game_started" });
     }
     return state;
   }
 
-  if (action.type === "resign") {
+  if (action.type === "augment_recon") {
     if (state.phase !== "playing") throw new GameRuleError("GAME_NOT_STARTED");
+    const augment = requireAugmentState(state);
+    const pending = augment.pendingRecon[side];
+    if (!pending || pending.augmentId !== action.augmentId) {
+      throw new GameRuleError("RECON_NOT_PENDING");
+    }
+    const target = alivePieceAt(state, action.target);
+    if (!target || target.side === side) throw new GameRuleError("RECON_TARGET_INVALID");
+    if (
+      augment.permanentReveals[side].includes(target.id) ||
+      augment.temporaryReveals[side].includes(target.id)
+    ) {
+      throw new GameRuleError("RECON_TARGET_ALREADY_KNOWN");
+    }
+    augment.permanentReveals[side].push(target.id);
+    pending.remaining = Math.min(pending.remaining - 1, availableReconTargets(state, side).length);
+    if (pending.remaining <= 0) {
+      augment.pendingRecon[side] = null;
+      markAugmentUse(state, side, action.augmentId);
+      if (side === state.turn && !hasAnyLegalAction(state, side)) {
+        state.phase = "finished";
+        state.winner = otherSide(side);
+        state.finishReason = "no_moves";
+        stopClock(state);
+      }
+    }
+    return state;
+  }
+
+  if (action.type === "augment_exchange") {
+    const violation = getAugmentExchangeViolation(
+      state,
+      side,
+      action.augmentId,
+      action.from,
+      action.to,
+    );
+    if (violation) throw new GameRuleError(violation);
+    const replay = ensureReplayArchive(state);
+    const first = alivePieceAt(state, action.from)!;
+    const second = alivePieceAt(state, action.to)!;
+    [first.row, second.row] = [second.row, first.row];
+    [first.col, second.col] = [second.col, first.col];
+    state.moveNumber += 1;
+    replay.moves.push({
+      moveNumber: state.moveNumber,
+      actor: side,
+      from: { ...action.from },
+      to: { ...action.to },
+      secondaryFrom: { ...action.to },
+      secondaryTo: { ...action.from },
+      result: "move",
+      kind: "exchange",
+      augmentId: action.augmentId,
+    });
+    markAugmentUse(state, side, action.augmentId, { from: action.from, to: action.to });
+    if (state.augment) {
+      for (const revealSide of ["black", "white"] as const) {
+        state.augment.temporaryReveals[revealSide] = state.augment.temporaryReveals[revealSide]
+          .filter((pieceId) => pieceId !== first.id && pieceId !== second.id);
+      }
+    }
+    applyPostMoveClockBonuses(state, side);
+    state.turn = otherSide(side);
+    if (!beginSecondDraftIfDue(state, nowMs)) {
+      maybeApplyLowTimeRescue(state, state.turn);
+      if (!hasAnyLegalAction(state, state.turn)) {
+        state.phase = "finished";
+        state.winner = side;
+        state.finishReason = "no_moves";
+      }
+    }
+    if (state.phase === "playing" && state.clock) state.clock.turnStartedAt = nowMs;
+    else stopClock(state);
+    return state;
+  }
+
+  if (action.type === "augment_move") {
+    applyMove(state, side, action.from, action.to, action.augmentId, nowMs);
+    if (state.phase === "playing" && state.clock) state.clock.turnStartedAt = nowMs;
+    else stopClock(state);
+    return state;
+  }
+
+  if (action.type === "resign") {
+    if (state.phase !== "playing" && state.phase !== "augment_draft") {
+      throw new GameRuleError("GAME_NOT_STARTED");
+    }
     ensureReplayArchive(state);
     state.phase = "finished";
     state.winner = otherSide(side);
     state.finishReason = "resign";
+    if (state.augment) state.augment.draftDeadlineAt = null;
     stopClock(state);
     addEvent(state, { actor: side, result: "resigned" });
     return state;
   }
 
-  applyMove(state, side, action.from, action.to);
+  applyMove(state, side, action.from, action.to, undefined, nowMs);
   if (state.phase === "playing") {
     if (state.clock) state.clock.turnStartedAt = nowMs;
   } else {
@@ -1294,10 +2214,25 @@ export function applyPlayerAction(
   return state;
 }
 
-export function projectGame(state: GameState, viewer: Viewer, nowMs = Date.now()): ProjectedGame {
-  const canSeeReplay = viewer === "spectator" || state.phase === "finished";
+export interface ProjectionOptions {
+  spectatorPolicy?: "full" | "hidden";
+  spectatorPerspective?: Side | null;
+}
+
+export function projectGame(
+  state: GameState,
+  viewer: Viewer,
+  nowMs = Date.now(),
+  options: ProjectionOptions = {},
+): ProjectedGame {
+  const fullSpectator = viewer === "spectator" && options.spectatorPolicy !== "hidden";
+  const knowledgeSide = viewer === "spectator" ? options.spectatorPerspective ?? null : viewer;
+  const canSeeReplay = state.phase === "finished" || fullSpectator;
   const availableReplay =
     state.phase === "setup" ? null : state.replay ?? createReplayArchive(state);
+  const projectedDraft = state.augment
+    ? projectAugmentDraft(state.augment.draft, knowledgeSide ?? "spectator")
+    : null;
   return {
     rulesVersion: state.rulesVersion,
     phase: state.phase,
@@ -1310,8 +2245,19 @@ export function projectGame(state: GameState, viewer: Viewer, nowMs = Date.now()
     pieces: state.pieces
       .map((piece) => {
         const flagRevealed = piece.type === "flag" && state.revealedFlags[piece.side];
-        const canSeeType = viewer === "spectator" || state.phase === "finished" || viewer === piece.side || flagRevealed;
-        const hidesSetupIdentity = state.phase === "setup" && viewer !== piece.side;
+        const individuallyRevealed = Boolean(
+          knowledgeSide &&
+            (state.augment?.permanentReveals[knowledgeSide].includes(piece.id) ||
+              state.augment?.temporaryReveals[knowledgeSide].includes(piece.id)),
+        );
+        const canSeeType =
+          fullSpectator ||
+          state.phase === "finished" ||
+          knowledgeSide === piece.side ||
+          flagRevealed ||
+          individuallyRevealed;
+        const hidesSetupIdentity =
+          state.phase === "setup" && !fullSpectator && knowledgeSide !== piece.side;
         return {
           id: hidesSetupIdentity
             ? `${piece.side}-hidden-${piece.row}-${piece.col}`
@@ -1336,5 +2282,33 @@ export function projectGame(state: GameState, viewer: Viewer, nowMs = Date.now()
     moveNumber: state.moveNumber,
     replay: canSeeReplay && availableReplay ? cloneReplayArchive(availableReplay) : null,
     clock: projectClock(state, nowMs),
+    mode: gameModeForState(state),
+    augment:
+      state.augment && projectedDraft
+        ? {
+            draft: projectedDraft,
+            usedBySide: {
+              black: state.augment.usedBySide.black.filter((id) => projectedDraft.loadouts.black.includes(id)),
+              white: state.augment.usedBySide.white.filter((id) => projectedDraft.loadouts.white.includes(id)),
+            },
+            triggerCounts: {
+              black: Object.fromEntries(
+                projectedDraft.loadouts.black.map((id) => [
+                  id,
+                  state.augment?.triggerCounts.black[id] ?? 0,
+                ]),
+              ),
+              white: Object.fromEntries(
+                projectedDraft.loadouts.white.map((id) => [
+                  id,
+                  state.augment?.triggerCounts.white[id] ?? 0,
+                ]),
+              ),
+            },
+            pendingRecon: knowledgeSide ? state.augment.pendingRecon[knowledgeSide] : null,
+            extraMove: knowledgeSide ? state.augment.extraMove[knowledgeSide] : null,
+            draftDeadlineAt: state.augment.draftDeadlineAt,
+          }
+        : null,
   };
 }

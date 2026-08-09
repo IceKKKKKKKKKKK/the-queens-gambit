@@ -7,6 +7,10 @@ import test from "node:test";
 import { fileURLToPath } from "node:url";
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
+let hostIdentity = {};
+let guestIdentity = {};
+let spectatorIdentity = {};
+const identityByToken = new Map();
 
 function opaqueToken() {
   return randomBytes(32).toString("base64url");
@@ -53,7 +57,29 @@ async function stopServer(child) {
   if (child.exitCode === null) child.kill("SIGKILL");
 }
 
-async function requestJson(url, init) {
+function inferredIdentity(url, init = {}) {
+  const headers = new Headers(init.headers);
+  if (headers.has("oai-authenticated-user-id") || headers.has("oai-authenticated-user-email")) {
+    return {};
+  }
+  if (url.endsWith("/claim")) return guestIdentity;
+  const authorization = headers.get("authorization");
+  const token = authorization?.match(/^Bearer\s+(.+)$/i)?.[1];
+  if (token && identityByToken.has(token)) return identityByToken.get(token);
+  if ((init.method ?? "GET") === "POST" && url.endsWith("/api/rooms")) return hostIdentity;
+  return spectatorIdentity;
+}
+
+async function requestJson(url, init = {}) {
+  const response = await fetch(url, {
+    ...init,
+    headers: { ...inferredIdentity(url, init), ...(init.headers ?? {}) },
+  });
+  const body = response.status === 204 ? null : await response.json();
+  return { status: response.status, body };
+}
+
+async function requestJsonWithoutIdentity(url, init = {}) {
   const response = await fetch(url, init);
   const body = response.status === 204 ? null : await response.json();
   return { status: response.status, body };
@@ -83,11 +109,18 @@ function postAction(origin, code, token, expectedVersion, action) {
   );
 }
 
-function createRoom(origin) {
-  return requestJson(`${origin}/api/rooms`, {
+async function createRoom(origin) {
+  const created = await requestJson(`${origin}/api/rooms`, {
     method: "POST",
-    headers: { "CF-Connecting-IP": uniqueTestIp() },
+    headers: {
+      ...hostIdentity,
+      "CF-Connecting-IP": uniqueTestIp(),
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify({ gameMode: "classic", spectatorPolicy: "full" }),
   });
+  if (created.body?.playerToken) identityByToken.set(created.body.playerToken, hostIdentity);
+  return created;
 }
 
 function ownLayout(snapshot, side) {
@@ -115,9 +148,32 @@ test("room API preserves role-based visibility, identity, concurrency, and limit
   t.after(() => stopServer(child));
   await waitForServer(origin, child, logs);
 
+  const identityNonce = randomBytes(6).toString("hex");
+  hostIdentity = {
+    "oai-authenticated-user-id": `room-api-host-${identityNonce}`,
+    "oai-authenticated-user-email": `host.${identityNonce}@example.com`,
+  };
+  guestIdentity = {
+    "oai-authenticated-user-id": `room-api-guest-${identityNonce}`,
+    "oai-authenticated-user-email": `guest.${identityNonce}@example.com`,
+  };
+  spectatorIdentity = {
+    "oai-authenticated-user-id": `room-api-spectator-${identityNonce}`,
+    "oai-authenticated-user-email": `spectator.${identityNonce}@example.com`,
+  };
+  const unauthenticatedCreate = await requestJsonWithoutIdentity(`${origin}/api/rooms`, {
+    method: "POST",
+  });
+  assert.equal(unauthenticatedCreate.status, 401);
+  assert.equal(unauthenticatedCreate.body.error, "AUTH_REQUIRED");
+
   const create = await createRoom(origin);
   assert.equal(create.status, 201);
   const { code, playerToken: blackToken, opponentInviteToken: inviteToken } = create.body;
+
+  const unauthenticatedRead = await requestJsonWithoutIdentity(`${origin}/api/rooms/${code}`);
+  assert.equal(unauthenticatedRead.status, 401);
+  assert.equal(unauthenticatedRead.body.error, "AUTH_REQUIRED");
 
   const spectator = await requestJson(`${origin}/api/rooms/${code}`);
   assert.equal(spectator.status, 200);
@@ -164,6 +220,7 @@ test("room API preserves role-based visibility, identity, concurrency, and limit
   );
 
   const candidates = [opaqueToken(), opaqueToken()];
+  for (const candidate of candidates) identityByToken.set(candidate, guestIdentity);
   const claims = await Promise.all(
     candidates.map((playerToken) => postJson(`${origin}/api/rooms/${code}/claim`, { inviteToken, playerToken })),
   );
@@ -236,6 +293,7 @@ test("room API preserves role-based visibility, identity, concurrency, and limit
   assert.equal(noTokenClock.status, 401);
 
   const clockWhiteToken = opaqueToken();
+  identityByToken.set(clockWhiteToken, guestIdentity);
   const clockClaim = await postJson(`${origin}/api/rooms/${clockRoom.body.code}/claim`, {
     inviteToken: clockRoom.body.opponentInviteToken,
     playerToken: clockWhiteToken,
@@ -416,7 +474,9 @@ test("room API preserves role-based visibility, identity, concurrency, and limit
     headers: { "CF-Connecting-IP": uniqueTestIp() },
   });
   assert.equal(raceRoom.status, 201);
+  identityByToken.set(raceRoom.body.playerToken, hostIdentity);
   const raceCandidate = opaqueToken();
+  identityByToken.set(raceCandidate, guestIdentity);
   let [actionResult, claimResult] = await Promise.all([
     postJson(
       `${origin}/api/rooms/${raceRoom.body.code}/actions`,
@@ -479,6 +539,7 @@ test("room API preserves role-based visibility, identity, concurrency, and limit
   const ruleRoom = await createRoom(origin);
   assert.equal(ruleRoom.status, 201);
   const ruleWhiteToken = opaqueToken();
+  identityByToken.set(ruleWhiteToken, guestIdentity);
   const ruleClaim = await postJson(`${origin}/api/rooms/${ruleRoom.body.code}/claim`, {
     inviteToken: ruleRoom.body.opponentInviteToken,
     playerToken: ruleWhiteToken,
@@ -589,10 +650,19 @@ test("room API preserves role-based visibility, identity, concurrency, and limit
   assert.equal(finishedOtherPlayer.body.snapshot.replay.initialPieces.length, 50);
 
   const rateKey = uniqueTestIp();
+  const rateIdentity = {
+    "oai-authenticated-user-id": `room-api-rate-${identityNonce}`,
+    "oai-authenticated-user-email": `rate.${identityNonce}@example.com`,
+  };
   const rateStatuses = [];
   for (let attempt = 0; attempt < 21; attempt += 1) {
     rateStatuses.push(
-      (await requestJson(`${origin}/api/rooms`, { method: "POST", headers: { "CF-Connecting-IP": rateKey } })).status,
+      (
+        await requestJson(`${origin}/api/rooms`, {
+          method: "POST",
+          headers: { ...rateIdentity, "CF-Connecting-IP": rateKey },
+        })
+      ).status,
     );
   }
   assert.equal(rateStatuses.filter((status) => status === 201).length, 20);

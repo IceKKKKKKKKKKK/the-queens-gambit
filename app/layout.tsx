@@ -7,8 +7,8 @@ export async function generateMetadata(): Promise<Metadata> {
   const host = requestHeaders.get("x-forwarded-host") ?? requestHeaders.get("host") ?? "localhost:3000";
   const protocol = requestHeaders.get("x-forwarded-proto") ?? (host.startsWith("localhost") ? "http" : "https");
   const imageUrl = `${protocol}://${host}/og.png`;
-  const title = "The Queen's Gambit";
-  const description = "在线二人暗军棋";
+  const title = "军令 · 在线暗军棋";
+  const description = "保留经典规则，并加入公平三选一强化与排位竞技的在线暗军棋。";
   return {
     title,
     description,
@@ -16,7 +16,7 @@ export async function generateMetadata(): Promise<Metadata> {
       title,
       description,
       type: "website",
-      images: [{ url: imageUrl, width: 1792, height: 1024, alt: "The Queen's Gambit 暗军棋" }],
+      images: [{ url: imageUrl, width: 1672, height: 941, alt: "相向而立的皇后与国王黑白纸牌线稿" }],
     },
     twitter: {
       card: "summary_large_image",

@@ -1,0 +1,620 @@
+.card {
+  --augment-ink: #17140f;
+  --augment-paper: var(--paper, #fffdf7);
+  position: relative;
+  display: grid;
+  width: 100%;
+  min-width: 0;
+  min-height: 248px;
+  padding: 18px;
+  overflow: hidden;
+  border: 1px solid color-mix(in srgb, var(--augment-ink) 24%, transparent);
+  border-radius: 7px;
+  background: var(--augment-paper);
+  color: var(--augment-ink);
+  text-align: left;
+  isolation: isolate;
+  transition:
+    border-color 160ms ease,
+    background 160ms ease,
+    opacity 160ms ease,
+    color 160ms ease;
+}
+
+button.card {
+  appearance: none;
+  cursor: pointer;
+  font: inherit;
+  -webkit-tap-highlight-color: transparent;
+}
+
+button.card:hover:not(:disabled) {
+  border-color: var(--augment-ink);
+  background: color-mix(in srgb, var(--augment-ink) 4%, var(--augment-paper));
+}
+
+button.card:focus-visible {
+  outline: 3px solid var(--augment-ink);
+  outline-offset: 4px;
+}
+
+button.card:disabled {
+  cursor: default;
+}
+
+.card::after {
+  position: absolute;
+  inset: 7px;
+  z-index: -1;
+  border: 1px solid color-mix(in srgb, var(--augment-ink) 10%, transparent);
+  border-radius: 3px;
+  content: "";
+  pointer-events: none;
+}
+
+.card[data-suit="hearts"],
+.card[data-suit="diamonds"] {
+  --augment-ink: #852222;
+}
+
+.cardSelected {
+  border-width: 2px;
+  border-color: var(--augment-ink);
+  outline: 1px solid var(--augment-ink);
+  outline-offset: -5px;
+}
+
+.cardLocked {
+  outline: 2px double var(--augment-ink);
+  outline-offset: 2px;
+}
+
+.cardUsed {
+  background: color-mix(in srgb, var(--augment-ink) 7%, var(--augment-paper));
+}
+
+.cardUsed::before {
+  position: absolute;
+  inset: 50% auto auto 50%;
+  z-index: 3;
+  min-width: 74%;
+  padding: 7px 10px;
+  border: 1px solid currentColor;
+  border-radius: 2px;
+  background: var(--augment-paper);
+  content: "已耗尽";
+  font-size: 12px;
+  font-weight: 800;
+  letter-spacing: 0.12em;
+  text-align: center;
+  transform: translate(-50%, -50%);
+}
+
+.cardHidden {
+  --augment-ink: #ffffff;
+  background: repeating-linear-gradient(45deg, #17140f 0 8px, #2a2722 8px 9px);
+  color: #ffffff;
+}
+
+.cardHidden::after {
+  border-color: rgb(255 255 255 / 52%);
+}
+
+.cardCompact {
+  min-height: 132px;
+  padding: 12px;
+  border-radius: 5px;
+}
+
+.corner {
+  position: absolute;
+  top: 14px;
+  left: 14px;
+  display: grid;
+  justify-items: center;
+  font-family: "Iowan Old Style", Baskerville, "Times New Roman", serif;
+  font-size: 18px;
+  font-weight: 700;
+  line-height: 0.9;
+}
+
+.cornerBottom {
+  inset: auto 14px 14px auto;
+  transform: rotate(180deg);
+}
+
+.cardCompact .corner {
+  top: 10px;
+  left: 10px;
+  font-size: 14px;
+}
+
+.cardCompact .cornerBottom {
+  inset: auto 10px 10px auto;
+}
+
+.suitGlyph {
+  margin-top: 4px;
+  font-size: 16px;
+}
+
+.face {
+  display: grid;
+  min-width: 0;
+  align-content: center;
+  justify-items: center;
+  gap: 10px;
+  padding: 32px 12px 26px;
+  text-align: center;
+}
+
+.cardCompact .face {
+  gap: 5px;
+  padding: 22px 4px 18px;
+}
+
+.mainSuit {
+  font-family: "Iowan Old Style", Baskerville, "Times New Roman", serif;
+  font-size: 42px;
+  line-height: 1;
+}
+
+.cardCompact .mainSuit {
+  font-size: 27px;
+}
+
+.name {
+  max-width: 100%;
+  overflow-wrap: anywhere;
+  font-family: "Iowan Old Style", Baskerville, "Songti SC", "STSong", serif;
+  font-size: clamp(21px, 2.2vw, 30px);
+  font-weight: 650;
+  letter-spacing: -0.04em;
+  line-height: 1.08;
+}
+
+.cardCompact .name {
+  display: -webkit-box;
+  overflow: hidden;
+  font-size: 14px;
+  line-height: 1.15;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 2;
+}
+
+.description {
+  max-width: 26ch;
+  margin: 0;
+  color: var(--augment-ink);
+  font-size: 12px;
+  line-height: 1.55;
+  opacity: 0.84;
+}
+
+.cardDetails {
+  display: flex;
+  max-width: 100%;
+  flex-wrap: wrap;
+  justify-content: center;
+  gap: 5px 8px;
+  font-size: 9px;
+  font-weight: 700;
+  letter-spacing: 0.04em;
+}
+
+.cardDetails span {
+  padding: 3px 6px;
+  border: 1px solid color-mix(in srgb, var(--augment-ink) 22%, transparent);
+  border-radius: 2px;
+}
+
+.cardCompact .description,
+.cardCompact .cardDetails {
+  display: none;
+}
+
+.tierLabel {
+  margin-top: 2px;
+  font-size: 10px;
+  font-weight: 750;
+  letter-spacing: 0.16em;
+  opacity: 0.82;
+  text-transform: uppercase;
+}
+
+.stateBadge {
+  position: absolute;
+  top: 12px;
+  right: 12px;
+  max-width: calc(100% - 70px);
+  padding: 4px 7px;
+  border: 1px solid currentColor;
+  border-radius: 2px;
+  background: var(--augment-paper);
+  font-size: 9px;
+  font-weight: 800;
+  letter-spacing: 0.1em;
+  line-height: 1;
+  text-transform: uppercase;
+}
+
+.cardHidden .stateBadge {
+  background: rgb(0 0 0 / 58%);
+}
+
+.hiddenFace {
+  display: grid;
+  align-content: center;
+  justify-items: center;
+  gap: 8px;
+  padding: 28px 12px;
+  text-align: center;
+}
+
+.hiddenMark {
+  display: grid;
+  width: 54px;
+  height: 54px;
+  place-items: center;
+  border: 1px solid rgb(255 255 255 / 68%);
+  border-radius: 4px;
+  font-family: "Iowan Old Style", Baskerville, "Times New Roman", serif;
+  font-size: 27px;
+}
+
+.hiddenText {
+  font-size: 10px;
+  font-weight: 750;
+  letter-spacing: 0.14em;
+}
+
+.draft {
+  display: grid;
+  width: min(980px, 100%);
+  gap: 20px;
+}
+
+.draftHeader {
+  display: flex;
+  align-items: end;
+  justify-content: space-between;
+  gap: 18px;
+}
+
+.draftTitleGroup {
+  min-width: 0;
+}
+
+.draftEyebrow,
+.draftTitle,
+.draftDescription,
+.draftMeta,
+.draftStatus {
+  margin: 0;
+}
+
+.draftEyebrow {
+  color: rgb(0 0 0 / 55%);
+  font-size: 10px;
+  font-weight: 750;
+  letter-spacing: 0.16em;
+  text-transform: uppercase;
+}
+
+.draftTitle {
+  margin-top: 5px;
+  font-family: "Iowan Old Style", Baskerville, "Songti SC", "STSong", serif;
+  font-size: clamp(28px, 5vw, 48px);
+  font-weight: 520;
+  letter-spacing: -0.055em;
+  line-height: 1;
+}
+
+.draftDescription {
+  max-width: 60ch;
+  margin-top: 8px;
+  color: rgb(0 0 0 / 58%);
+  font-size: 12px;
+  line-height: 1.55;
+}
+
+.draftMeta {
+  flex: none;
+  padding: 7px 10px;
+  border: 1px solid rgb(0 0 0 / 17%);
+  border-radius: 3px;
+  font-size: 10px;
+  font-weight: 700;
+  white-space: nowrap;
+}
+
+.draftHeaderMeta {
+  display: grid;
+  flex: none;
+  justify-items: end;
+  gap: 7px;
+}
+
+.draftTimer {
+  display: flex;
+  min-width: 116px;
+  margin: 0;
+  padding: 8px 10px;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 12px;
+  border: 1px solid #111111;
+  border-radius: 4px;
+  background: var(--augment-paper);
+  color: #17140f;
+  font-variant-numeric: tabular-nums;
+}
+
+.draftTimer span {
+  font-size: 9px;
+  font-weight: 750;
+  letter-spacing: 0.12em;
+}
+
+.draftTimer strong {
+  font-size: 15px;
+  line-height: 1;
+}
+
+.draftTimerUrgent {
+  border-color: #9b2020;
+  background: #9b2020;
+  color: #ffffff;
+}
+
+.draftOptions {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 14px;
+  margin: 0;
+  padding: 0;
+  border: 0;
+}
+
+.draftOption {
+  display: grid;
+  min-width: 0;
+  align-content: start;
+  gap: 8px;
+}
+
+.refreshButton,
+.resignButton,
+.confirmButton {
+  min-height: 44px;
+  border: 1px solid #17140f;
+  border-radius: 4px;
+  background: var(--augment-paper);
+  color: #17140f;
+  cursor: pointer;
+  font-size: 12px;
+  font-weight: 700;
+  transition: background 150ms ease, color 150ms ease, opacity 150ms ease;
+  -webkit-tap-highlight-color: transparent;
+}
+
+.refreshButton:hover:not(:disabled),
+.refreshButton:focus-visible,
+.resignButton:hover:not(:disabled),
+.resignButton:focus-visible {
+  background: #111111;
+  color: #ffffff;
+}
+
+.refreshButton:focus-visible,
+.resignButton:focus-visible,
+.confirmButton:focus-visible {
+  outline: 3px solid #111111;
+  outline-offset: 3px;
+}
+
+.refreshButton:disabled,
+.resignButton:disabled,
+.confirmButton:disabled {
+  cursor: not-allowed;
+  opacity: 0.36;
+}
+
+.draftFooter {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+}
+
+.draftActions {
+  display: flex;
+  flex: none;
+  align-items: center;
+  gap: 8px;
+}
+
+.draftStatus {
+  color: rgb(0 0 0 / 62%);
+  font-size: 12px;
+  line-height: 1.45;
+}
+
+.confirmButton {
+  min-width: 156px;
+  padding-inline: 22px;
+  background: #111111;
+  color: #ffffff;
+}
+
+.confirmButton:hover:not(:disabled) {
+  background: #333333;
+}
+
+.resignButton {
+  min-width: 72px;
+  padding-inline: 16px;
+}
+
+.rail {
+  display: grid;
+  min-width: 0;
+  gap: 8px;
+}
+
+.railHeader {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.railTitle,
+.railMeta,
+.railEmpty {
+  margin: 0;
+}
+
+.railTitle {
+  font-size: 11px;
+  font-weight: 800;
+  letter-spacing: 0.1em;
+}
+
+.railMeta {
+  color: rgb(23 20 15 / 68%);
+  font-size: 9px;
+}
+
+.railCards {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(86px, 1fr));
+  gap: 8px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.railCardsSingle {
+  grid-template-columns: minmax(86px, 156px);
+}
+
+.railCardItem {
+  min-width: 0;
+}
+
+.railEmpty {
+  display: grid;
+  min-height: 88px;
+  place-items: center;
+  border: 1px dashed rgb(0 0 0 / 18%);
+  border-radius: 4px;
+  color: rgb(23 20 15 / 68%);
+  font-size: 11px;
+  text-align: center;
+}
+
+.visuallyHidden {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  padding: 0;
+  overflow: hidden;
+  clip: rect(0, 0, 0, 0);
+  border: 0;
+  margin: -1px;
+  white-space: nowrap;
+}
+
+@media (max-width: 720px) {
+  .draftHeader,
+  .draftFooter {
+    align-items: stretch;
+    flex-direction: column;
+  }
+
+  .draftMeta {
+    align-self: flex-start;
+  }
+
+  .draftHeaderMeta {
+    width: 100%;
+    justify-items: stretch;
+  }
+
+  .draftTimer {
+    width: 100%;
+  }
+
+  .draftOptions {
+    grid-template-columns: 1fr;
+  }
+
+  .card {
+    min-height: 196px;
+  }
+
+  .draftFooter {
+    position: sticky;
+    z-index: 4;
+    bottom: -1px;
+    padding: 12px 0 calc(12px + env(safe-area-inset-bottom));
+    border-top: 1px solid rgb(23 20 15 / 18%);
+    background: var(--augment-paper);
+  }
+
+  .draftActions {
+    width: 100%;
+  }
+
+  .confirmButton {
+    flex: 1;
+  }
+}
+
+@media (max-width: 420px) {
+  .card {
+    min-height: 180px;
+    padding: 14px;
+  }
+
+  .face {
+    padding-block: 25px 20px;
+  }
+
+  .railCards {
+    grid-template-columns: repeat(2, minmax(72px, 1fr));
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .card,
+  .refreshButton,
+  .resignButton,
+  .confirmButton {
+    scroll-behavior: auto;
+    transition: none;
+  }
+
+  button.card:hover:not(:disabled),
+  .cardSelected {
+    transform: none;
+  }
+}
+
+@media (forced-colors: active) {
+  .card,
+  .refreshButton,
+  .resignButton,
+  .confirmButton {
+    border: 2px solid CanvasText;
+  }
+
+  .cardSelected {
+    outline: 4px double Highlight;
+  }
+
+  .cardUsed {
+    opacity: 1;
+  }
+}

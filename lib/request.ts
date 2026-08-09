@@ -5,6 +5,25 @@ export class RequestBodyTooLargeError extends Error {
   }
 }
 
+export async function hasNonEmptyRequestBody(request: {
+  readonly body: ReadableStream<Uint8Array> | null;
+}) {
+  if (!request.body) return false;
+  const reader = request.body.getReader();
+  while (true) {
+    const { done, value } = await reader.read();
+    if (done) return false;
+    if (value.byteLength > 0) {
+      try {
+        await reader.cancel();
+      } catch {
+        // Finding one byte is enough to reject a body even if cancellation fails.
+      }
+      return true;
+    }
+  }
+}
+
 export async function readBoundedJson(request: Request, maxBytes = 8_192): Promise<unknown> {
   const declaredLength = request.headers.get("content-length");
   if (declaredLength && /^\d+$/.test(declaredLength) && Number(declaredLength) > maxBytes) {

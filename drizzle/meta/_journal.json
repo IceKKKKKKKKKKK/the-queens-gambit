@@ -15,6 +15,27 @@
       "when": 1786048934877,
       "tag": "0001_pink_zaladane",
       "breakpoints": true
+    },
+    {
+      "idx": 2,
+      "version": "6",
+      "when": 1786266453370,
+      "tag": "0002_peaceful_gladiator",
+      "breakpoints": true
+    },
+    {
+      "idx": 3,
+      "version": "6",
+      "when": 1786266892168,
+      "tag": "0003_cuddly_kingpin",
+      "breakpoints": true
+    },
+    {
+      "idx": 4,
+      "version": "6",
+      "when": 1786267334405,
+      "tag": "0004_brown_bedlam",
+      "breakpoints": true
     }
   ]
 }

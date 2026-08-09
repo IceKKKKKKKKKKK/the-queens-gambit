@@ -77,8 +77,10 @@ function projectedState(
     moveNumber,
     replay: null,
     clock: null,
+    mode: "classic",
+    augment: null,
     ...overrides,
-  };
+  } as ProjectedGame;
 }
 
 function movementTransitionFixture({
