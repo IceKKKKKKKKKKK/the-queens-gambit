@@ -21,6 +21,7 @@ import {
   latestMovementEvent,
   latestOpponentMovementEvent,
   movementAnimationForTransition,
+  movedPieceIdsFromReplay,
   projectGame,
   randomizeSetupDraft,
   setupDraftToLayout,
@@ -289,6 +290,51 @@ test("the clock starts after both layouts lock and charges only the side that mo
   assert.equal(afterWhite.clock?.turnStartedAt, 9_000);
 });
 
+test("classic rules never adjudicate threefold repetition even after one hundred reversible plies", () => {
+  let state = stateWith([
+    piece("black-shuttle", "black", "platoon", 3, 0),
+    piece("white-shuttle", "white", "platoon", 8, 4),
+  ]);
+  const cycle = [
+    ["black", { row: 3, col: 0 }, { row: 4, col: 0 }],
+    ["white", { row: 8, col: 4 }, { row: 7, col: 4 }],
+    ["black", { row: 4, col: 0 }, { row: 3, col: 0 }],
+    ["white", { row: 7, col: 4 }, { row: 8, col: 4 }],
+  ] as const;
+  for (let ply = 0; ply < 100; ply += 1) {
+    const [side, from, to] = cycle[ply % cycle.length];
+    state = applyPlayerAction(state, side, { type: "move", from, to }, 1_000 + ply);
+  }
+  assert.equal(state.phase, "playing");
+  assert.equal(state.finishReason, null);
+  assert.equal(state.drawReason ?? null, null);
+  assert.equal(state.events.some((event) => event.result === "draw_repetition"), false);
+  assert.equal(state.replay?.moves.length, 100);
+  assert.equal(projectGame(state, "spectator").repetition, null);
+});
+
+test("classic clocks never inherit the ranked threshold increment", () => {
+  const state = stateWith([
+    piece("black-mover", "black", "platoon", 6, 0),
+    piece("white-mover", "white", "platoon", 0, 0),
+  ]);
+  state.clock = {
+    initialMs: 600_000,
+    remainingMs: { black: 299_000, white: 600_000 },
+    turnStartedAt: 0,
+  };
+
+  const result = applyPlayerAction(
+    state,
+    "black",
+    { type: "move", from: { row: 6, col: 0 }, to: { row: 6, col: 1 } },
+    0,
+  );
+  assert.equal(result.clock?.remainingMs.black, 299_000);
+  assert.equal(result.clock?.incrementMs, undefined);
+  assert.equal(result.clock?.incrementCapMs, undefined);
+});
+
 test("time expires exactly at zero, prevents the pending move, and remains frozen", () => {
   const timed = stateWith([
     piece("black-mover", "black", "platoon", 6, 0),
@@ -406,6 +452,8 @@ test("movement animations classify every combat outcome, including both flag cap
     const { previous, next } = movementTransitionFixture(scenario);
     const animation = movementAnimationForTransition(previous, next);
     assert.ok(animation, scenario.name);
+    assert.equal(animation.kind, "movement", scenario.name);
+    if (animation.kind !== "movement") assert.fail(`${scenario.name} was not a movement transition`);
     assert.equal(animation.outcome, scenario.outcome, scenario.name);
     assert.equal(animation.attackerAliveAfter, scenario.attackerAliveAfter, scenario.name);
     assert.equal(
@@ -445,6 +493,8 @@ test("movement animations use the live pre-move pieces instead of old casualties
 
   const animation = movementAnimationForTransition(previous, next);
   assert.ok(animation);
+  assert.equal(animation.kind, "movement");
+  if (animation.kind !== "movement") assert.fail("expected a movement transition");
   assert.equal(animation.attacker.id, "current-attacker");
   assert.equal(animation.defender?.id, "current-defender");
   assert.equal(animation.attacker.type, "engineer");
@@ -460,6 +510,8 @@ test("movement animation snapshots preserve hidden enemy piece types", () => {
   });
   const captured = movementAnimationForTransition(hiddenDefender.previous, hiddenDefender.next);
   assert.ok(captured);
+  assert.equal(captured.kind, "movement");
+  if (captured.kind !== "movement") assert.fail("expected a movement transition");
   assert.equal(captured.defender?.type, null);
 
   const hiddenAttacker = movementTransitionFixture({
@@ -471,6 +523,8 @@ test("movement animation snapshots preserve hidden enemy piece types", () => {
   });
   const repelled = movementAnimationForTransition(hiddenAttacker.previous, hiddenAttacker.next);
   assert.ok(repelled);
+  assert.equal(repelled.kind, "movement");
+  if (repelled.kind !== "movement") assert.fail("expected a movement transition");
   assert.equal(repelled.attacker.type, null);
   assert.equal(repelled.defender?.type, "platoon");
 });
@@ -624,6 +678,7 @@ test("replay stores the final setup and reconstructs every successful move witho
   const moved = applyPlayerAction(state, state.turn, { type: "move", from: mover, to: target });
   assert.equal(moved.replay?.moves.length, 1);
   assert.equal(moved.replay?.moves[0].moveNumber, 1);
+  assert.deepEqual(projectGame(moved, "black").movedPieceIds, [mover.id]);
   const frames = buildReplayFrames(moved.replay);
   assert.equal(frames.length, 2);
   assert.equal(frames[0].pieces.filter((candidate) => candidate.alive).length, 50);
@@ -701,6 +756,94 @@ test("replay reconstruction covers every battle outcome", () => {
   }
 });
 
+test("public moved-piece history is type-free across returns, attacks, losses, and exchanges", () => {
+  for (const [attackerType, defenderType] of [
+    ["commander", "platoon"],
+    ["platoon", "commander"],
+    ["bomb", "platoon"],
+  ] as const) {
+    const attacked = applyPlayerAction(
+      stateWith([
+        piece("live-attacker", "black", attackerType, 6, 0),
+        piece("live-defender", "white", defenderType, 5, 0),
+      ]),
+      "black",
+      { type: "move", from: { row: 6, col: 0 }, to: { row: 5, col: 0 } },
+    );
+    assert.deepEqual(projectGame(attacked, "white").movedPieceIds, ["live-attacker"]);
+  }
+
+  const combatArchive = {
+    baselineMoveNumber: 0,
+    partial: false,
+    initialPieces: [
+      piece("returner", "black", "platoon", 6, 0),
+      piece("mutual-attacker", "black", "bomb", 6, 2),
+      piece("standing-defender", "white", "commander", 5, 0),
+      piece("mutual-defender", "white", "bomb", 5, 2),
+    ],
+    moves: [
+      {
+        moveNumber: 1,
+        actor: "black",
+        from: { row: 6, col: 0 },
+        to: { row: 6, col: 1 },
+        result: "move",
+      },
+      {
+        moveNumber: 2,
+        actor: "black",
+        from: { row: 6, col: 1 },
+        to: { row: 6, col: 0 },
+        result: "move",
+      },
+      {
+        moveNumber: 3,
+        actor: "black",
+        from: { row: 6, col: 0 },
+        to: { row: 5, col: 0 },
+        result: "defender_survives",
+      },
+      {
+        moveNumber: 4,
+        actor: "black",
+        from: { row: 6, col: 2 },
+        to: { row: 5, col: 2 },
+        result: "both_removed",
+      },
+    ],
+  } satisfies ReplayArchive;
+  assert.deepEqual(movedPieceIdsFromReplay(combatArchive), ["mutual-attacker", "returner"]);
+
+  const permutedTypes = structuredClone(combatArchive);
+  permutedTypes.initialPieces[0].type = "mine";
+  permutedTypes.initialPieces[1].type = "flag";
+  assert.deepEqual(movedPieceIdsFromReplay(permutedTypes), movedPieceIdsFromReplay(combatArchive));
+
+  const exchangeArchive = {
+    baselineMoveNumber: 0,
+    partial: false,
+    initialPieces: [
+      piece("exchange-a", "black", "company", 9, 0),
+      piece("exchange-b", "black", "engineer", 10, 0),
+    ],
+    moves: [
+      {
+        moveNumber: 1,
+        actor: "black",
+        from: { row: 9, col: 0 },
+        to: { row: 10, col: 0 },
+        secondaryFrom: { row: 10, col: 0 },
+        secondaryTo: { row: 9, col: 0 },
+        result: "move",
+        kind: "exchange",
+        augmentId: "heart-remote-exchange",
+      },
+    ],
+  } satisfies ReplayArchive;
+  assert.deepEqual(movedPieceIdsFromReplay(exchangeArchive), ["exchange-a", "exchange-b"]);
+});
+
 test("legacy games begin an honest partial replay at the current move", () => {
   const legacy = stateWith([
     piece("black", "black", "platoon", 3, 0),
@@ -710,6 +853,7 @@ test("legacy games begin an honest partial replay at the current move", () => {
   legacy.replay = null;
 
   assert.equal(projectGame(legacy, "black").replay, null);
+  assert.deepEqual(projectGame(legacy, "black").movedPieceIds, []);
   const spectator = projectGame(legacy, "spectator");
   assert.equal(spectator.replay?.partial, true);
   assert.equal(spectator.replay?.baselineMoveNumber, 12);
@@ -723,6 +867,7 @@ test("legacy games begin an honest partial replay at the current move", () => {
   assert.equal(next.replay?.partial, true);
   assert.equal(next.replay?.baselineMoveNumber, 12);
   assert.equal(next.replay?.moves[0].moveNumber, 13);
+  assert.deepEqual(projectGame(next, "white").movedPieceIds, ["black"]);
   assert.deepEqual(buildReplayFrames(next.replay).map((frame) => frame.moveNumber), [12, 13]);
 });
 

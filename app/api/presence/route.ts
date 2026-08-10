@@ -6,6 +6,7 @@ import {
 } from "../../../db/platform";
 import { IdentityError, requireAuthenticatedIdentity } from "../../../lib/identity";
 import { hasNonEmptyRequestBody } from "../../../lib/request";
+import { rejectCrossOriginMutation } from "../security";
 
 const responseHeaders = {
   "Cache-Control": "no-store",
@@ -31,6 +32,8 @@ export async function GET(request: Request) {
 
 export async function POST(request: Request) {
   try {
+    const originError = rejectCrossOriginMutation(request, responseHeaders);
+    if (originError) return originError;
     const identity = requireAuthenticatedIdentity(request);
     const user = await getOrCreatePlatformUser(identity);
     if (await hasNonEmptyRequestBody(request)) {

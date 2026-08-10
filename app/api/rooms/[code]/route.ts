@@ -2,9 +2,19 @@ import {
   projectGame,
   settleExpiredAugmentDraft,
   settleExpiredClock,
+  type GameState,
+  type ProjectedGame,
+  type Side,
 } from "../../../../lib/game";
-import { getOrCreatePlatformUser, PlatformError } from "../../../../db/platform";
+import {
+  cancelRankedSetup,
+  getOrCreatePlatformUser,
+  PlatformError,
+  resolveRankedSetupTimeout,
+  type RankedSetupGate,
+} from "../../../../db/platform";
 import { IdentityError, requireAuthenticatedIdentity } from "../../../../lib/identity";
+import { hasNonEmptyRequestBody } from "../../../../lib/request";
 import {
   bearerToken,
   ensureRoomResultRecorded,
@@ -16,6 +26,7 @@ import {
   updateRoomState,
   viewerForAuthenticatedUser,
 } from "../../../../db/rooms";
+import { rejectCrossOriginMutation } from "../../security";
 
 const responseHeaders = {
   "Cache-Control": "no-store",
@@ -27,6 +38,48 @@ function identityErrorResponse(error: unknown) {
     return Response.json({ error: error.code }, { status: error.status, headers: responseHeaders });
   }
   return null;
+}
+
+function rankedSetupExpiredResponse(gate: RankedSetupGate) {
+  if (!gate.cancelled) return null;
+  return Response.json(
+    {
+      error: gate.reason === "setup_timeout"
+        ? "RANKED_SETUP_EXPIRED"
+        : "RANKED_SETUP_CANCELLED",
+    },
+    { status: 410, headers: responseHeaders },
+  );
+}
+
+/**
+ * Ranked spectators inherit only the knowledge of the friend they are
+ * watching. The core projection intentionally reveals a completed board and
+ * replay for ordinary games, so the ranked API must preserve its stronger
+ * anti-ghosting boundary even after resignation, timeout, or capture.
+ */
+function redactRankedSpectatorSnapshot(
+  snapshot: ProjectedGame,
+  state: GameState,
+  perspective: Side,
+): ProjectedGame {
+  const knownOpponentPieceIds = new Set([
+    ...(state.augment?.permanentReveals[perspective] ?? []),
+    ...(state.augment?.temporaryReveals[perspective] ?? []),
+  ]);
+  return {
+    ...snapshot,
+    pieces: snapshot.pieces.map((piece) => ({
+      ...piece,
+      type:
+        piece.side === perspective ||
+        piece.flagRevealed ||
+        knownOpponentPieceIds.has(piece.id)
+          ? piece.type
+          : null,
+    })),
+    replay: null,
+  };
 }
 
 export async function GET(
@@ -52,10 +105,9 @@ export async function GET(
     let viewer;
     try {
       viewer = await viewerForAuthenticatedUser(row, user.id, token);
-    } catch (error) {
-      const codeValue = error instanceof Error ? error.message : "INVALID_PLAYER_TOKEN";
+    } catch {
       return Response.json(
-        { error: codeValue === "ROOM_IDENTITY_CONFLICT" ? codeValue : "INVALID_PLAYER_TOKEN" },
+        { error: "INVALID_PLAYER_TOKEN" },
         { status: 401, headers: responseHeaders },
       );
     }
@@ -71,6 +123,12 @@ export async function GET(
         );
       }
     }
+
+    const rankedSetup = row.room_kind === "ranked" && row.match_id
+      ? await resolveRankedSetupTimeout(row.match_id)
+      : { setupDeadlineAt: null, cancelled: false, reason: null };
+    const setupExpired = rankedSetupExpiredResponse(rankedSetup);
+    if (setupExpired) return setupExpired;
 
     let activeRow = row;
     let state = parseRoomState(activeRow);
@@ -133,6 +191,22 @@ export async function GET(
       return new Response(null, { status: 204, headers: responseHeaders });
     }
 
+    const projected = projectGame(state, viewer, nowMs, {
+      spectatorPolicy:
+        viewer === "spectator"
+          ? activeRow.room_kind === "ranked"
+            ? "hidden"
+            : activeRow.spectator_policy
+          : undefined,
+      spectatorPerspective,
+    });
+    const snapshot =
+      viewer === "spectator" &&
+      activeRow.room_kind === "ranked" &&
+      spectatorPerspective
+        ? redactRankedSpectatorSnapshot(projected, state, spectatorPerspective)
+        : projected;
+
     return Response.json(
       {
         code: activeRow.code,
@@ -142,15 +216,8 @@ export async function GET(
         roomKind: activeRow.room_kind,
         gameMode: activeRow.game_mode,
         spectatorPolicy: activeRow.spectator_policy,
-        snapshot: projectGame(state, viewer, nowMs, {
-          spectatorPolicy:
-            viewer === "spectator"
-              ? activeRow.room_kind === "ranked"
-                ? "hidden"
-                : activeRow.spectator_policy
-              : undefined,
-          spectatorPerspective,
-        }),
+        setupDeadlineAt: state.phase === "setup" ? rankedSetup.setupDeadlineAt : null,
+        snapshot,
       },
       { headers: responseHeaders },
     );
@@ -158,5 +225,46 @@ export async function GET(
     const identityResponse = identityErrorResponse(error);
     if (identityResponse) return identityResponse;
     return Response.json({ error: "ROOM_READ_FAILED" }, { status: 500, headers: responseHeaders });
+  }
+}
+
+export async function DELETE(
+  request: Request,
+  context: { params: Promise<{ code: string }> },
+) {
+  try {
+    const originError = rejectCrossOriginMutation(request, responseHeaders);
+    if (originError) return originError;
+    const user = await getOrCreatePlatformUser(requireAuthenticatedIdentity(request));
+    if (await hasNonEmptyRequestBody(request)) {
+      return Response.json({ error: "INVALID_REQUEST" }, { status: 400, headers: responseHeaders });
+    }
+    const { code: rawCode } = await context.params;
+    const row = await getRoom(normalizeRoomCode(rawCode));
+    if (
+      !row ||
+      row.room_kind !== "ranked" ||
+      !row.match_id ||
+      (row.black_user_id !== user.id && row.white_user_id !== user.id)
+    ) {
+      return Response.json({ error: "ROOM_NOT_FOUND" }, { status: 404, headers: responseHeaders });
+    }
+    const result = await cancelRankedSetup({ matchId: row.match_id, userId: user.id });
+    return Response.json(
+      {
+        state: "idle",
+        cancelled: result.cancelled,
+        reason: result.reason,
+        setupDeadlineAt: result.setupDeadlineAt,
+      },
+      { headers: responseHeaders },
+    );
+  } catch (error) {
+    const identityResponse = identityErrorResponse(error);
+    if (identityResponse) return identityResponse;
+    return Response.json(
+      { error: "RANKED_SETUP_CANCEL_FAILED" },
+      { status: 500, headers: responseHeaders },
+    );
   }
 }

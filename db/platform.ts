@@ -9,6 +9,12 @@ import {
   DEFAULT_RATING,
   rankForRating,
 } from "../lib/ranking";
+import {
+  buildPrivateSettlementStatements,
+  buildRankedSettlementStatements,
+  type SettlementEndReason,
+  type SettlementStatement,
+} from "../lib/platform-settlement";
 
 export const RANKED_MATCH_MODE = "hex_ranked" as const;
 export type PrivateMatchMode = "classic_private" | "hex_private";
@@ -20,6 +26,15 @@ export const RANKED_TIME_CONTROL = {
   incrementTiming: "after_legal_move",
   thresholdCheck: "remaining_after_move",
 } as const;
+export const RANKED_SETUP_TIMEOUT_MS = 10 * 60 * 1000;
+
+export type RankedSetupCancellationReason = "setup_cancelled" | "setup_timeout";
+
+export interface RankedSetupGate {
+  setupDeadlineAt: number | null;
+  cancelled: boolean;
+  reason: RankedSetupCancellationReason | null;
+}
 
 const PRESENCE_FRESH_MS = 90_000;
 const MATCHMAKING_LOCK_NAME = "ranked-v1";
@@ -486,7 +501,21 @@ export async function acceptFriendRequest(user: PlatformUserRow, requestId: stri
     .bind(now, requestId, user.id)
     .run();
   if (Number(result.meta.changes ?? 0) !== 1) {
-    throw new PlatformError("FRIEND_REQUEST_NOT_FOUND", 404);
+    const alreadyAccepted = await getD1()
+      .prepare(
+        `SELECT updated_at
+         FROM friendships
+         WHERE id = ?1 AND status = 'accepted' AND requested_by <> ?2
+           AND (user_low_id = ?2 OR user_high_id = ?2)`,
+      )
+      .bind(requestId, user.id)
+      .first<{ updated_at: number }>();
+    if (!alreadyAccepted) throw new PlatformError("FRIEND_REQUEST_NOT_FOUND", 404);
+    return {
+      requestId,
+      status: "accepted" as const,
+      acceptedAt: alreadyAccepted.updated_at,
+    };
   }
   return { requestId, status: "accepted" as const, acceptedAt: now };
 }
@@ -663,7 +692,13 @@ async function releaseMatchmakingLock(ownerToken: string) {
 
 async function withMatchmakingLock<T>(operation: () => Promise<T>) {
   const ownerToken = crypto.randomUUID();
-  const acquired = await acquireMatchmakingLock(ownerToken, Date.now());
+  let acquired = false;
+  for (let attempt = 0; attempt < 8 && !acquired; attempt += 1) {
+    acquired = await acquireMatchmakingLock(ownerToken, Date.now());
+    if (!acquired && attempt < 7) {
+      await new Promise((resolve) => setTimeout(resolve, 10 + attempt * 5));
+    }
+  }
   if (!acquired) throw new PlatformError("MATCHMAKING_BUSY", 503);
   try {
     return await operation();
@@ -703,6 +738,238 @@ async function matchWithOpponent(matchId: string, userId: string) {
     .first<MatchWithOpponentRow>();
 }
 
+async function matchById(matchId: string) {
+  return getD1()
+    .prepare(
+      `SELECT id, mode, ranked, status, player_a_id, player_b_id, winner_user_id,
+              ended_reason, rating_before_a, rating_before_b, rating_delta_a,
+              rating_delta_b, game_code, created_at, started_at, completed_at
+       FROM platform_matches WHERE id = ?1`,
+    )
+    .bind(matchId)
+    .first<MatchRow>();
+}
+
+interface RankedSetupGameRow {
+  code: string;
+  state_json: string;
+  version: number;
+}
+
+function isSetupCancellationReason(value: string | null): value is RankedSetupCancellationReason {
+  return value === "setup_cancelled" || value === "setup_timeout";
+}
+
+function setupDeadlineAt(match: MatchRow) {
+  return match.created_at + RANKED_SETUP_TIMEOUT_MS;
+}
+
+function setupGate(
+  match: MatchRow,
+  cancelled = match.status === "cancelled" && isSetupCancellationReason(match.ended_reason),
+): RankedSetupGate {
+  return {
+    setupDeadlineAt: cancelled || match.status === "matched" || match.status === "active"
+      ? setupDeadlineAt(match)
+      : null,
+    cancelled,
+    reason: cancelled ? match.ended_reason as RankedSetupCancellationReason : null,
+  };
+}
+
+async function rankedSetupGame(match: MatchRow) {
+  if (!match.game_code) return null;
+  return getD1()
+    .prepare(
+      `SELECT code, state_json, version
+       FROM games
+       WHERE code = ?1 AND match_id = ?2 AND room_kind = 'ranked'`,
+    )
+    .bind(match.game_code, match.id)
+    .first<RankedSetupGameRow>();
+}
+
+function gamePhase(row: RankedSetupGameRow) {
+  try {
+    const parsed = JSON.parse(row.state_json) as { phase?: unknown };
+    return typeof parsed.phase === "string" ? parsed.phase : null;
+  } catch {
+    throw new PlatformError("MATCHMAKING_STATE_INVALID", 500);
+  }
+}
+
+async function cancelRankedSetupUnlocked(input: {
+  matchId: string;
+  userId?: string;
+  reason: RankedSetupCancellationReason;
+  now: number;
+}) {
+  for (let attempt = 0; attempt < 4; attempt += 1) {
+    const match = await matchById(input.matchId);
+    if (!match) throw new PlatformError("MATCH_NOT_FOUND", 404);
+    if (
+      input.userId &&
+      input.userId !== match.player_a_id &&
+      input.userId !== match.player_b_id
+    ) {
+      throw new PlatformError("MATCH_NOT_FOUND", 404);
+    }
+    if (!match.ranked || match.mode !== RANKED_MATCH_MODE) {
+      throw new PlatformError("RANKED_SETUP_CANCEL_UNAVAILABLE", 409);
+    }
+    if (match.status === "cancelled" && isSetupCancellationReason(match.ended_reason)) {
+      return setupGate(match, true);
+    }
+    if (match.status !== "matched" && match.status !== "active") {
+      throw new PlatformError("RANKED_SETUP_ALREADY_STARTED", 409);
+    }
+
+    const deadlineAt = setupDeadlineAt(match);
+    if (input.reason === "setup_timeout" && input.now < deadlineAt) {
+      return setupGate(match, false);
+    }
+
+    const game = await rankedSetupGame(match);
+    if (game && gamePhase(game) !== "setup") {
+      throw new PlatformError("RANKED_SETUP_ALREADY_STARTED", 409);
+    }
+    const guardedGameCode = game?.code ?? "";
+    const guardedGameVersion = game?.version ?? -1;
+    const matchCancellation = game
+      ? getD1()
+          .prepare(
+            `UPDATE platform_matches
+             SET status = 'cancelled', winner_user_id = NULL, ended_reason = ?1,
+                 rating_delta_a = 0, rating_delta_b = 0, completed_at = ?2
+             WHERE id = ?3 AND ranked = 1 AND mode = ?4
+               AND status IN ('matched', 'active')
+               AND EXISTS (
+                 SELECT 1 FROM games
+                 WHERE code = ?5 AND match_id = ?3 AND room_kind = 'ranked' AND version = ?6
+               )`,
+          )
+          .bind(
+            input.reason,
+            input.now,
+            match.id,
+            RANKED_MATCH_MODE,
+            guardedGameCode,
+            guardedGameVersion,
+          )
+      : getD1()
+          .prepare(
+            `UPDATE platform_matches
+             SET status = 'cancelled', winner_user_id = NULL, ended_reason = ?1,
+                 rating_delta_a = 0, rating_delta_b = 0, completed_at = ?2
+             WHERE id = ?3 AND ranked = 1 AND mode = ?4
+               AND status IN ('matched', 'active')`,
+          )
+          .bind(input.reason, input.now, match.id, RANKED_MATCH_MODE);
+    const roomCancellation = game
+      ? [
+          getD1()
+            .prepare(
+              `UPDATE games
+               SET updated_at = ?1, version = version + 1, result_recorded = 1
+               WHERE code = ?2 AND match_id = ?3 AND version = ?4
+                 AND EXISTS (
+                   SELECT 1 FROM platform_matches
+                   WHERE id = ?3 AND status = 'cancelled'
+                     AND ended_reason IN ('setup_cancelled', 'setup_timeout')
+                 )`,
+            )
+            .bind(input.now, guardedGameCode, match.id, guardedGameVersion),
+        ]
+      : [];
+    const results = await getD1().batch([
+      matchCancellation,
+      ...roomCancellation,
+      getD1()
+        .prepare(
+          `UPDATE matchmaking_queue
+           SET status = 'cancelled', match_id = NULL, updated_at = ?1
+           WHERE match_id = ?2 AND user_id IN (?3, ?4)
+             AND EXISTS (
+               SELECT 1 FROM platform_matches
+               WHERE id = ?2 AND status = 'cancelled'
+                 AND ended_reason IN ('setup_cancelled', 'setup_timeout')
+             )`,
+        )
+        .bind(input.now, match.id, match.player_a_id, match.player_b_id),
+      getD1()
+        .prepare(
+          `UPDATE player_presence
+           SET status = 'online', current_match_id = NULL, last_heartbeat_at = ?1
+           WHERE current_match_id = ?2 AND user_id IN (?3, ?4)
+             AND EXISTS (
+               SELECT 1 FROM platform_matches
+               WHERE id = ?2 AND status = 'cancelled'
+                 AND ended_reason IN ('setup_cancelled', 'setup_timeout')
+             )`,
+        )
+        .bind(input.now, match.id, match.player_a_id, match.player_b_id),
+    ]);
+    if (Number(results[0].meta.changes ?? 0) === 1) {
+      return {
+        setupDeadlineAt: deadlineAt,
+        cancelled: true,
+        reason: input.reason,
+      } satisfies RankedSetupGate;
+    }
+  }
+  const current = await matchById(input.matchId);
+  if (current?.status === "cancelled" && isSetupCancellationReason(current.ended_reason)) {
+    return setupGate(current, true);
+  }
+  throw new PlatformError("RANKED_SETUP_CONFLICT", 409);
+}
+
+export async function cancelRankedSetup(input: {
+  matchId: string;
+  userId: string;
+  reason?: "setup_cancelled";
+}) {
+  await ensurePlatformSchema();
+  return withMatchmakingLock(() =>
+    cancelRankedSetupUnlocked({
+      matchId: input.matchId,
+      userId: input.userId,
+      reason: input.reason ?? "setup_cancelled",
+      now: Date.now(),
+    }),
+  );
+}
+
+export async function resolveRankedSetupTimeout(
+  matchId: string,
+  now = Date.now(),
+): Promise<RankedSetupGate> {
+  await ensurePlatformSchema();
+  const match = await matchById(matchId);
+  if (!match) throw new PlatformError("MATCH_NOT_FOUND", 404);
+  if (!match.ranked || match.mode !== RANKED_MATCH_MODE) {
+    return { setupDeadlineAt: null, cancelled: false, reason: null };
+  }
+  if (match.status === "cancelled" && isSetupCancellationReason(match.ended_reason)) {
+    return setupGate(match, true);
+  }
+  if (match.status !== "matched" && match.status !== "active") {
+    return { setupDeadlineAt: null, cancelled: false, reason: null };
+  }
+  const deadlineAt = setupDeadlineAt(match);
+  if (now < deadlineAt) return setupGate(match, false);
+  try {
+    return await withMatchmakingLock(() =>
+      cancelRankedSetupUnlocked({ matchId, reason: "setup_timeout", now }),
+    );
+  } catch (error) {
+    if (error instanceof PlatformError && error.code === "RANKED_SETUP_ALREADY_STARTED") {
+      return { setupDeadlineAt: null, cancelled: false, reason: null };
+    }
+    throw error;
+  }
+}
+
 function matchPayload(match: MatchWithOpponentRow, userId: string) {
   return {
     id: match.id,
@@ -723,13 +990,17 @@ function matchPayload(match: MatchWithOpponentRow, userId: string) {
       visibility: "ranked_redacted_spectators" as const,
       timeControl: RANKED_TIME_CONTROL,
     },
+    setupDeadlineAt:
+      match.status === "matched" || match.status === "active"
+        ? setupDeadlineAt(match)
+        : null,
     createdAt: match.created_at,
     startedAt: match.started_at,
     completedAt: match.completed_at,
   };
 }
 
-export async function matchmakingStatus(userId: string) {
+async function matchmakingStatusSnapshot(userId: string) {
   const queue = await queueRow(userId);
   if (!queue || queue.status === "cancelled") return { state: "idle" as const };
   if (queue.status === "queued") {
@@ -747,11 +1018,38 @@ export async function matchmakingStatus(userId: string) {
   return { state: "matched" as const, match: matchPayload(match, userId) };
 }
 
+export async function matchmakingStatus(userId: string) {
+  await ensurePlatformSchema();
+  const queue = await queueRow(userId);
+  if (queue?.status === "matched" && queue.match_id) {
+    await resolveRankedSetupTimeout(queue.match_id);
+  }
+  return matchmakingStatusSnapshot(userId);
+}
+
 export async function enqueueRankedMatch(user: PlatformUserRow) {
   await ensurePlatformSchema();
   return withMatchmakingLock(async () => {
-    const existing = await queueRow(user.id);
-    if (existing?.status === "matched") return matchmakingStatus(user.id);
+    let existing = await queueRow(user.id);
+    if (existing?.status === "matched" && existing.match_id) {
+      const match = await matchById(existing.match_id);
+      if (match && Date.now() >= setupDeadlineAt(match)) {
+        try {
+          await cancelRankedSetupUnlocked({
+            matchId: existing.match_id,
+            userId: user.id,
+            reason: "setup_timeout",
+            now: Date.now(),
+          });
+        } catch (error) {
+          if (!(error instanceof PlatformError) || error.code !== "RANKED_SETUP_ALREADY_STARTED") {
+            throw error;
+          }
+        }
+        existing = await queueRow(user.id);
+      }
+      if (existing?.status === "matched") return matchmakingStatusSnapshot(user.id);
+    }
 
     const now = Date.now();
     let current = existing;
@@ -816,7 +1114,7 @@ export async function enqueueRankedMatch(user: PlatformUserRow) {
           first.created_at - second.created_at,
       )[0];
 
-    if (!compatible) return matchmakingStatus(user.id);
+    if (!compatible) return matchmakingStatusSnapshot(user.id);
 
     const currentFirst = crypto.getRandomValues(new Uint8Array(1))[0] % 2 === 0;
     const playerA = currentFirst ? current : compatible;
@@ -868,7 +1166,7 @@ export async function enqueueRankedMatch(user: PlatformUserRow) {
     ) {
       throw new PlatformError("MATCHMAKING_CONFLICT", 409);
     }
-    return matchmakingStatus(user.id);
+    return matchmakingStatusSnapshot(user.id);
   });
 }
 
@@ -877,7 +1175,16 @@ export async function cancelRankedMatchmaking(userId: string) {
   return withMatchmakingLock(async () => {
     const current = await queueRow(userId);
     if (!current || current.status === "cancelled") return { state: "idle" as const };
-    if (current.status === "matched") throw new PlatformError("MATCH_ALREADY_FOUND", 409);
+    if (current.status === "matched") {
+      if (!current.match_id) throw new PlatformError("MATCHMAKING_STATE_INVALID", 500);
+      await cancelRankedSetupUnlocked({
+        matchId: current.match_id,
+        userId,
+        reason: "setup_cancelled",
+        now: Date.now(),
+      });
+      return { state: "idle" as const };
+    }
     const now = Date.now();
     await getD1().batch([
       getD1()
@@ -985,49 +1292,103 @@ export async function provisionRankedMatch(
   provisioner: MatchGameProvisioner,
 ) {
   await ensurePlatformSchema();
-  const match = await getD1()
-    .prepare(
-      `SELECT id, mode, ranked, status, player_a_id, player_b_id, winner_user_id,
-              ended_reason, rating_before_a, rating_before_b, rating_delta_a,
-              rating_delta_b, game_code, created_at, started_at, completed_at
-       FROM platform_matches WHERE id = ?1`,
-    )
-    .bind(matchId)
-    .first<MatchRow>();
-  if (!match) throw new PlatformError("MATCH_NOT_FOUND", 404);
-  if (match.game_code) return { gameCode: match.game_code };
-  if (match.status !== "matched") throw new PlatformError("MATCH_NOT_PROVISIONABLE", 409);
+  return withMatchmakingLock(async () => {
+    const match = await matchById(matchId);
+    if (!match) throw new PlatformError("MATCH_NOT_FOUND", 404);
+    if (match.game_code) return { gameCode: match.game_code };
+    if (match.status !== "matched") throw new PlatformError("MATCH_NOT_PROVISIONABLE", 409);
+    if (Date.now() >= setupDeadlineAt(match)) {
+      await cancelRankedSetupUnlocked({
+        matchId: match.id,
+        reason: "setup_timeout",
+        now: Date.now(),
+      });
+      throw new PlatformError("RANKED_SETUP_EXPIRED", 410);
+    }
 
-  const result = await provisioner({
-    matchId: match.id,
-    mode: RANKED_MATCH_MODE,
-    playerAId: match.player_a_id,
-    playerBId: match.player_b_id,
-    visibility: "ranked_redacted_spectators",
-    timeControl: RANKED_TIME_CONTROL,
+    const result = await provisioner({
+      matchId: match.id,
+      mode: RANKED_MATCH_MODE,
+      playerAId: match.player_a_id,
+      playerBId: match.player_b_id,
+      visibility: "ranked_redacted_spectators",
+      timeControl: RANKED_TIME_CONTROL,
+    });
+    if (!validGameCode(result.gameCode)) throw new PlatformError("INVALID_PROVISIONED_GAME", 502);
+    const now = Date.now();
+    const update = await getD1()
+      .prepare(
+        `UPDATE platform_matches
+         SET game_code = ?1, status = 'active', started_at = ?2
+         WHERE id = ?3 AND status = 'matched' AND game_code IS NULL`,
+      )
+      .bind(result.gameCode, now, match.id)
+      .run();
+    if (Number(update.meta.changes ?? 0) !== 1) {
+      const current = await getD1()
+        .prepare("SELECT game_code FROM platform_matches WHERE id = ?1")
+        .bind(match.id)
+        .first<{ game_code: string | null }>();
+      if (!current?.game_code) throw new PlatformError("MATCH_PROVISION_CONFLICT", 409);
+      return { gameCode: current.game_code };
+    }
+    return result;
   });
-  if (!validGameCode(result.gameCode)) throw new PlatformError("INVALID_PROVISIONED_GAME", 502);
-  const now = Date.now();
-  const update = await getD1()
-    .prepare(
-      `UPDATE platform_matches
-       SET game_code = ?1, status = 'active', started_at = ?2
-       WHERE id = ?3 AND status = 'matched' AND game_code IS NULL`,
-    )
-    .bind(result.gameCode, now, match.id)
-    .run();
-  if (Number(update.meta.changes ?? 0) !== 1) {
-    const current = await getD1()
-      .prepare("SELECT game_code FROM platform_matches WHERE id = ?1")
-      .bind(match.id)
-      .first<{ game_code: string | null }>();
-    if (!current?.game_code) throw new PlatformError("MATCH_PROVISION_CONFLICT", 409);
-    return { gameCode: current.game_code };
-  }
-  return result;
 }
 
-export type MatchEndReason = "flag_captured" | "no_moves" | "resignation" | "timeout" | "draw";
+export type MatchEndReason = SettlementEndReason;
+
+function isDrawMatchEndReason(reason: MatchEndReason) {
+  return reason === "draw" || reason === "threefold_repetition";
+}
+
+function validateMatchResult(
+  match: MatchRow,
+  input: { winnerUserId: string | null; reason: MatchEndReason },
+) {
+  if (
+    input.winnerUserId !== null &&
+    input.winnerUserId !== match.player_a_id &&
+    input.winnerUserId !== match.player_b_id
+  ) {
+    throw new PlatformError("INVALID_MATCH_WINNER");
+  }
+  if (isDrawMatchEndReason(input.reason) !== (input.winnerUserId === null)) {
+    throw new PlatformError("INVALID_MATCH_RESULT");
+  }
+}
+
+function assertIdempotentCompletedResult(
+  match: MatchRow,
+  input: { winnerUserId: string | null; reason: MatchEndReason },
+) {
+  if (
+    match.winner_user_id !== input.winnerUserId ||
+    match.ended_reason !== input.reason
+  ) {
+    throw new PlatformError("MATCH_RESULT_CONFLICT", 409);
+  }
+}
+
+function preparedSettlementStatement(statement: SettlementStatement) {
+  return getD1().prepare(statement.sql).bind(...statement.bindings);
+}
+
+function settlementChangeCounts(results: D1Result[]) {
+  return results.slice(0, 3).map((result) => Number(result.meta.changes ?? 0));
+}
+
+async function resolveSettlementRace(
+  matchId: string,
+  input: { winnerUserId: string | null; reason: MatchEndReason },
+) {
+  const current = await matchById(matchId);
+  if (current?.status === "completed") {
+    assertIdempotentCompletedResult(current, input);
+    return current;
+  }
+  throw new PlatformError("MATCH_SETTLEMENT_CONFLICT", 409);
+}
 
 export async function recordRankedMatchResult(input: {
   matchId: string;
@@ -1046,19 +1407,16 @@ export async function recordRankedMatchResult(input: {
       .bind(input.matchId)
       .first<MatchRow>();
     if (!match) throw new PlatformError("MATCH_NOT_FOUND", 404);
-    if (match.status === "completed") return match;
+    if (!match.ranked || match.mode !== RANKED_MATCH_MODE) {
+      throw new PlatformError("MATCH_REQUIRES_PRIVATE_SETTLEMENT", 409);
+    }
+    validateMatchResult(match, input);
+    if (match.status === "completed") {
+      assertIdempotentCompletedResult(match, input);
+      return match;
+    }
     if (match.status !== "active" && match.status !== "matched") {
       throw new PlatformError("MATCH_NOT_COMPLETABLE", 409);
-    }
-    if (
-      input.winnerUserId !== null &&
-      input.winnerUserId !== match.player_a_id &&
-      input.winnerUserId !== match.player_b_id
-    ) {
-      throw new PlatformError("INVALID_MATCH_WINNER");
-    }
-    if ((input.reason === "draw") !== (input.winnerUserId === null)) {
-      throw new PlatformError("INVALID_MATCH_RESULT");
     }
 
     const [playerA, playerB] = await Promise.all([
@@ -1076,54 +1434,21 @@ export async function recordRankedMatchResult(input: {
       scoreA,
     });
     const now = Date.now();
-    await getD1().batch([
-      getD1()
-        .prepare(
-          `UPDATE platform_users
-           SET rating = ?1, ranked_games = ranked_games + 1,
-               wins = wins + ?2, losses = losses + ?3, draws = draws + ?4,
-               updated_at = ?5
-           WHERE id = ?6`,
-        )
-        .bind(
-          ratings.ratingA,
-          scoreA === 1 ? 1 : 0,
-          scoreA === 0 ? 1 : 0,
-          scoreA === 0.5 ? 1 : 0,
-          now,
-          playerA.id,
-        ),
-      getD1()
-        .prepare(
-          `UPDATE platform_users
-           SET rating = ?1, ranked_games = ranked_games + 1,
-               wins = wins + ?2, losses = losses + ?3, draws = draws + ?4,
-               updated_at = ?5
-           WHERE id = ?6`,
-        )
-        .bind(
-          ratings.ratingB,
-          scoreA === 0 ? 1 : 0,
-          scoreA === 1 ? 1 : 0,
-          scoreA === 0.5 ? 1 : 0,
-          now,
-          playerB.id,
-        ),
-      getD1()
-        .prepare(
-          `UPDATE platform_matches
-           SET status = 'completed', winner_user_id = ?1, ended_reason = ?2,
-               rating_delta_a = ?3, rating_delta_b = ?4, completed_at = ?5
-           WHERE id = ?6 AND status IN ('matched', 'active')`,
-        )
-        .bind(
-          input.winnerUserId,
-          input.reason,
-          ratings.ratingA - playerA.rating,
-          ratings.ratingB - playerB.rating,
-          now,
-          match.id,
-        ),
+    const settlement = buildRankedSettlementStatements({
+      matchId: match.id,
+      playerAId: playerA.id,
+      playerBId: playerB.id,
+      winnerUserId: input.winnerUserId,
+      reason: input.reason,
+      ratingA: ratings.ratingA,
+      ratingB: ratings.ratingB,
+      ratingDeltaA: ratings.ratingA - playerA.rating,
+      ratingDeltaB: ratings.ratingB - playerB.rating,
+      scoreA,
+      completedAt: now,
+    });
+    const results = await getD1().batch([
+      ...settlement.map(preparedSettlementStatement),
       getD1()
         .prepare(
           `UPDATE matchmaking_queue
@@ -1139,6 +1464,13 @@ export async function recordRankedMatchResult(input: {
         )
         .bind(now, playerA.id, playerB.id, match.id),
     ]);
+    const changes = settlementChangeCounts(results);
+    if (changes.every((change) => change === 0)) {
+      return resolveSettlementRace(match.id, input);
+    }
+    if (!changes.every((change) => change === 1)) {
+      throw new PlatformError("MATCH_SETTLEMENT_CONFLICT", 409);
+    }
     return {
       matchId: match.id,
       winnerUserId: input.winnerUserId,
@@ -1167,52 +1499,30 @@ export async function recordPrivateMatchResult(input: {
       .first<MatchRow>();
     if (!match) throw new PlatformError("MATCH_NOT_FOUND", 404);
     if (match.ranked) throw new PlatformError("MATCH_REQUIRES_RANKED_SETTLEMENT", 409);
-    if (match.status === "completed") return match;
+    validateMatchResult(match, input);
+    if (match.status === "completed") {
+      assertIdempotentCompletedResult(match, input);
+      return match;
+    }
     if (match.status !== "active") throw new PlatformError("MATCH_NOT_COMPLETABLE", 409);
-    if (
-      input.winnerUserId !== null &&
-      input.winnerUserId !== match.player_a_id &&
-      input.winnerUserId !== match.player_b_id
-    ) {
-      throw new PlatformError("INVALID_MATCH_WINNER");
-    }
-    if ((input.reason === "draw") !== (input.winnerUserId === null)) {
-      throw new PlatformError("INVALID_MATCH_RESULT");
-    }
 
-    const blackWon = input.winnerUserId === match.player_a_id;
-    const whiteWon = input.winnerUserId === match.player_b_id;
-    const draw = input.winnerUserId === null;
     const now = Date.now();
+    const settlement = buildPrivateSettlementStatements({
+      matchId: match.id,
+      playerAId: match.player_a_id,
+      playerBId: match.player_b_id,
+      winnerUserId: input.winnerUserId,
+      reason: input.reason,
+      completedAt: now,
+    });
     const results = await getD1().batch([
-      getD1()
-        .prepare(
-          `UPDATE platform_users
-           SET wins = wins + ?1, losses = losses + ?2, draws = draws + ?3, updated_at = ?4
-           WHERE id = ?5`,
-        )
-        .bind(blackWon ? 1 : 0, whiteWon ? 1 : 0, draw ? 1 : 0, now, match.player_a_id),
-      getD1()
-        .prepare(
-          `UPDATE platform_users
-           SET wins = wins + ?1, losses = losses + ?2, draws = draws + ?3, updated_at = ?4
-           WHERE id = ?5`,
-        )
-        .bind(whiteWon ? 1 : 0, blackWon ? 1 : 0, draw ? 1 : 0, now, match.player_b_id),
-      getD1()
-        .prepare(
-          `UPDATE platform_matches
-           SET status = 'completed', winner_user_id = ?1, ended_reason = ?2,
-               rating_delta_a = 0, rating_delta_b = 0, completed_at = ?3
-           WHERE id = ?4 AND status = 'active' AND ranked = 0`,
-        )
-        .bind(input.winnerUserId, input.reason, now, match.id),
+      ...settlement.map(preparedSettlementStatement),
     ]);
-    if (
-      Number(results[0].meta.changes ?? 0) !== 1 ||
-      Number(results[1].meta.changes ?? 0) !== 1 ||
-      Number(results[2].meta.changes ?? 0) !== 1
-    ) {
+    const changes = settlementChangeCounts(results);
+    if (changes.every((change) => change === 0)) {
+      return resolveSettlementRace(match.id, input);
+    }
+    if (!changes.every((change) => change === 1)) {
       throw new PlatformError("MATCH_SETTLEMENT_CONFLICT", 409);
     }
     return {

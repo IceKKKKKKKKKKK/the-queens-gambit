@@ -1,9 +1,12 @@
 import { env } from "cloudflare:workers";
 import {
+  AUGMENT_RULES_VERSION,
   DEFAULT_TIME_CONTROL_MINUTES,
+  LEGACY_AUGMENT_RULES_VERSION,
   MAX_TIME_CONTROL_MINUTES,
   MIN_TIME_CONTROL_MINUTES,
   RULES_VERSION,
+  isValidRepetitionTrackerForState,
   type GameState,
   type Side,
   type Viewer,
@@ -330,6 +333,9 @@ function platformEndReason(state: GameState): MatchEndReason {
   if (state.finishReason === "resign") return "resignation";
   if (state.finishReason === "timeout") return "timeout";
   if (state.finishReason === "no_moves") return "no_moves";
+  if (state.finishReason === "draw" && state.drawReason === "threefold_repetition") {
+    return "threefold_repetition";
+  }
   if (state.finishReason === "draw" || state.winner === null) return "draw";
   return "flag_captured";
 }
@@ -362,8 +368,16 @@ export function parseRoomState(row: RoomRow) {
   };
   // Preserve the version that authored this room. Only truly legacy rows that
   // predate versioning are assigned the classic baseline.
-  if (typeof state.rulesVersion !== "string" || !state.rulesVersion) {
+  if (state.rulesVersion === undefined) {
     state.rulesVersion = RULES_VERSION;
+  }
+  if (
+    typeof state.rulesVersion !== "string" ||
+    (state.rulesVersion !== RULES_VERSION &&
+      state.rulesVersion !== LEGACY_AUGMENT_RULES_VERSION &&
+      state.rulesVersion !== AUGMENT_RULES_VERSION)
+  ) {
+    throw new Error("INVALID_RULES_VERSION");
   }
   state.replay ??= null;
   if (state.clock === undefined) {
@@ -396,6 +410,16 @@ export function parseRoomState(row: RoomRow) {
     state.clock.turnStartedAt = Number.isFinite(state.clock.turnStartedAt)
       ? state.clock.turnStartedAt
       : null;
+    // Ranked rooms persisted before uncapped threshold increments did not carry
+    // an explicit cap. Preserve their in-progress time control, while new rooms
+    // serialize `null` to opt into the current full +5-second rule.
+    if (
+      typeof state.clock.incrementMs === "number" &&
+      typeof state.clock.incrementThresholdMs === "number" &&
+      state.clock.incrementCapMs === undefined
+    ) {
+      state.clock.incrementCapMs = state.clock.incrementThresholdMs;
+    }
     if (state.phase !== "playing") state.clock.turnStartedAt = null;
   }
   if (state.augment) {
@@ -405,6 +429,28 @@ export function parseRoomState(row: RoomRow) {
       Number.isFinite(state.augment.draftDeadlineAt)
         ? state.augment.draftDeadlineAt
         : null;
+  }
+  if (state.rulesVersion === AUGMENT_RULES_VERSION) {
+    if (
+      state.drawReason !== undefined &&
+      state.drawReason !== null &&
+      state.drawReason !== "threefold_repetition"
+    ) {
+      throw new Error("INVALID_REPETITION_TRACKER");
+    }
+    state.drawReason ??= null;
+    if (
+      state.drawReason === "threefold_repetition" &&
+      (state.phase !== "finished" || state.finishReason !== "draw" || state.winner !== null)
+    ) {
+      throw new Error("INVALID_REPETITION_TRACKER");
+    }
+    if (!isValidRepetitionTrackerForState(state)) {
+      throw new Error("INVALID_REPETITION_TRACKER");
+    }
+  } else {
+    state.drawReason = null;
+    delete state.repetitionTracker;
   }
   delete state.noCombatPly;
   return state as GameState;

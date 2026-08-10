@@ -8,7 +8,11 @@ import {
   type SetupPlacement,
 } from "../../../../../lib/game";
 import { isAugmentId } from "../../../../../lib/augments";
-import { getOrCreatePlatformUser, PlatformError } from "../../../../../db/platform";
+import {
+  getOrCreatePlatformUser,
+  PlatformError,
+  resolveRankedSetupTimeout,
+} from "../../../../../db/platform";
 import { IdentityError, requireAuthenticatedIdentity } from "../../../../../lib/identity";
 import { RequestBodyTooLargeError, readBoundedJson } from "../../../../../lib/request";
 import {
@@ -22,6 +26,7 @@ import {
   updateRoomState,
   viewerForAuthenticatedUser,
 } from "../../../../../db/rooms";
+import { rejectCrossOriginMutation } from "../../../security";
 
 const responseHeaders = {
   "Cache-Control": "no-store",
@@ -48,7 +53,11 @@ function isSetupPlacement(value: unknown): value is SetupPlacement {
 function parseAction(value: unknown): PlayerAction | null {
   if (!value || typeof value !== "object") return null;
   const action = value as Record<string, unknown>;
-  if (action.type === "randomize" || action.type === "resign") {
+  if (
+    action.type === "randomize" ||
+    action.type === "pass_extra_move" ||
+    action.type === "resign"
+  ) {
     return { type: action.type };
   }
   if (action.type === "set_time_control" && Number.isInteger(action.minutes)) {
@@ -101,6 +110,8 @@ export async function POST(
   context: { params: Promise<{ code: string }> },
 ) {
   try {
+    const originError = rejectCrossOriginMutation(request, responseHeaders);
+    if (originError) return originError;
     const user = await getOrCreatePlatformUser(requireAuthenticatedIdentity(request));
     const authorizationPresent = request.headers.has("authorization");
     const token = bearerToken(request);
@@ -119,15 +130,28 @@ export async function POST(
     let viewer;
     try {
       viewer = await viewerForAuthenticatedUser(row, user.id, token);
-    } catch (error) {
-      const codeValue = error instanceof Error ? error.message : "INVALID_PLAYER_TOKEN";
+    } catch {
       return Response.json(
-        { error: codeValue === "ROOM_IDENTITY_CONFLICT" ? codeValue : "INVALID_PLAYER_TOKEN" },
+        { error: "INVALID_PLAYER_TOKEN" },
         { status: 401, headers: responseHeaders },
       );
     }
     if (!isPlayer(viewer)) {
       return Response.json({ error: "PLAYER_TOKEN_REQUIRED" }, { status: 401, headers: responseHeaders });
+    }
+
+    const rankedSetup = row.room_kind === "ranked" && row.match_id
+      ? await resolveRankedSetupTimeout(row.match_id)
+      : { setupDeadlineAt: null, cancelled: false, reason: null };
+    if (rankedSetup.cancelled) {
+      return Response.json(
+        {
+          error: rankedSetup.reason === "setup_timeout"
+            ? "RANKED_SETUP_EXPIRED"
+            : "RANKED_SETUP_CANCELLED",
+        },
+        { status: 410, headers: responseHeaders },
+      );
     }
 
     let body: Record<string, unknown>;
@@ -201,6 +225,7 @@ export async function POST(
         roomKind: row.room_kind,
         gameMode: row.game_mode,
         spectatorPolicy: row.spectator_policy,
+        setupDeadlineAt: nextState.phase === "setup" ? rankedSetup.setupDeadlineAt : null,
         snapshot: projectGame(nextState, viewer, nowMs),
       },
       { headers: responseHeaders },

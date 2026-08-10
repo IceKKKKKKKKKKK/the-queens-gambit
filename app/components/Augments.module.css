@@ -2,23 +2,19 @@
   --augment-ink: #17140f;
   --augment-paper: var(--paper, #fffdf7);
   position: relative;
-  display: grid;
+  display: block;
   width: 100%;
   min-width: 0;
   min-height: 248px;
-  padding: 18px;
-  overflow: hidden;
-  border: 1px solid color-mix(in srgb, var(--augment-ink) 24%, transparent);
-  border-radius: 7px;
-  background: var(--augment-paper);
+  padding: 0;
+  border: 0;
+  border-radius: 8px;
+  background: transparent;
   color: var(--augment-ink);
+  perspective: 1200px;
   text-align: left;
   isolation: isolate;
-  transition:
-    border-color 160ms ease,
-    background 160ms ease,
-    opacity 160ms ease,
-    color 160ms ease;
+  transition: opacity 180ms ease;
 }
 
 button.card {
@@ -26,11 +22,6 @@ button.card {
   cursor: pointer;
   font: inherit;
   -webkit-tap-highlight-color: transparent;
-}
-
-button.card:hover:not(:disabled) {
-  border-color: var(--augment-ink);
-  background: color-mix(in srgb, var(--augment-ink) 4%, var(--augment-paper));
 }
 
 button.card:focus-visible {
@@ -42,41 +33,171 @@ button.card:disabled {
   cursor: default;
 }
 
-.card::after {
+.cardBody {
+  position: absolute;
+  inset: 0;
+  display: block;
+  transform-style: preserve-3d;
+  transform-origin: 50% 52%;
+  will-change: transform;
+}
+
+.cardFace {
+  position: absolute;
+  inset: 0;
+  display: grid;
+  min-width: 0;
+  padding: 18px;
+  overflow: hidden;
+  border: 1px solid color-mix(in srgb, var(--augment-ink) 24%, transparent);
+  border-radius: 7px;
+  background: var(--augment-paper);
+  color: var(--augment-ink);
+  backface-visibility: hidden;
+  -webkit-backface-visibility: hidden;
+  transform: translateZ(0.1px);
+  transition:
+    border-color 160ms ease,
+    background 160ms ease,
+    opacity 180ms ease;
+}
+
+.cardFace::after {
   position: absolute;
   inset: 7px;
-  z-index: -1;
+  z-index: 1;
   border: 1px solid color-mix(in srgb, var(--augment-ink) 10%, transparent);
   border-radius: 3px;
   content: "";
   pointer-events: none;
 }
 
-.card[data-suit="hearts"],
-.card[data-suit="diamonds"] {
-  --augment-ink: #852222;
+.cardFront {
+  transform: rotateY(0deg) translateZ(0.1px);
 }
 
-.cardSelected {
+.cardBack {
+  display: block;
+  padding: 10px;
+  border-color: #17140f;
+  background: #17140f;
+  color: #f9f4e8;
+  transform: rotateY(180deg) translateZ(0.1px);
+}
+
+.cardBack::after {
+  inset: 7px;
+  z-index: 1;
+  border-color: rgb(249 244 232 / 72%);
+}
+
+.backFrame {
+  position: absolute;
+  z-index: 0;
+  inset: 13px;
+  overflow: hidden;
+  border: 1px solid #f9f4e8;
+  border-radius: 2px;
+  background:
+    repeating-linear-gradient(45deg, transparent 0 8px, rgb(249 244 232 / 18%) 8px 9px),
+    repeating-linear-gradient(-45deg, transparent 0 8px, rgb(249 244 232 / 18%) 8px 9px),
+    #17140f;
+}
+
+.backFrame::before,
+.backFrame::after {
+  position: absolute;
+  inset: 9px;
+  border: 1px solid rgb(249 244 232 / 72%);
+  content: "";
+}
+
+.backFrame::after {
+  inset: 17px;
+  border-style: double;
+  border-width: 3px;
+}
+
+.backLattice {
+  position: absolute;
+  inset: 25px;
+  background:
+    repeating-linear-gradient(0deg, transparent 0 11px, rgb(249 244 232 / 22%) 11px 12px),
+    repeating-linear-gradient(90deg, transparent 0 11px, rgb(249 244 232 / 22%) 11px 12px);
+  transform: rotate(45deg) scale(1.22);
+}
+
+.backMedallion {
+  position: absolute;
+  z-index: 2;
+  inset: 50% auto auto 50%;
+  display: grid;
+  width: 74px;
+  height: 74px;
+  place-items: center;
+  border: 3px double #f9f4e8;
+  background: #17140f;
+  transform: translate(-50%, -50%) rotate(45deg);
+}
+
+.backMedallion::before,
+.backMedallion::after {
+  position: absolute;
+  width: 9px;
+  height: 9px;
+  border: 1px solid #f9f4e8;
+  content: "";
+}
+
+.backMedallion::before { inset: 7px auto auto 7px; }
+.backMedallion::after { inset: auto 7px 7px auto; }
+
+.backMedallion > span {
+  font-family: "Songti SC", STSong, serif;
+  font-size: 24px;
+  transform: rotate(-45deg);
+}
+
+.backStatus {
+  position: absolute;
+  z-index: 4;
+  right: 18px;
+  bottom: 17px;
+  font-size: 8px;
+  font-weight: 800;
+  letter-spacing: 0.15em;
+}
+
+button.card:hover:not(:disabled) .cardFront {
+  border-color: var(--augment-ink);
+  background: color-mix(in srgb, var(--augment-ink) 4%, var(--augment-paper));
+}
+
+.card[data-suit="hearts"],
+.card[data-suit="diamonds"] {
+  --augment-ink: #17140f;
+}
+
+.cardSelected .cardFront {
   border-width: 2px;
   border-color: var(--augment-ink);
   outline: 1px solid var(--augment-ink);
-  outline-offset: -5px;
+  outline-offset: -6px;
 }
 
-.cardLocked {
-  outline: 2px double var(--augment-ink);
-  outline-offset: 2px;
+.cardLocked .cardFront {
+  outline: 3px double var(--augment-ink);
+  outline-offset: -6px;
 }
 
-.cardUsed {
+.cardUsed .cardFront {
   background: color-mix(in srgb, var(--augment-ink) 7%, var(--augment-paper));
 }
 
-.cardUsed::before {
+.cardUsed:not(.cardBurning):not(.cardBurnt) .cardFront::before {
   position: absolute;
   inset: 50% auto auto 50%;
-  z-index: 3;
+  z-index: 5;
   min-width: 74%;
   padding: 7px 10px;
   border: 1px solid currentColor;
@@ -90,24 +211,54 @@ button.card:disabled {
   transform: translate(-50%, -50%);
 }
 
-.cardHidden {
-  --augment-ink: #ffffff;
-  background: repeating-linear-gradient(45deg, #17140f 0 8px, #2a2722 8px 9px);
-  color: #ffffff;
+.cardHidden .cardBody {
+  transform: rotateY(180deg);
 }
 
-.cardHidden::after {
-  border-color: rgb(255 255 255 / 52%);
+.cardHidden .cardBack {
+  --augment-ink: #f9f4e8;
+}
+
+.cardAction .cardFront {
+  border-width: 2px;
+  box-shadow: inset 0 -5px 0 color-mix(in srgb, var(--augment-ink) 12%, transparent);
+}
+
+.cardAction:not(:disabled) .cardFront::before {
+  position: absolute;
+  z-index: 4;
+  right: 10px;
+  bottom: 9px;
+  padding: 3px 5px;
+  border: 1px solid currentColor;
+  background: var(--augment-paper);
+  content: "点击发动";
+  font-size: 7px;
+  font-weight: 800;
+  letter-spacing: 0.08em;
 }
 
 .cardCompact {
   min-height: 132px;
+  border-radius: 5px;
+}
+
+.cardCompact .cardFace {
   padding: 12px;
   border-radius: 5px;
 }
 
+.cardCompact .backFrame { inset: 9px; }
+.cardCompact .backFrame::before { inset: 6px; }
+.cardCompact .backFrame::after { inset: 11px; }
+.cardCompact .backLattice { inset: 15px; }
+.cardCompact .backMedallion { width: 42px; height: 42px; }
+.cardCompact .backMedallion > span { font-size: 16px; }
+.cardCompact .backStatus { right: 12px; bottom: 11px; font-size: 6px; }
+
 .corner {
   position: absolute;
+  z-index: 3;
   top: 14px;
   left: 14px;
   display: grid;
@@ -129,9 +280,7 @@ button.card:disabled {
   font-size: 14px;
 }
 
-.cardCompact .cornerBottom {
-  inset: auto 10px 10px auto;
-}
+.cardCompact .cornerBottom { inset: auto 10px 10px auto; }
 
 .suitGlyph {
   margin-top: 4px;
@@ -139,6 +288,8 @@ button.card:disabled {
 }
 
 .face {
+  position: relative;
+  z-index: 2;
   display: grid;
   min-width: 0;
   align-content: center;
@@ -159,9 +310,7 @@ button.card:disabled {
   line-height: 1;
 }
 
-.cardCompact .mainSuit {
-  font-size: 27px;
-}
+.cardCompact .mainSuit { font-size: 27px; }
 
 .name {
   max-width: 100%;
@@ -209,9 +358,7 @@ button.card:disabled {
 }
 
 .cardCompact .description,
-.cardCompact .cardDetails {
-  display: none;
-}
+.cardCompact .cardDetails { display: none; }
 
 .tierLabel {
   margin-top: 2px;
@@ -224,6 +371,7 @@ button.card:disabled {
 
 .stateBadge {
   position: absolute;
+  z-index: 4;
   top: 12px;
   right: 12px;
   max-width: calc(100% - 70px);
@@ -236,10 +384,6 @@ button.card:disabled {
   letter-spacing: 0.1em;
   line-height: 1;
   text-transform: uppercase;
-}
-
-.cardHidden .stateBadge {
-  background: rgb(0 0 0 / 58%);
 }
 
 .hiddenFace {
@@ -256,7 +400,7 @@ button.card:disabled {
   width: 54px;
   height: 54px;
   place-items: center;
-  border: 1px solid rgb(255 255 255 / 68%);
+  border: 1px solid currentColor;
   border-radius: 4px;
   font-family: "Iowan Old Style", Baskerville, "Times New Roman", serif;
   font-size: 27px;
@@ -268,7 +412,75 @@ button.card:disabled {
   letter-spacing: 0.14em;
 }
 
+.burnLayer {
+  position: absolute;
+  z-index: 8;
+  inset: 0;
+  overflow: visible;
+  border-radius: inherit;
+  pointer-events: none;
+}
+
+.burnEdge {
+  position: absolute;
+  inset: -2px;
+  border: 2px solid #34312d;
+  border-radius: inherit;
+  opacity: 0;
+}
+
+.ember {
+  position: absolute;
+  width: 5px;
+  height: 5px;
+  border: 1px solid #5f5b54;
+  background: #f9f4e8;
+  opacity: 0;
+  transform: rotate(45deg);
+}
+
+.emberOne { right: 11%; bottom: 7%; }
+.emberTwo { right: 28%; bottom: 3%; width: 4px; height: 4px; }
+.emberThree { right: 5%; bottom: 28%; width: 3px; height: 3px; }
+
+.burnLabel {
+  position: absolute;
+  inset: 50% auto auto 50%;
+  min-width: 74%;
+  padding: 7px 8px;
+  border: 1px solid #17140f;
+  background: #f9f4e8;
+  color: #17140f;
+  font-size: 10px;
+  font-weight: 800;
+  letter-spacing: 0.14em;
+  text-align: center;
+  opacity: 0;
+  transform: translate(-50%, -50%);
+}
+
+.cardBurning .cardFront {
+  animation: card-burn-away var(--augment-burn-ms, 1280ms) cubic-bezier(0.55, 0, 0.45, 1) both;
+}
+
+.cardBurning .burnEdge { animation: burn-edge-pulse var(--augment-burn-ms, 1280ms) ease-out both; }
+.cardBurning .emberOne { animation: ember-rise 820ms 210ms ease-out both; }
+.cardBurning .emberTwo { animation: ember-rise 760ms 380ms ease-out both; }
+.cardBurning .emberThree { animation: ember-rise 690ms 520ms ease-out both; }
+.cardBurning .burnLabel { animation: burn-label-in var(--augment-burn-ms, 1280ms) ease both; }
+
+.cardBurnt .cardFront { opacity: 0.12; }
+.cardBurnt .burnLayer { overflow: hidden; border: 1px dashed rgb(23 20 15 / 55%); }
+.cardBurnt .burnLabel { opacity: 1; }
+
 .draft {
+  --augment-deal-ms: 560ms;
+  --augment-deal-stagger-ms: 110ms;
+  --augment-fade-ms: 260ms;
+  --augment-center-ms: 420ms;
+  --augment-turn-ms: 1360ms;
+  --augment-dock-ms: 640ms;
+  --augment-recover-ms: 320ms;
   display: grid;
   width: min(980px, 100%);
   gap: 20px;
@@ -281,17 +493,13 @@ button.card:disabled {
   gap: 18px;
 }
 
-.draftTitleGroup {
-  min-width: 0;
-}
+.draftTitleGroup { min-width: 0; }
 
 .draftEyebrow,
 .draftTitle,
 .draftDescription,
 .draftMeta,
-.draftStatus {
-  margin: 0;
-}
+.draftStatus { margin: 0; }
 
 .draftEyebrow {
   color: rgb(0 0 0 / 55%);
@@ -356,18 +564,16 @@ button.card:disabled {
   letter-spacing: 0.12em;
 }
 
-.draftTimer strong {
-  font-size: 15px;
-  line-height: 1;
-}
+.draftTimer strong { font-size: 15px; line-height: 1; }
 
 .draftTimerUrgent {
-  border-color: #9b2020;
-  background: #9b2020;
+  border-color: #17140f;
+  background: #17140f;
   color: #ffffff;
 }
 
 .draftOptions {
+  position: relative;
   display: grid;
   grid-template-columns: repeat(3, minmax(0, 1fr));
   gap: 14px;
@@ -377,10 +583,90 @@ button.card:disabled {
 }
 
 .draftOption {
+  position: relative;
+  z-index: 1;
   display: grid;
   min-width: 0;
   align-content: start;
   gap: 8px;
+  animation: card-deal-up var(--augment-deal-ms) cubic-bezier(0.22, 0.78, 0.18, 1) both;
+  animation-delay: calc(var(--card-motion-index) * var(--augment-deal-stagger-ms));
+  transform-origin: center;
+  transition:
+    transform var(--augment-center-ms) cubic-bezier(0.2, 0.82, 0.2, 1),
+    opacity var(--augment-fade-ms) ease,
+    filter var(--augment-fade-ms) ease;
+  will-change: transform, opacity;
+}
+
+/* The completed deal animation must release `transform` before the lock
+   sequence starts. Otherwise its `both` fill mode wins the cascade and the
+   selected card turns in its original grid slot instead of moving to center. */
+.draft:not([data-animation-phase="dealing"]) .draftOption {
+  animation: none;
+}
+
+.draft[data-animation-phase="fading"] .draftOption[data-selected="false"],
+.draft[data-animation-phase="centering"] .draftOption[data-selected="false"],
+.draft[data-animation-phase="turning"] .draftOption[data-selected="false"],
+.draft[data-animation-phase="awaiting-server"] .draftOption[data-selected="false"],
+.draft[data-animation-phase="docking"] .draftOption[data-selected="false"],
+.draft[data-animation-phase="settled"] .draftOption[data-selected="false"] {
+  opacity: 0;
+  filter: blur(2px);
+  pointer-events: none;
+  transform: translateY(22px) scale(0.94);
+}
+
+.draft[data-animation-phase="centering"] .draftOption[data-selected="true"],
+.draft[data-animation-phase="turning"] .draftOption[data-selected="true"],
+.draft[data-animation-phase="awaiting-server"] .draftOption[data-selected="true"] {
+  z-index: 8;
+  transform: translate(var(--card-center-x), var(--card-center-y));
+}
+
+.draft[data-animation-phase="turning"] .draftOption[data-selected="true"] .cardBody {
+  animation: selected-card-double-turn var(--augment-turn-ms) cubic-bezier(0.42, 0, 0.18, 1) both;
+}
+
+.draft[data-animation-phase="awaiting-server"] .draftOption[data-selected="true"] .cardBody,
+.draft[data-animation-phase="docking"] .draftOption[data-selected="true"] .cardBody,
+.draft[data-animation-phase="settled"] .draftOption[data-selected="true"] .cardBody {
+  transform: rotateY(720deg);
+}
+
+.draft[data-animation-phase="docking"] .draftOption[data-selected="true"] {
+  z-index: 8;
+  opacity: 0.92;
+  transform: translate(var(--card-dock-x), var(--card-dock-y)) scale(0.43);
+  transition-duration: var(--augment-dock-ms), 240ms, 240ms;
+}
+
+.draft[data-animation-phase="settled"] .draftOption[data-selected="true"] {
+  opacity: 0;
+  pointer-events: none;
+  transform: translate(var(--card-dock-x), var(--card-dock-y)) scale(0.39);
+}
+
+.draft[data-animation-phase="recovering"] .draftOption {
+  opacity: 1;
+  filter: none;
+  transform: none;
+  transition-duration: var(--augment-recover-ms);
+}
+
+.draft[data-animation-phase="recovering"] .draftOption[data-selected="true"] .cardBody {
+  animation: selected-card-recover var(--augment-recover-ms) ease-out both;
+}
+
+.draft[data-animation-phase="fading"] .refreshButton,
+.draft[data-animation-phase="centering"] .refreshButton,
+.draft[data-animation-phase="turning"] .refreshButton,
+.draft[data-animation-phase="awaiting-server"] .refreshButton,
+.draft[data-animation-phase="docking"] .refreshButton,
+.draft[data-animation-phase="settled"] .refreshButton {
+  opacity: 0;
+  pointer-events: none;
 }
 
 .refreshButton,
@@ -447,19 +733,21 @@ button.card:disabled {
   color: #ffffff;
 }
 
-.confirmButton:hover:not(:disabled) {
-  background: #333333;
-}
+.confirmButton:hover:not(:disabled) { background: #333333; }
 
-.resignButton {
-  min-width: 72px;
-  padding-inline: 16px;
-}
+.resignButton { min-width: 72px; padding-inline: 16px; }
 
 .rail {
   display: grid;
   min-width: 0;
   gap: 8px;
+}
+
+.rail[data-augment-dock-target="true"] {
+  padding: 10px;
+  border: 1px solid rgb(23 20 15 / 18%);
+  border-radius: 5px;
+  background: color-mix(in srgb, var(--paper, #fffdf7) 94%, #17140f 6%);
 }
 
 .railHeader {
@@ -471,9 +759,7 @@ button.card:disabled {
 
 .railTitle,
 .railMeta,
-.railEmpty {
-  margin: 0;
-}
+.railEmpty { margin: 0; }
 
 .railTitle {
   font-size: 11px;
@@ -481,10 +767,7 @@ button.card:disabled {
   letter-spacing: 0.1em;
 }
 
-.railMeta {
-  color: rgb(23 20 15 / 68%);
-  font-size: 9px;
-}
+.railMeta { color: rgb(23 20 15 / 68%); font-size: 9px; }
 
 .railCards {
   display: grid;
@@ -495,13 +778,8 @@ button.card:disabled {
   list-style: none;
 }
 
-.railCardsSingle {
-  grid-template-columns: minmax(86px, 156px);
-}
-
-.railCardItem {
-  min-width: 0;
-}
+.railCardsSingle { grid-template-columns: minmax(86px, 156px); }
+.railCardItem { min-width: 0; }
 
 .railEmpty {
   display: grid;
@@ -526,6 +804,59 @@ button.card:disabled {
   white-space: nowrap;
 }
 
+@keyframes card-deal-up {
+  0% {
+    opacity: 0;
+    transform: translateY(min(42vh, 310px)) rotate(3.5deg) scale(0.92);
+  }
+  72% {
+    opacity: 1;
+    transform: translateY(-9px) rotate(-0.45deg) scale(1.012);
+  }
+  100% {
+    opacity: 1;
+    transform: none;
+  }
+}
+
+@keyframes selected-card-double-turn {
+  0% { transform: rotateY(0deg) scale(1); }
+  18% { transform: rotateY(118deg) scale(1.035); }
+  50% { transform: rotateY(360deg) scale(1.055); }
+  82% { transform: rotateY(604deg) scale(1.035); }
+  100% { transform: rotateY(720deg) scale(1); }
+}
+
+@keyframes selected-card-recover {
+  from { transform: rotateY(720deg); }
+  to { transform: rotateY(0deg); }
+}
+
+@keyframes card-burn-away {
+  0% { clip-path: inset(0 0 0 0); opacity: 1; }
+  24% { clip-path: polygon(0 0, 100% 0, 100% 88%, 87% 100%, 0 100%); opacity: 1; }
+  66% { clip-path: polygon(0 0, 100% 0, 100% 36%, 65% 68%, 28% 100%, 0 100%); opacity: 0.76; }
+  100% { clip-path: polygon(0 0, 25% 0, 0 22%); opacity: 0.08; }
+}
+
+@keyframes burn-edge-pulse {
+  0%, 14% { opacity: 0; transform: scale(1); }
+  36% { opacity: 0.92; }
+  82% { opacity: 0.42; }
+  100% { opacity: 0; transform: scale(0.84); }
+}
+
+@keyframes ember-rise {
+  0% { opacity: 0; transform: translate(0, 0) rotate(45deg) scale(0.7); }
+  18% { opacity: 0.92; }
+  100% { opacity: 0; transform: translate(-18px, -42px) rotate(150deg) scale(0.3); }
+}
+
+@keyframes burn-label-in {
+  0%, 72% { opacity: 0; transform: translate(-50%, -46%) scale(0.94); }
+  100% { opacity: 1; transform: translate(-50%, -50%) scale(1); }
+}
+
 @media (max-width: 720px) {
   .draftHeader,
   .draftFooter {
@@ -533,88 +864,77 @@ button.card:disabled {
     flex-direction: column;
   }
 
-  .draftMeta {
-    align-self: flex-start;
-  }
+  .draftMeta { align-self: flex-start; }
 
   .draftHeaderMeta {
     width: 100%;
     justify-items: stretch;
   }
 
-  .draftTimer {
-    width: 100%;
-  }
+  .draftTimer { width: 100%; }
 
-  .draftOptions {
-    grid-template-columns: 1fr;
-  }
+  .draftOptions { grid-template-columns: 1fr; }
 
-  .card {
-    min-height: 196px;
+  .card { min-height: 196px; }
+
+  .draft[data-animation-phase="centering"] .draftOption[data-selected="true"],
+  .draft[data-animation-phase="turning"] .draftOption[data-selected="true"],
+  .draft[data-animation-phase="awaiting-server"] .draftOption[data-selected="true"] {
+    transform: translateY(var(--card-center-y));
   }
 
   .draftFooter {
-    position: sticky;
-    z-index: 4;
-    bottom: -1px;
+    position: static;
     padding: 12px 0 calc(12px + env(safe-area-inset-bottom));
     border-top: 1px solid rgb(23 20 15 / 18%);
     background: var(--augment-paper);
   }
 
-  .draftActions {
-    width: 100%;
-  }
-
-  .confirmButton {
-    flex: 1;
-  }
+  .draftActions { width: 100%; }
+  .confirmButton { flex: 1; }
 }
 
 @media (max-width: 420px) {
-  .card {
-    min-height: 180px;
-    padding: 14px;
-  }
-
-  .face {
-    padding-block: 25px 20px;
-  }
-
-  .railCards {
-    grid-template-columns: repeat(2, minmax(72px, 1fr));
-  }
+  .card { min-height: 180px; }
+  .face { padding-block: 25px 20px; }
+  .railCards { grid-template-columns: repeat(2, minmax(72px, 1fr)); }
 }
 
 @media (prefers-reduced-motion: reduce) {
   .card,
+  .cardFace,
+  .draftOption,
   .refreshButton,
   .resignButton,
   .confirmButton {
     scroll-behavior: auto;
-    transition: none;
+    animation: none !important;
+    transition-duration: 0.01ms !important;
   }
 
-  button.card:hover:not(:disabled),
-  .cardSelected {
+  .draft[data-animation-phase="turning"] .draftOption[data-selected="true"] .cardBody,
+  .draft[data-animation-phase="awaiting-server"] .draftOption[data-selected="true"] .cardBody,
+  .draft[data-animation-phase="docking"] .draftOption[data-selected="true"] .cardBody,
+  .draft[data-animation-phase="settled"] .draftOption[data-selected="true"] .cardBody {
     transform: none;
   }
+
+  .cardBurning .cardFront,
+  .cardBurnt .cardFront { opacity: 0.12; }
+
+  .cardBurning .ember { display: none; }
+  .cardBurning .burnLabel { opacity: 1; }
 }
 
 @media (forced-colors: active) {
-  .card,
+  .cardFace,
   .refreshButton,
   .resignButton,
-  .confirmButton {
-    border: 2px solid CanvasText;
-  }
+  .confirmButton { border: 2px solid CanvasText; }
 
-  .cardSelected {
-    outline: 4px double Highlight;
-  }
-
-  .cardUsed {
-    opacity: 1;
-  }
+  .cardSelected .cardFront { outline: 4px double Highlight; }
+  .cardBack { background: Canvas; color: CanvasText; }
+  .backFrame,
+  .backMedallion { border-color: CanvasText; }
+  .cardUsed { opacity: 1; }
 }

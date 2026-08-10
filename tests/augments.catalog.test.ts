@@ -7,6 +7,8 @@ import {
   AUGMENT_IDS,
   AUGMENT_SUITS,
   AUGMENT_SUIT_META,
+  LEGACY_AUGMENT_CATALOG_VERSION,
+  LEGACY_AUGMENT_IDS,
   AugmentRuleError,
   assertValidAugmentDraftState,
   beginSecondAugmentDraft,
@@ -45,19 +47,26 @@ function lockBoth(state: AugmentDraftState): AugmentDraftState {
   return next;
 }
 
-test("the catalog has twenty stable, executable definitions in descending poker-suit tiers", () => {
-  assert.equal(AUGMENT_CATALOG_VERSION, "junqi-augments-v1");
-  assert.equal(AUGMENT_CATALOG.length, 20);
-  assert.equal(AUGMENT_IDS.length, 20);
-  assert.equal(new Set(AUGMENT_IDS).size, 20);
+test("the catalog has fifty stable, executable definitions in descending poker-suit tiers", () => {
+  assert.equal(AUGMENT_CATALOG_VERSION, "junqi-augments-v2");
+  assert.equal(LEGACY_AUGMENT_CATALOG_VERSION, "junqi-augments-v1");
+  assert.equal(AUGMENT_CATALOG.length, 50);
+  assert.equal(AUGMENT_IDS.length, 50);
+  assert.equal(new Set(AUGMENT_IDS).size, 50);
   assert.deepEqual(
     AUGMENT_SUITS.map((suit) => AUGMENT_SUIT_META[suit].strength),
     [4, 3, 2, 1],
   );
 
+  const expectedSuitSizes: Record<AugmentSuit, number> = {
+    spades: 13,
+    hearts: 13,
+    clubs: 12,
+    diamonds: 12,
+  };
   for (const suit of AUGMENT_SUITS) {
     const definitions = getAugmentsBySuit(suit);
-    assert.equal(definitions.length, 5, suit);
+    assert.equal(definitions.length, expectedSuitSizes[suit], suit);
     assert.ok(definitions.every((definition) => definition.suit === suit));
     assert.ok(definitions.every((definition) => definition.suitSymbol === AUGMENT_SUIT_META[suit].symbol));
   }
@@ -70,21 +79,51 @@ test("the catalog has twenty stable, executable definitions in descending poker-
       "spade-tactical-retreat:combat:attacker_retreat",
       "spade-total-intelligence:reconnaissance:choose_enemy",
       "spade-strategic-reserve:clock:low_time_rescue",
+      "spade-rail-dominion:movement:engineer_rail",
+      "spade-serpentine-offensive:movement:rail_turn",
+      "spade-deep-strike:movement:road_dash",
+      "spade-global-redeployment:movement:camp_transfer",
+      "spade-command-chain:extra_turn:after_quiet_move",
+      "spade-counteroffensive:extra_turn:after_capture",
+      "spade-shadow-retreat:combat:attacker_retreat",
+      "spade-supreme-recon:reconnaissance:choose_enemy",
       "heart-rail-turn:movement:rail_turn",
       "heart-initiative:extra_turn:after_quiet_move",
       "heart-remote-exchange:exchange:same_rank",
       "heart-bomb-disposal:combat:engineer_defuses_bomb",
       "heart-targeted-recon:reconnaissance:choose_enemy",
+      "heart-mobile-rail:movement:engineer_rail",
+      "heart-double-turn:movement:rail_turn",
+      "heart-breakthrough:movement:road_dash",
+      "heart-camp-network:movement:camp_transfer",
+      "heart-victory-momentum:extra_turn:after_capture",
+      "heart-orderly-withdrawal:combat:attacker_retreat",
+      "heart-wide-recon:reconnaissance:frontline_random",
+      "heart-reserve-clock:clock:low_time_rescue",
       "club-forced-march:movement:road_dash",
       "club-line-hop:movement:rail_jump",
       "club-field-exchange:exchange:adjacent_mobile",
       "club-steady-tempo:clock:move_increment",
       "club-frontline-scout:reconnaissance:frontline_random",
+      "club-rail-passage:movement:engineer_rail",
+      "club-rail-switch:movement:rail_turn",
+      "club-road-patrol:movement:road_dash",
+      "club-camp-relay:movement:camp_transfer",
+      "club-local-recon:reconnaissance:frontline_random",
+      "club-pocket-time:clock:flat_bonus",
+      "club-engineer-oath:combat:engineer_last_stand",
       "diamond-camp-transfer:movement:camp_transfer",
       "diamond-forward-bomb:setup:forward_bomb",
       "diamond-deep-mine:setup:deep_mine",
       "diamond-engineer-screen:combat:engineer_last_stand",
       "diamond-time-cache:clock:flat_bonus",
+      "diamond-road-step:movement:road_dash",
+      "diamond-camp-relay:movement:camp_transfer",
+      "diamond-front-watch:reconnaissance:frontline_random",
+      "diamond-pocket-watch:clock:flat_bonus",
+      "diamond-drill:clock:move_increment",
+      "diamond-forward-pair:setup:forward_bomb",
+      "diamond-deep-pair:setup:deep_mine",
     ],
   );
 
@@ -97,6 +136,21 @@ test("the catalog has twenty stable, executable definitions in descending poker-
     assert.ok(Number.isInteger(definition.charges) && definition.charges > 0);
   }
   assert.equal(isAugmentId("spade-not-a-real-card"), false);
+});
+
+test("no two cards are canonical activation, charge, and effect duplicates", () => {
+  const signatures = new Map<string, AugmentId>();
+  for (const definition of AUGMENT_CATALOG) {
+    const signature = JSON.stringify({
+      activation: definition.activation,
+      charges: definition.charges,
+      effect: definition.effect,
+    });
+    const duplicate = signatures.get(signature);
+    assert.equal(duplicate, undefined, `${definition.id} duplicates ${duplicate}`);
+    signatures.set(signature, definition.id);
+  }
+  assert.equal(signatures.size, 50);
 });
 
 test("seeded drafts are reproducible and give both players independent offers of one suit", () => {
@@ -230,9 +284,14 @@ test("the move-10 draft uses a new shared suit and resets each player's refresh"
     () => beginSecondAugmentDraft(state, { suit: "spades" }),
     "SAME_SUIT_AS_FIRST_ROUND",
   );
-  expectAugmentError(
-    () => beginSecondAugmentDraft(state, { suit: "diamonds" }),
-    "SUIT_NOT_AVAILABLE_FOR_ROUND",
+  const diamondSecond = beginSecondAugmentDraft(state, {
+    random: createSeededAugmentRandom("diamond-round-two"),
+    suit: "diamonds",
+  });
+  assert.ok(
+    diamondSecond.rounds[1].players.black.options.every(
+      (id) => getAugmentDefinition(id).activation !== "setup",
+    ),
   );
 
   const second = beginSecondAugmentDraft(state, {
@@ -322,7 +381,7 @@ test("a full two-round draft yields two visible cards per player without repeats
   );
 });
 
-test("random suit selection never repeats the first-round tier", () => {
+test("random suit selection never repeats the first-round tier or offers setup cards", () => {
   for (const firstSuit of AUGMENT_SUITS as readonly AugmentSuit[]) {
     for (let seed = 0; seed < 20; seed += 1) {
       let state = createAugmentDraftState({
@@ -332,9 +391,93 @@ test("random suit selection never repeats the first-round tier", () => {
       state = revealCurrentAugmentRound(lockBoth(state));
       state = beginSecondAugmentDraft(state, { random: createSeededAugmentRandom(seed) });
       assert.notEqual(state.rounds[1].suit, firstSuit);
-      assert.notEqual(state.rounds[1].suit, "diamonds");
+      for (const side of ["black", "white"] as const) {
+        assert.ok(
+          state.rounds[1].players[side].options.every(
+            (id) => getAugmentDefinition(id).activation !== "setup",
+          ),
+        );
+      }
     }
   }
+});
+
+test("persisted v1 rooms retain the old twenty-card pool and projection semantics", () => {
+  const persisted = JSON.stringify({
+    catalogVersion: LEGACY_AUGMENT_CATALOG_VERSION,
+    activeRound: null,
+    rounds: [
+      {
+        number: 1,
+        trigger: "setup",
+        suit: "spades",
+        revealed: true,
+        players: {
+          black: {
+            options: [
+              "spade-grand-maneuver",
+              "spade-relentless-assault",
+              "spade-tactical-retreat",
+            ],
+            selectedId: "spade-grand-maneuver",
+            locked: true,
+            refreshedSlot: null,
+          },
+          white: {
+            options: [
+              "spade-total-intelligence",
+              "spade-strategic-reserve",
+              "spade-tactical-retreat",
+            ],
+            selectedId: "spade-strategic-reserve",
+            locked: true,
+            refreshedSlot: null,
+          },
+        },
+      },
+    ],
+    seenBySide: {
+      black: [
+        "spade-grand-maneuver",
+        "spade-relentless-assault",
+        "spade-tactical-retreat",
+      ],
+      white: [
+        "spade-total-intelligence",
+        "spade-strategic-reserve",
+        "spade-tactical-retreat",
+      ],
+    },
+    loadouts: {
+      black: ["spade-grand-maneuver"],
+      white: ["spade-strategic-reserve"],
+    },
+  });
+  const restored = JSON.parse(persisted) as AugmentDraftState;
+  assertValidAugmentDraftState(restored);
+  assert.equal(projectAugmentDraft(restored, "spectator").catalogVersion, "junqi-augments-v1");
+
+  const second = beginSecondAugmentDraft(restored, {
+    random: createSeededAugmentRandom("legacy-room-resume"),
+    suit: "hearts",
+  });
+  const legacyIds = new Set<AugmentId>(LEGACY_AUGMENT_IDS);
+  for (const side of ["black", "white"] as const) {
+    assert.ok(second.rounds[1].players[side].options.every((id) => legacyIds.has(id)));
+  }
+  const refreshed = refreshAugmentOption(second, "black", 0, () => 0);
+  assert.ok(legacyIds.has(refreshed.rounds[1].players.black.options[0]));
+  expectAugmentError(
+    () => beginSecondAugmentDraft(restored, { suit: "diamonds" }),
+    "SUIT_NOT_AVAILABLE_FOR_ROUND",
+  );
+
+  const contaminated = structuredClone(restored);
+  contaminated.seenBySide.black[0] = "spade-rail-dominion";
+  contaminated.rounds[0].players.black.options[0] = "spade-rail-dominion";
+  contaminated.rounds[0].players.black.selectedId = "spade-rail-dominion";
+  contaminated.loadouts.black[0] = "spade-rail-dominion";
+  assert.equal(validateAugmentDraftState(contaminated), false);
 });
 
 test("stable ids cover the catalog exactly", () => {
@@ -345,5 +488,5 @@ test("stable ids cover the catalog exactly", () => {
 
   const allIds = new Set<AugmentId>();
   for (const definition of AUGMENT_CATALOG) allIds.add(definition.id);
-  assert.equal(allIds.size, 20);
+  assert.equal(allIds.size, 50);
 });

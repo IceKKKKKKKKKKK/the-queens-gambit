@@ -20,6 +20,7 @@ import {
   RequestBodyTooLargeError,
   readBoundedJson,
 } from "../../../lib/request";
+import { rejectCrossOriginMutation } from "../security";
 
 const responseHeaders = {
   "Cache-Control": "no-store",
@@ -114,6 +115,8 @@ export async function GET(request: Request) {
 
 export async function POST(request: Request) {
   try {
+    const originError = rejectCrossOriginMutation(request, responseHeaders);
+    if (originError) return originError;
     const user = await authenticatedUser(request);
     if (await hasNonEmptyRequestBody(request.clone())) {
       const parsed = await readBoundedJson(request, 1_024);
@@ -141,6 +144,8 @@ export async function POST(request: Request) {
 
 export async function DELETE(request: Request) {
   try {
+    const originError = rejectCrossOriginMutation(request, responseHeaders);
+    if (originError) return originError;
     const user = await authenticatedUser(request);
     if (await hasNonEmptyRequestBody(request)) {
       return Response.json({ error: "INVALID_REQUEST" }, { status: 400, headers: responseHeaders });

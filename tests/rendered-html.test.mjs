@@ -4,16 +4,27 @@ import test from "node:test";
 
 const templateRoot = new URL("../", import.meta.url);
 
-async function render() {
+async function render(path = "/") {
   const workerUrl = new URL("../dist/server/index.js", import.meta.url);
   workerUrl.searchParams.set("test", `${process.pid}-${Date.now()}`);
   const { default: worker } = await import(workerUrl.href);
   return worker.fetch(
-    new Request("http://localhost/", { headers: { accept: "text/html" } }),
+    new Request(new URL(path, "http://localhost/"), { headers: { accept: "text/html" } }),
     { ASSETS: { fetch: async () => new Response("Not found", { status: 404 }) } },
     { waitUntil() {}, passThroughOnException() {} },
   );
 }
+
+test("server-rendered sign-in return path contains the room but never an invite secret", async () => {
+  const response = await render("/?room=ABCD2345");
+  assert.equal(response.status, 200);
+  const html = await response.text();
+  assert.match(
+    html,
+    /signin-with-chatgpt\?return_to=%2F%3Froom%3DABCD2345/,
+  );
+  assert.doesNotMatch(html, /#invite=|invite_retry|pending-invite/);
+});
 
 test("server-renders the authenticated game entrance", async () => {
   const response = await render();
@@ -131,7 +142,7 @@ test("live moves use one-shot monochrome motion and battle overlays", async () =
   ]);
 
   assert.match(component, /movementAnimationForTransition\(current\.snapshot, next\.snapshot\)/);
-  assert.match(component, /const recentMovement = movementAnimation\?\.event/);
+  assert.match(component, /const recentMovement = movementAnimation\?\.kind === "movement"/);
   assert.match(component, /function BattleAnimationOverlay/);
   assert.match(component, /battle-animation-cell/);
   assert.match(component, /battle-defender-ghost/);
@@ -169,7 +180,7 @@ test("live moves use one-shot monochrome motion and battle overlays", async () =
   assert.match(game, /export function movementAnimationForTransition/);
   assert.match(game, /next\.moveNumber !== previous\.moveNumber \+ 1/);
   assert.match(component, /BATTLE_ANIMATION_MS = 640/);
-  assert.match(component, /movementAnimation\.outcome === "move"[\s\S]*MOVEMENT_ANIMATION_MS[\s\S]*BATTLE_ANIMATION_MS/);
+  assert.match(component, /movementAnimation\.kind === "exchange" \|\| movementAnimation\.outcome === "move"[\s\S]*MOVEMENT_ANIMATION_MS[\s\S]*BATTLE_ANIMATION_MS/);
   assert.match(component, /if \(!room \|\| busy \|\| movementAnimation \|\| !isPlayer\(room\.viewer\)\) return/);
   assert.match(component, /busy=\{busy \|\| Boolean\(liveMovementAnimation\)\}/);
 });

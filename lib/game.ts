@@ -1,4 +1,5 @@
 import {
+  LEGACY_AUGMENT_CATALOG_VERSION,
   AugmentRuleError,
   beginSecondAugmentDraft,
   createAugmentDraftState,
@@ -16,10 +17,17 @@ import {
 } from "./augments.ts";
 
 export const CLASSIC_RULES_VERSION = "classic-duel-dark-v2" as const;
-export const AUGMENT_RULES_VERSION = "augment-duel-dark-v1" as const;
+export const LEGACY_AUGMENT_RULES_VERSION = "augment-duel-dark-v1" as const;
+export const AUGMENT_RULES_VERSION = "augment-duel-dark-v2" as const;
 export const RULES_VERSION = CLASSIC_RULES_VERSION;
-export type RulesVersion = typeof CLASSIC_RULES_VERSION | typeof AUGMENT_RULES_VERSION;
+export type RulesVersion =
+  | typeof CLASSIC_RULES_VERSION
+  | typeof LEGACY_AUGMENT_RULES_VERSION
+  | typeof AUGMENT_RULES_VERSION;
 export type GameMode = "classic" | "augment";
+export const THREEFOLD_REPETITION_THRESHOLD = 3 as const;
+export const THREEFOLD_REPETITION_RULES_FINGERPRINT =
+  "augment-duel-dark-v2:threefold-3:strategic-sha256-v1" as const;
 export const DEFAULT_TIME_CONTROL_MINUTES = 20;
 export const RANKED_TIME_CONTROL_MINUTES = 10;
 export const RANKED_INCREMENT_THRESHOLD_MS = 5 * 60 * 1000;
@@ -86,8 +94,15 @@ export interface PublicEvent {
     | "game_started"
     | "timeout"
     | "augment_used"
-    | "augment_revealed";
+    | "augment_revealed"
+    | "extra_move_passed"
+    | "draw_repetition";
   augmentId?: AugmentId;
+  /** All augments resolved by this event. `augmentId` remains the legacy primary id. */
+  augmentIds?: AugmentId[];
+  kind?: "move" | "exchange";
+  secondaryFrom?: Position;
+  secondaryTo?: Position;
 }
 
 export interface GameClock {
@@ -96,6 +111,8 @@ export interface GameClock {
   turnStartedAt: number | null;
   incrementMs?: number;
   incrementThresholdMs?: number;
+  /** `null` means the threshold increment may cross the threshold; a number preserves a legacy cap. */
+  incrementCapMs?: number | null;
 }
 
 export interface PublicClock {
@@ -104,6 +121,7 @@ export interface PublicClock {
   running: Side | null;
   incrementMs?: number;
   incrementThresholdMs?: number;
+  incrementCapMs?: number | null;
 }
 
 export interface ReplayMove {
@@ -114,6 +132,8 @@ export interface ReplayMove {
   result: BattleResult;
   kind?: "move" | "exchange";
   augmentId?: AugmentId;
+  /** Ordered, complete augment consumption for this move; absent in legacy replays. */
+  augmentIds?: AugmentId[];
   secondaryFrom?: Position;
   secondaryTo?: Position;
 }
@@ -138,7 +158,7 @@ export interface AugmentRuntimeState {
   permanentReveals: Record<Side, string[]>;
   temporaryReveals: Record<Side, string[]>;
   pendingRecon: Record<Side, { augmentId: AugmentId; remaining: number } | null>;
-  extraMove: Record<Side, { augmentId: AugmentId; excludedPieceId: string } | null>;
+  extraMove: Record<Side, { augmentId: AugmentId; excludedPieceId: string | null } | null>;
   resumeTurn: Side | null;
   draftDeadlineAt: number | null;
 }
@@ -147,10 +167,34 @@ export interface ProjectedAugmentRuntime {
   draft: ProjectedAugmentDraft;
   usedBySide: Record<Side, AugmentId[]>;
   triggerCounts: Record<Side, Partial<Record<AugmentId, number>>>;
-  pendingRecon: { augmentId: AugmentId; remaining: number } | null;
-  extraMove: { augmentId: AugmentId; excludedPieceId: string } | null;
+  /** Private reveal provenance for the projected knowledge side only. */
+  permanentRevealIds?: string[];
+  /** Private reveal provenance for the projected knowledge side only. */
+  temporaryRevealIds?: string[];
+  pendingRecon: {
+    augmentId: AugmentId;
+    remaining: number;
+    /** Server-authoritative private targets for the viewing side. */
+    legalTargets?: Position[];
+  } | null;
+  extraMove: { augmentId: AugmentId; excludedPieceId: string | null } | null;
   draftDeadlineAt: number | null;
 }
+
+export interface RepetitionTracker {
+  salt: string;
+  counts: Record<string, number>;
+  lastCountedDigest: string | null;
+  currentOccurrences: number;
+}
+
+export interface ProjectedRepetitionStatus {
+  threshold: typeof THREEFOLD_REPETITION_THRESHOLD;
+  currentOccurrences: number;
+  active: boolean;
+}
+
+export type DrawReason = "threefold_repetition";
 
 export interface GameState {
   rulesVersion: RulesVersion;
@@ -161,13 +205,18 @@ export interface GameState {
   turn: Side;
   winner: Side | null;
   finishReason: "flag" | "no_moves" | "resign" | "draw" | "timeout" | null;
+  drawReason?: DrawReason | null;
   revealedFlags: Record<Side, boolean>;
   pieces: Piece[];
   events: PublicEvent[];
   moveNumber: number;
   replay: ReplayArchive | null;
+  /** Public, type-free identity history for pieces that have taken a board action. */
+  movedPieceIds?: string[];
   clock: GameClock | null;
   augment?: AugmentRuntimeState | null;
+  /** Server-private repetition evidence. Never include this object in a projection. */
+  repetitionTracker?: RepetitionTracker;
 }
 
 export interface ProjectedGame {
@@ -178,19 +227,24 @@ export interface ProjectedGame {
   turn: Side;
   winner: Side | null;
   finishReason: GameState["finishReason"];
+  drawReason: DrawReason | null;
   revealedFlags: Record<Side, boolean>;
   pieces: PublicPiece[];
   events: PublicEvent[];
   moveNumber: number;
   replay: ReplayArchive | null;
+  /** Piece IDs are already public after setup; this contains no piece identities. */
+  movedPieceIds: string[];
   clock: PublicClock | null;
   mode: GameMode;
   augment: ProjectedAugmentRuntime | null;
+  repetition: ProjectedRepetitionStatus | null;
 }
 
 export type MovementAnimationOutcome = "move" | "capture" | "repelled" | "mutual";
 
-export interface MovementAnimationTransition {
+export interface StandardMovementAnimationTransition {
+  kind: "movement";
   moveNumber: number;
   event: PublicEvent & {
     from: Position;
@@ -203,6 +257,26 @@ export interface MovementAnimationTransition {
   defenderAliveAfter: boolean;
   outcome: MovementAnimationOutcome;
 }
+
+export interface ExchangeAnimationLeg {
+  pieceId: string;
+  from: Position;
+  to: Position;
+}
+
+export interface ExchangeAnimationTransition {
+  kind: "exchange";
+  outcome: "exchange";
+  moveNumber: number;
+  eventId: number;
+  augmentIds: AugmentId[];
+  first: ExchangeAnimationLeg;
+  second: ExchangeAnimationLeg;
+}
+
+export type MovementAnimationTransition =
+  | StandardMovementAnimationTransition
+  | ExchangeAnimationTransition;
 
 export type SetupDraft = Record<string, Position | null>;
 
@@ -222,6 +296,7 @@ export type PlayerAction =
   | { type: "augment_move"; augmentId: AugmentId; from: Position; to: Position }
   | { type: "augment_exchange"; augmentId: AugmentId; from: Position; to: Position }
   | { type: "augment_recon"; augmentId: AugmentId; target: Position }
+  | { type: "pass_extra_move" }
   | { type: "resign" };
 
 export const PIECE_INFO: Record<
@@ -339,7 +414,14 @@ export function movementAnimationForTransition(
     return null;
   }
 
-  const event = next.events.at(-1);
+  // Start-of-next-turn automatic effects (for example low-time rescue) may append
+  // events after the completed move. Find the newest actual board movement rather
+  // than assuming it is the final public event.
+  const event = next.events.findLast(
+    (candidate) =>
+      Boolean(candidate.from && candidate.to) &&
+      isBattleResult(candidate.result),
+  );
   if (
     !event?.from ||
     !event.to ||
@@ -350,6 +432,53 @@ export function movementAnimationForTransition(
     samePosition(event.from, event.to)
   ) {
     return null;
+  }
+
+  if (event.kind === "exchange") {
+    if (
+      !event.secondaryFrom ||
+      !event.secondaryTo ||
+      !isInsideBoard(event.secondaryFrom) ||
+      !isInsideBoard(event.secondaryTo) ||
+      !samePosition(event.secondaryFrom, event.to) ||
+      !samePosition(event.secondaryTo, event.from)
+    ) {
+      return null;
+    }
+    const firstPiece = previous.pieces.find(
+      (piece) => piece.alive && piece.side === event.actor && samePosition(piece, event.from!),
+    );
+    const secondPiece = previous.pieces.find(
+      (piece) => piece.alive && piece.side === event.actor && samePosition(piece, event.secondaryFrom!),
+    );
+    if (!firstPiece || !secondPiece || firstPiece.id === secondPiece.id) return null;
+    const firstAfter = next.pieces.find((piece) => piece.id === firstPiece.id);
+    const secondAfter = next.pieces.find((piece) => piece.id === secondPiece.id);
+    if (
+      !firstAfter?.alive ||
+      !secondAfter?.alive ||
+      !samePosition(firstAfter, event.to) ||
+      !samePosition(secondAfter, event.secondaryTo)
+    ) {
+      return null;
+    }
+    return {
+      kind: "exchange",
+      outcome: "exchange",
+      moveNumber: next.moveNumber,
+      eventId: event.id,
+      augmentIds: [...augmentIdsForRecord(event)],
+      first: {
+        pieceId: firstPiece.id,
+        from: { ...event.from },
+        to: { ...event.to },
+      },
+      second: {
+        pieceId: secondPiece.id,
+        from: { ...event.secondaryFrom },
+        to: { ...event.secondaryTo },
+      },
+    };
   }
 
   const attacker = previous.pieces.find(
@@ -389,7 +518,7 @@ export function movementAnimationForTransition(
       }
       outcome = "capture";
     } else if (event.result === "defender_survives") {
-      const retreated = event.augmentId === "spade-tactical-retreat";
+      const retreated = hasAttackerRetreatAugment(event);
       if (
         attackerAfter.alive !== retreated ||
         !samePosition(attackerAfter, event.from) ||
@@ -420,12 +549,14 @@ export function movementAnimationForTransition(
   }
 
   return {
+    kind: "movement",
     moveNumber: next.moveNumber,
     event: {
       ...event,
       from: { ...event.from },
       to: { ...event.to },
       result: event.result,
+      ...(event.augmentIds ? { augmentIds: [...event.augmentIds] } : {}),
     },
     attacker: clonePublicPiece(attacker),
     defender: defender ? clonePublicPiece(defender) : null,
@@ -493,10 +624,333 @@ export function setupSlots(side: Side) {
 }
 
 function hasSetupAugment(augmentIds: readonly AugmentId[], mode: "forward_bomb" | "deep_mine") {
-  return augmentIds.some((id) => {
-    const effect = getAugmentDefinition(id).effect;
-    return effect.kind === "setup" && effect.mode === mode;
+  return setupAugmentAllowance(augmentIds, mode) > 0;
+}
+
+const SHA256_ROUND_CONSTANTS = [
+  0x428a2f98, 0x71374491, 0xb5c0fbcf, 0xe9b5dba5, 0x3956c25b, 0x59f111f1,
+  0x923f82a4, 0xab1c5ed5, 0xd807aa98, 0x12835b01, 0x243185be, 0x550c7dc3,
+  0x72be5d74, 0x80deb1fe, 0x9bdc06a7, 0xc19bf174, 0xe49b69c1, 0xefbe4786,
+  0x0fc19dc6, 0x240ca1cc, 0x2de92c6f, 0x4a7484aa, 0x5cb0a9dc, 0x76f988da,
+  0x983e5152, 0xa831c66d, 0xb00327c8, 0xbf597fc7, 0xc6e00bf3, 0xd5a79147,
+  0x06ca6351, 0x14292967, 0x27b70a85, 0x2e1b2138, 0x4d2c6dfc, 0x53380d13,
+  0x650a7354, 0x766a0abb, 0x81c2c92e, 0x92722c85, 0xa2bfe8a1, 0xa81a664b,
+  0xc24b8b70, 0xc76c51a3, 0xd192e819, 0xd6990624, 0xf40e3585, 0x106aa070,
+  0x19a4c116, 0x1e376c08, 0x2748774c, 0x34b0bcb5, 0x391c0cb3, 0x4ed8aa4a,
+  0x5b9cca4f, 0x682e6ff3, 0x748f82ee, 0x78a5636f, 0x84c87814, 0x8cc70208,
+  0x90befffa, 0xa4506ceb, 0xbef9a3f7, 0xc67178f2,
+] as const;
+
+function rotateRight(value: number, count: number) {
+  return (value >>> count) | (value << (32 - count));
+}
+
+/** Synchronous, dependency-free SHA-256 for the synchronous rules engine. */
+function sha256Hex(value: string) {
+  const input = new TextEncoder().encode(value);
+  const bitLength = input.length * 8;
+  const paddedLength = Math.ceil((input.length + 9) / 64) * 64;
+  const padded = new Uint8Array(paddedLength);
+  padded.set(input);
+  padded[input.length] = 0x80;
+  const view = new DataView(padded.buffer);
+  view.setUint32(paddedLength - 8, Math.floor(bitLength / 0x1_0000_0000), false);
+  view.setUint32(paddedLength - 4, bitLength >>> 0, false);
+
+  const hash = new Uint32Array([
+    0x6a09e667, 0xbb67ae85, 0x3c6ef372, 0xa54ff53a,
+    0x510e527f, 0x9b05688c, 0x1f83d9ab, 0x5be0cd19,
+  ]);
+  const words = new Uint32Array(64);
+  for (let offset = 0; offset < paddedLength; offset += 64) {
+    for (let index = 0; index < 16; index += 1) {
+      words[index] = view.getUint32(offset + index * 4, false);
+    }
+    for (let index = 16; index < 64; index += 1) {
+      const first = words[index - 15];
+      const second = words[index - 2];
+      const sigma0 = rotateRight(first, 7) ^ rotateRight(first, 18) ^ (first >>> 3);
+      const sigma1 = rotateRight(second, 17) ^ rotateRight(second, 19) ^ (second >>> 10);
+      words[index] = (words[index - 16] + sigma0 + words[index - 7] + sigma1) >>> 0;
+    }
+
+    let a = hash[0];
+    let b = hash[1];
+    let c = hash[2];
+    let d = hash[3];
+    let e = hash[4];
+    let f = hash[5];
+    let g = hash[6];
+    let h = hash[7];
+    for (let index = 0; index < 64; index += 1) {
+      const sum1 = rotateRight(e, 6) ^ rotateRight(e, 11) ^ rotateRight(e, 25);
+      const choice = (e & f) ^ (~e & g);
+      const temporary1 = (h + sum1 + choice + SHA256_ROUND_CONSTANTS[index] + words[index]) >>> 0;
+      const sum0 = rotateRight(a, 2) ^ rotateRight(a, 13) ^ rotateRight(a, 22);
+      const majority = (a & b) ^ (a & c) ^ (b & c);
+      const temporary2 = (sum0 + majority) >>> 0;
+      h = g;
+      g = f;
+      f = e;
+      e = (d + temporary1) >>> 0;
+      d = c;
+      c = b;
+      b = a;
+      a = (temporary1 + temporary2) >>> 0;
+    }
+    hash[0] = (hash[0] + a) >>> 0;
+    hash[1] = (hash[1] + b) >>> 0;
+    hash[2] = (hash[2] + c) >>> 0;
+    hash[3] = (hash[3] + d) >>> 0;
+    hash[4] = (hash[4] + e) >>> 0;
+    hash[5] = (hash[5] + f) >>> 0;
+    hash[6] = (hash[6] + g) >>> 0;
+    hash[7] = (hash[7] + h) >>> 0;
+  }
+  return Array.from(hash, (word) => word.toString(16).padStart(8, "0")).join("");
+}
+
+function randomRepetitionSalt() {
+  const bytes = new Uint8Array(16);
+  crypto.getRandomValues(bytes);
+  return Array.from(bytes, (byte) => byte.toString(16).padStart(2, "0")).join("");
+}
+
+function createRepetitionTracker(salt = randomRepetitionSalt()): RepetitionTracker {
+  if (typeof salt !== "string" || salt.length === 0 || salt.length > 256) {
+    throw new GameRuleError("INVALID_REPETITION_SALT");
+  }
+  return {
+    salt,
+    counts: {},
+    lastCountedDigest: null,
+    currentOccurrences: 0,
+  };
+}
+
+function isAugmentRulesVersion(rulesVersion: RulesVersion) {
+  return rulesVersion === LEGACY_AUGMENT_RULES_VERSION || rulesVersion === AUGMENT_RULES_VERSION;
+}
+
+function compareStableText(first: string, second: string) {
+  return first < second ? -1 : first > second ? 1 : 0;
+}
+
+function sortedUnique(values: readonly string[] | undefined) {
+  return [...new Set(values ?? [])].sort(compareStableText);
+}
+
+function strategicPositionJson(state: GameState) {
+  const augment = state.augment;
+  if (!augment) throw new GameRuleError("AUGMENT_MODE_REQUIRED");
+  const sortedTriggerCounts = (side: Side) =>
+    Object.entries(augment.triggerCounts[side])
+      .sort(([first], [second]) => compareStableText(first, second))
+      .map(([id, count]) => [id, count]);
+  const extraMove = (side: Side) => {
+    const pending = augment.extraMove[side];
+    return pending ? [pending.augmentId, pending.excludedPieceId] : null;
+  };
+  return JSON.stringify({
+    turn: state.turn,
+    pieces: [...state.pieces]
+      .sort((first, second) => compareStableText(first.id, second.id))
+      .map(({ id, side, type, alive, row, col }) => [id, side, type, alive, row, col]),
+    revealedFlags: [state.revealedFlags.black, state.revealedFlags.white],
+    movedPieceIds: sortedUnique(state.movedPieceIds),
+    augment: {
+      catalogVersion: augment.draft.catalogVersion,
+      loadouts: [
+        [...augment.draft.loadouts.black],
+        [...augment.draft.loadouts.white],
+      ],
+      triggerCounts: [sortedTriggerCounts("black"), sortedTriggerCounts("white")],
+      permanentReveals: [
+        sortedUnique(augment.permanentReveals.black),
+        sortedUnique(augment.permanentReveals.white),
+      ],
+      temporaryReveals: [
+        sortedUnique(augment.temporaryReveals.black),
+        sortedUnique(augment.temporaryReveals.white),
+      ],
+      extraMove: [extraMove("black"), extraMove("white")],
+    },
   });
+}
+
+function strategicPositionDigest(state: GameState, salt: string) {
+  return sha256Hex(`${salt}\0${strategicPositionJson(state)}`);
+}
+
+export function isThreefoldRepetitionActive(state: GameState) {
+  if (
+    state.rulesVersion !== AUGMENT_RULES_VERSION ||
+    state.phase !== "playing" ||
+    !state.augment ||
+    state.augment.draft.activeRound !== null ||
+    state.augment.pendingRecon.black !== null ||
+    state.augment.pendingRecon.white !== null
+  ) {
+    return false;
+  }
+  return state.augment.draft.rounds.some(
+    (round) => round.number === 2 && round.revealed,
+  );
+}
+
+function isStructurallyValidRepetitionTracker(value: unknown): value is RepetitionTracker {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return false;
+  const tracker = value as Partial<RepetitionTracker>;
+  if (typeof tracker.salt !== "string" || tracker.salt.length === 0 || tracker.salt.length > 256) {
+    return false;
+  }
+  if (!tracker.counts || typeof tracker.counts !== "object" || Array.isArray(tracker.counts)) {
+    return false;
+  }
+  const entries = Object.entries(tracker.counts);
+  if (
+    entries.some(
+      ([digest, count]) =>
+        !/^[a-f0-9]{64}$/.test(digest) ||
+        !Number.isInteger(count) ||
+        count < 1 ||
+        count > THREEFOLD_REPETITION_THRESHOLD,
+    )
+  ) {
+    return false;
+  }
+  if (
+    !Number.isInteger(tracker.currentOccurrences) ||
+    tracker.currentOccurrences! < 0 ||
+    tracker.currentOccurrences! > THREEFOLD_REPETITION_THRESHOLD
+  ) {
+    return false;
+  }
+  if (tracker.lastCountedDigest === null) {
+    return tracker.currentOccurrences === 0 && entries.length === 0;
+  }
+  return (
+    typeof tracker.lastCountedDigest === "string" &&
+    /^[a-f0-9]{64}$/.test(tracker.lastCountedDigest) &&
+    tracker.currentOccurrences! >= 1 &&
+    tracker.counts[tracker.lastCountedDigest] === tracker.currentOccurrences
+  );
+}
+
+/** Strict persisted-state validator used at the database trust boundary. */
+export function isValidRepetitionTrackerForState(state: GameState) {
+  if (state.rulesVersion !== AUGMENT_RULES_VERSION) return state.repetitionTracker === undefined;
+  if (!isStructurallyValidRepetitionTracker(state.repetitionTracker)) return false;
+  const tracker = state.repetitionTracker;
+  if (!Array.isArray(state.events)) return false;
+  const drawEvents = state.events.filter((event) => event?.result === "draw_repetition");
+  const isThreefoldTerminal =
+    state.phase === "finished" &&
+    state.finishReason === "draw" &&
+    state.drawReason === "threefold_repetition" &&
+    state.winner === null;
+
+  if (isThreefoldTerminal) {
+    const thresholdDigests = Object.entries(tracker.counts)
+      .filter(([, count]) => count === THREEFOLD_REPETITION_THRESHOLD)
+      .map(([digest]) => digest);
+    if (
+      tracker.currentOccurrences !== THREEFOLD_REPETITION_THRESHOLD ||
+      thresholdDigests.length !== 1 ||
+      thresholdDigests[0] !== tracker.lastCountedDigest ||
+      drawEvents.length !== 1 ||
+      state.events.at(-1)?.result !== "draw_repetition"
+    ) {
+      return false;
+    }
+    try {
+      return tracker.lastCountedDigest === strategicPositionDigest(state, tracker.salt);
+    } catch {
+      return false;
+    }
+  }
+
+  if (
+    state.finishReason === "draw" ||
+    state.drawReason === "threefold_repetition" ||
+    drawEvents.length > 0 ||
+    tracker.currentOccurrences >= THREEFOLD_REPETITION_THRESHOLD ||
+    Object.values(tracker.counts).some(
+      (count) => count >= THREEFOLD_REPETITION_THRESHOLD,
+    )
+  ) {
+    return false;
+  }
+
+  if (!isThreefoldRepetitionActive(state)) {
+    if (state.phase === "finished") return true;
+    return (
+      tracker.lastCountedDigest === null &&
+      tracker.currentOccurrences === 0 &&
+      Object.keys(tracker.counts).length === 0
+    );
+  }
+
+  if (tracker.lastCountedDigest === null || tracker.currentOccurrences < 1) return false;
+  try {
+    return tracker.lastCountedDigest === strategicPositionDigest(state, tracker.salt);
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Seeds a sampled private world from a public occurrence count without copying
+ * any real match digest or history. Intended for deterministic simulation only.
+ */
+export function seedRepetitionTrackerFromCurrentPosition(
+  current: GameState,
+  currentOccurrences: number,
+  repetitionSalt: string,
+) {
+  if (current.rulesVersion !== AUGMENT_RULES_VERSION) {
+    throw new GameRuleError("REPETITION_NOT_ACTIVE");
+  }
+  const active = isThreefoldRepetitionActive(current);
+  const threefoldTerminal =
+    current.phase === "finished" &&
+    current.finishReason === "draw" &&
+    current.drawReason === "threefold_repetition" &&
+    current.winner === null;
+  const validOccurrences =
+    Number.isInteger(currentOccurrences) &&
+    (active
+      ? currentOccurrences >= 1 && currentOccurrences < THREEFOLD_REPETITION_THRESHOLD
+      : threefoldTerminal
+        ? currentOccurrences === THREEFOLD_REPETITION_THRESHOLD
+        : current.phase === "finished"
+          ? currentOccurrences >= 0 && currentOccurrences < THREEFOLD_REPETITION_THRESHOLD
+          : currentOccurrences === 0);
+  if (!validOccurrences) {
+    throw new GameRuleError("INVALID_REPETITION_OCCURRENCES");
+  }
+  const state = JSON.parse(JSON.stringify(current)) as GameState;
+  const tracker = createRepetitionTracker(repetitionSalt);
+  if (currentOccurrences > 0) {
+    const digest = strategicPositionDigest(state, tracker.salt);
+    tracker.counts[digest] = currentOccurrences;
+    tracker.lastCountedDigest = digest;
+    tracker.currentOccurrences = currentOccurrences;
+  }
+  state.repetitionTracker = tracker;
+  return state;
+}
+
+function setupAugmentAllowance(
+  augmentIds: readonly AugmentId[],
+  mode: "forward_bomb" | "deep_mine",
+) {
+  return augmentIds.reduce((allowance, id) => {
+    const effect = getAugmentDefinition(id).effect;
+    return effect.kind === "setup" && effect.mode === mode
+      ? allowance + effect.allowance
+      : allowance;
+  }, 0);
 }
 
 export function isAllowedSetupPosition(
@@ -612,7 +1066,7 @@ function makeSidePieces(side: Side): Piece[] {
 }
 
 export function gameModeForState(state: Pick<GameState, "rulesVersion">): GameMode {
-  return state.rulesVersion === AUGMENT_RULES_VERSION ? "augment" : "classic";
+  return isAugmentRulesVersion(state.rulesVersion) ? "augment" : "classic";
 }
 
 function createAugmentRuntime(): AugmentRuntimeState {
@@ -640,11 +1094,13 @@ export function createInitialGame(): GameState {
     turn: "black",
     winner: null,
     finishReason: null,
+    drawReason: null,
     revealedFlags: { black: false, white: false },
     pieces: [...makeSidePieces("black"), ...makeSidePieces("white")],
     events: [],
     moveNumber: 0,
     replay: null,
+    movedPieceIds: [],
     clock: {
       initialMs,
       remainingMs: { black: initialMs, white: initialMs },
@@ -653,7 +1109,9 @@ export function createInitialGame(): GameState {
   };
 }
 
-export function createAugmentGame(options: { ranked?: boolean } = {}): GameState {
+export function createAugmentGame(
+  options: { ranked?: boolean; repetitionSalt?: string } = {},
+): GameState {
   const initialMs = (options.ranked ? RANKED_TIME_CONTROL_MINUTES : DEFAULT_TIME_CONTROL_MINUTES) * 60 * 1000;
   return {
     ...createInitialGame(),
@@ -666,10 +1124,12 @@ export function createAugmentGame(options: { ranked?: boolean } = {}): GameState
         ? {
             incrementMs: RANKED_INCREMENT_MS,
             incrementThresholdMs: RANKED_INCREMENT_THRESHOLD_MS,
+            incrementCapMs: null,
           }
         : {}),
     },
     augment: createAugmentRuntime(),
+    repetitionTracker: createRepetitionTracker(options.repetitionSalt),
   };
 }
 
@@ -692,8 +1152,8 @@ export function validateSideSetup(
   const thirdRow = side === "black" ? 9 : 2;
   const frontBombs = sidePieces.filter((piece) => piece.type === "bomb" && piece.row === frontRow).length;
   const deepMines = sidePieces.filter((piece) => piece.type === "mine" && piece.row === thirdRow).length;
-  return frontBombs <= (hasSetupAugment(augmentIds, "forward_bomb") ? 1 : 0) &&
-    deepMines <= (hasSetupAugment(augmentIds, "deep_mine") ? 1 : 0);
+  return frontBombs <= setupAugmentAllowance(augmentIds, "forward_bomb") &&
+    deepMines <= setupAugmentAllowance(augmentIds, "deep_mine");
 }
 
 function alivePieceAt(state: GameState, position: Position) {
@@ -858,15 +1318,25 @@ export function randomizeSetupDraft(
   const draft = createSetupDraft(pieces, side, false, augmentIds);
   let forwardBombsPlaced = 0;
   let deepMinesPlaced = 0;
+  const forwardBombAllowance = setupAugmentAllowance(augmentIds, "forward_bomb");
+  const deepMineAllowance = setupAugmentAllowance(augmentIds, "deep_mine");
   const frontRow = side === "black" ? 6 : 5;
   const thirdRow = side === "black" ? 9 : 2;
   const placePiece = (piece: SetupPieceLike & { type: PieceType }) => {
     const choices = available.filter((position) => {
       if (!isAllowedSetupPosition(piece.type, side, position, augmentIds)) return false;
-      if (piece.type === "bomb" && position.row === frontRow && forwardBombsPlaced >= 1) {
+      if (
+        piece.type === "bomb" &&
+        position.row === frontRow &&
+        forwardBombsPlaced >= forwardBombAllowance
+      ) {
         return false;
       }
-      if (piece.type === "mine" && position.row === thirdRow && deepMinesPlaced >= 1) {
+      if (
+        piece.type === "mine" &&
+        position.row === thirdRow &&
+        deepMinesPlaced >= deepMineAllowance
+      ) {
         return false;
       }
       return true;
@@ -981,10 +1451,10 @@ function setupExceptionQuotaViolation(
     if (piece.type === "bomb" && position.row === frontRow) frontBombs += 1;
     if (piece.type === "mine" && position.row === thirdRow) deepMines += 1;
   }
-  if (frontBombs > (hasSetupAugment(augmentIds, "forward_bomb") ? 1 : 0)) {
+  if (frontBombs > setupAugmentAllowance(augmentIds, "forward_bomb")) {
     return "BOMB_NOT_FRONT_ROW";
   }
-  if (deepMines > (hasSetupAugment(augmentIds, "deep_mine") ? 1 : 0)) {
+  if (deepMines > setupAugmentAllowance(augmentIds, "deep_mine")) {
     return "MINE_BACK_TWO_ROWS";
   }
   return null;
@@ -1169,7 +1639,7 @@ export function getProjectedLegalTargets(game: ProjectedGame, side: Side, from: 
 }
 
 function requireAugmentState(state: GameState) {
-  if (state.rulesVersion !== AUGMENT_RULES_VERSION || !state.augment) {
+  if (!isAugmentRulesVersion(state.rulesVersion) || !state.augment) {
     throw new GameRuleError("AUGMENT_MODE_REQUIRED");
   }
   return state.augment;
@@ -1193,6 +1663,53 @@ function augmentAvailable(state: GameState, side: Side, augmentId: AugmentId) {
     augmentUses(state, side, augmentId) < getAugmentDefinition(augmentId).charges;
 }
 
+function findAvailableAugment(
+  state: GameState,
+  side: Side,
+  predicate: (definition: ReturnType<typeof getAugmentDefinition>) => boolean,
+) {
+  // Loadouts are stored in round/reveal order; that order is the stable tie-breaker
+  // when mutually exclusive automatic effects share the same trigger.
+  return (state.augment?.draft.loadouts[side] ?? []).find(
+    (augmentId) =>
+      augmentAvailable(state, side, augmentId) &&
+      predicate(getAugmentDefinition(augmentId)),
+  );
+}
+
+function augmentIdsForRecord(record: Pick<PublicEvent | ReplayMove, "augmentId" | "augmentIds">) {
+  if (record.augmentIds?.length) return record.augmentIds;
+  return record.augmentId ? [record.augmentId] : [];
+}
+
+function hasAttackerRetreatAugment(
+  record: Pick<PublicEvent | ReplayMove, "augmentId" | "augmentIds">,
+) {
+  return augmentIdsForRecord(record).some((augmentId) => {
+    const effect = getAugmentDefinition(augmentId).effect;
+    return effect.kind === "combat" && effect.mode === "attacker_retreat";
+  });
+}
+
+function augmentsUsedSince(
+  state: GameState,
+  firstNewEventId: number,
+  primaryId?: AugmentId,
+) {
+  const ids: AugmentId[] = primaryId ? [primaryId] : [];
+  for (const event of state.events) {
+    if (
+      event.id >= firstNewEventId &&
+      event.result === "augment_used" &&
+      event.augmentId &&
+      !ids.includes(event.augmentId)
+    ) {
+      ids.push(event.augmentId);
+    }
+  }
+  return ids;
+}
+
 function markAugmentUse(
   state: GameState,
   side: Side,
@@ -1214,7 +1731,12 @@ function directionKey(from: Position, to: Position) {
   return `${Math.sign(to.row - from.row)},${Math.sign(to.col - from.col)}`;
 }
 
-function railTurnCanReach(state: GameState, from: Position, to: Position) {
+function railTurnCanReach(
+  state: GameState,
+  from: Position,
+  to: Position,
+  maxTurns: number,
+) {
   const queue: Array<{ position: Position; direction: string | null; turns: number }> = [
     { position: from, direction: null, turns: 0 },
   ];
@@ -1224,7 +1746,7 @@ function railTurnCanReach(state: GameState, from: Position, to: Position) {
     for (const neighbor of railNeighbors(current.position)) {
       const direction = directionKey(current.position, neighbor);
       const turns = current.direction && current.direction !== direction ? current.turns + 1 : current.turns;
-      if (turns > 1) continue;
+      if (turns > maxTurns) continue;
       if (samePosition(neighbor, to)) return true;
       if (alivePieceAt(state, neighbor)) continue;
       const key = `${positionKey(neighbor)}:${direction}:${turns}`;
@@ -1238,6 +1760,36 @@ function railTurnCanReach(state: GameState, from: Position, to: Position) {
 
 function isFriendlyHalfCamp(side: Side, position: Position) {
   return isCamp(position) && (side === "black" ? position.row >= 6 : position.row <= 5);
+}
+
+function isJuniorMobilePiece(piece: Piece) {
+  return piece.type === "company" || piece.type === "platoon" || piece.type === "engineer";
+}
+
+function roadDashCanReach(
+  state: GameState,
+  from: Position,
+  to: Position,
+  exactEdges: number,
+) {
+  const visit = (current: Position, remaining: number, path: Set<string>): boolean => {
+    if (remaining === 0) return samePosition(current, to);
+    for (let row = 0; row < 12; row += 1) {
+      for (let col = 0; col < 5; col += 1) {
+        const next = { row, col };
+        if (!isRoadEdge(current, next)) continue;
+        const key = positionKey(next);
+        if (path.has(key)) continue;
+        const isDestination = remaining === 1 && samePosition(next, to);
+        if (!isDestination && alivePieceAt(state, next)) continue;
+        path.add(key);
+        if (visit(next, remaining - 1, path)) return true;
+        path.delete(key);
+      }
+    }
+    return false;
+  };
+  return visit(from, exactEdges, new Set([positionKey(from)]));
 }
 
 export function getAugmentMoveViolation(
@@ -1266,26 +1818,34 @@ export function getAugmentMoveViolation(
   if (target?.side === side) return "DESTINATION_OCCUPIED_BY_ALLY";
   if (target && isCamp(to)) return "CAMP_PROTECTED";
 
-  const mode = definition.effect.mode;
+  const effect = definition.effect;
+  if (
+    (effect.eligible === "junior_mobile_piece" || effect.eligible === "junior_piece_in_camp") &&
+    !isJuniorMobilePiece(piece)
+  ) {
+    return "AUGMENT_PIECE_INELIGIBLE";
+  }
+  const mode = effect.mode;
   if (mode === "engineer_rail") {
+    if (target && effect.destination === "empty") return "AUGMENT_REQUIRES_EMPTY_TARGET";
     return engineerCanReach(state, from, to) ? null : "AUGMENT_PATH_INVALID";
   }
-  if (target) return "AUGMENT_REQUIRES_EMPTY_TARGET";
   if (mode === "rail_turn") {
-    if (piece.type === "engineer") return "AUGMENT_PIECE_INELIGIBLE";
-    return railTurnCanReach(state, from, to) ? null : "AUGMENT_PATH_INVALID";
+    if (effect.eligible === "non_engineer_mobile_piece" && piece.type === "engineer") {
+      return "AUGMENT_PIECE_INELIGIBLE";
+    }
+    if (target && effect.destination === "empty") return "AUGMENT_REQUIRES_EMPTY_TARGET";
+    return railTurnCanReach(state, from, to, effect.maxTurns)
+      ? null
+      : "AUGMENT_PATH_INVALID";
   }
   if (mode === "road_dash") {
-    for (let row = 0; row < 12; row += 1) {
-      for (let col = 0; col < 5; col += 1) {
-        const middle = { row, col };
-        if (isRoadEdge(from, middle) && isRoadEdge(middle, to) && !alivePieceAt(state, middle)) {
-          return null;
-        }
-      }
-    }
-    return "AUGMENT_PATH_INVALID";
+    if (target && effect.destination === "empty") return "AUGMENT_REQUIRES_EMPTY_TARGET";
+    return roadDashCanReach(state, from, to, effect.exactEdges)
+      ? null
+      : "AUGMENT_PATH_INVALID";
   }
+  if (target) return "AUGMENT_REQUIRES_EMPTY_TARGET";
   if (mode === "rail_jump") {
     const rowDelta = to.row - from.row;
     const colDelta = to.col - from.col;
@@ -1300,7 +1860,14 @@ export function getAugmentMoveViolation(
       ? null
       : "AUGMENT_PATH_INVALID";
   }
-  if (!isCamp(from) || !isFriendlyHalfCamp(side, to)) return "AUGMENT_PATH_INVALID";
+  if (
+    !isCamp(from) ||
+    (effect.destination === "empty_friendly_half_camp"
+      ? !isFriendlyHalfCamp(side, to)
+      : !isCamp(to))
+  ) {
+    return "AUGMENT_PATH_INVALID";
+  }
   return null;
 }
 
@@ -1318,6 +1885,8 @@ export function getAugmentExchangeViolation(
   if (!augmentAvailable(state, side, augmentId)) return "AUGMENT_NOT_AVAILABLE";
   const definition = getAugmentDefinition(augmentId);
   if (definition.effect.kind !== "exchange") return "AUGMENT_ACTION_MISMATCH";
+  if (!isInsideBoard(from) || !isInsideBoard(to)) return "POSITION_OUT_OF_BOUNDS";
+  if (samePosition(from, to)) return "SAME_POSITION";
   const first = alivePieceAt(state, from);
   const second = alivePieceAt(state, to);
   if (!first || !second) return "INVALID_SWAP";
@@ -1356,7 +1925,16 @@ function projectedAugmentState(game: ProjectedGame, side: Side): GameState {
     },
     permanentReveals: { black: [], white: [] },
     temporaryReveals: { black: [], white: [] },
-    pendingRecon: { black: null, white: null, [side]: game.augment.pendingRecon },
+    pendingRecon: {
+      black: null,
+      white: null,
+      [side]: game.augment.pendingRecon
+        ? {
+            augmentId: game.augment.pendingRecon.augmentId,
+            remaining: game.augment.pendingRecon.remaining,
+          }
+        : null,
+    },
     extraMove: { black: null, white: null, [side]: game.augment.extraMove },
     resumeTurn: null,
     draftDeadlineAt: game.augment.draftDeadlineAt,
@@ -1401,6 +1979,31 @@ export function getProjectedAugmentExchangeViolation(
   return getAugmentExchangeViolation(projectedAugmentState(game, side), side, augmentId, from, to);
 }
 
+export function getProjectedAugmentReconTargets(
+  game: ProjectedGame,
+  side: Side,
+  augmentId: AugmentId,
+) {
+  const pending = game.augment?.pendingRecon;
+  if (!pending || pending.augmentId !== augmentId) return [] as Position[];
+  if (pending.legalTargets) return pending.legalTargets.map(({ row, col }) => ({ row, col }));
+
+  // Compatibility fallback for manually constructed or older projections. Live
+  // projections always carry the server-authoritative list above.
+  const legacyTargetedRecon =
+    game.augment?.draft.catalogVersion === LEGACY_AUGMENT_CATALOG_VERSION &&
+    augmentId === "heart-targeted-recon";
+  return game.pieces
+    .filter(
+      (piece) =>
+        piece.alive &&
+        piece.side !== side &&
+        (piece.type === null ||
+          (legacyTargetedRecon && piece.type === "flag" && piece.flagRevealed)),
+    )
+    .map(({ row, col }) => ({ row, col }));
+}
+
 function hasAnyLegalMove(state: GameState, side: Side) {
   const stateForSide = { ...state, turn: side };
   return state.pieces.some(
@@ -1411,8 +2014,9 @@ function hasAnyLegalMove(state: GameState, side: Side) {
 function hasAnyLegalAction(state: GameState, side: Side) {
   const stateForSide = { ...state, turn: side } as GameState;
   if (hasAnyLegalMove(stateForSide, side)) return true;
-  if (stateForSide.augment?.pendingRecon[side]) {
-    return availableReconTargets(stateForSide, side).length > 0;
+  const pendingRecon = stateForSide.augment?.pendingRecon[side];
+  if (pendingRecon) {
+    return availableReconTargets(stateForSide, side, pendingRecon.augmentId).length > 0;
   }
   const ownPieces = stateForSide.pieces.filter(
     (piece) => piece.alive && piece.side === side && piece.type !== "flag" && piece.type !== "mine",
@@ -1464,6 +2068,44 @@ function stopClock(state: GameState) {
   if (state.clock) state.clock.turnStartedAt = null;
 }
 
+/**
+ * Counts one fully settled strategic position. Identical adjacent invocations
+ * are deliberately idempotent so request retries and GET settlement cannot
+ * manufacture repetitions.
+ */
+export function adjudicateThreefoldRepetition(state: GameState) {
+  if (!isThreefoldRepetitionActive(state)) return false;
+  const tracker = state.repetitionTracker;
+  if (
+    !isStructurallyValidRepetitionTracker(tracker) ||
+    tracker.currentOccurrences >= THREEFOLD_REPETITION_THRESHOLD ||
+    Object.values(tracker.counts).some(
+      (count) => count >= THREEFOLD_REPETITION_THRESHOLD,
+    )
+  ) {
+    throw new GameRuleError("INVALID_REPETITION_TRACKER");
+  }
+  const digest = strategicPositionDigest(state, tracker.salt);
+  if (digest === tracker.lastCountedDigest) {
+    tracker.currentOccurrences = tracker.counts[digest] ?? tracker.currentOccurrences;
+    return false;
+  }
+  const occurrences = (tracker.counts[digest] ?? 0) + 1;
+  tracker.counts[digest] = occurrences;
+  tracker.lastCountedDigest = digest;
+  tracker.currentOccurrences = occurrences;
+  if (occurrences < THREEFOLD_REPETITION_THRESHOLD) return false;
+
+  state.phase = "finished";
+  state.winner = null;
+  state.finishReason = "draw";
+  state.drawReason = "threefold_repetition";
+  if (state.augment) state.augment.draftDeadlineAt = null;
+  stopClock(state);
+  addEvent(state, { actor: state.turn, result: "draw_repetition" });
+  return true;
+}
+
 function commitRunningClock(state: GameState, nowMs: number) {
   if (!state.clock || state.phase !== "playing" || state.clock.turnStartedAt === null) return;
   state.clock.remainingMs[state.turn] = clockRemainingAt(state, state.turn, nowMs);
@@ -1503,6 +2145,9 @@ function projectClock(state: GameState, nowMs: number): PublicClock | null {
     ...(state.clock.incrementThresholdMs
       ? { incrementThresholdMs: state.clock.incrementThresholdMs }
       : {}),
+    ...(state.clock.incrementCapMs !== undefined
+      ? { incrementCapMs: state.clock.incrementCapMs }
+      : {}),
   };
 }
 
@@ -1533,6 +2178,7 @@ function cloneReplayArchive(replay: ReplayArchive): ReplayArchive {
       ...move,
       from: { ...move.from },
       to: { ...move.to },
+      augmentIds: move.augmentIds ? [...move.augmentIds] : undefined,
       secondaryFrom: move.secondaryFrom ? { ...move.secondaryFrom } : undefined,
       secondaryTo: move.secondaryTo ? { ...move.secondaryTo } : undefined,
     })),
@@ -1563,6 +2209,7 @@ export function buildReplayFrames(replay: ReplayArchive | null): ReplayFrame[] {
       ...recordedMove,
       from: { ...recordedMove.from },
       to: { ...recordedMove.to },
+      augmentIds: recordedMove.augmentIds ? [...recordedMove.augmentIds] : undefined,
       secondaryFrom: recordedMove.secondaryFrom ? { ...recordedMove.secondaryFrom } : undefined,
       secondaryTo: recordedMove.secondaryTo ? { ...recordedMove.secondaryTo } : undefined,
     };
@@ -1595,7 +2242,7 @@ export function buildReplayFrames(replay: ReplayArchive | null): ReplayFrame[] {
       attacker.row = move.to.row;
       attacker.col = move.to.col;
     } else if (move.result === "defender_survives") {
-      if (move.augmentId !== "spade-tactical-retreat") attacker.alive = false;
+      if (!hasAttackerRetreatAugment(move)) attacker.alive = false;
     } else if (move.result === "both_removed") {
       attacker.alive = false;
       if (defender) defender.alive = false;
@@ -1621,23 +2268,139 @@ function revealFlagWhenCommanderFalls(state: GameState, piece: Piece | undefined
   if (piece?.type === "commander" && !piece.alive) state.revealedFlags[piece.side] = true;
 }
 
-function randomAliveEnemyInFront(state: GameState, owner: Side) {
-  const enemy = otherSide(owner);
-  const rows = enemy === "black" ? [6, 7] : [4, 5];
-  const candidates = state.pieces.filter(
-    (piece) => piece.alive && piece.side === enemy && rows.includes(piece.row),
-  );
-  return candidates.length ? candidates[randomIndex(candidates.length)] : null;
+interface PublicReplayTrackerPiece extends Position {
+  id: string;
+  side: Side;
+  alive: boolean;
 }
 
-function availableReconTargets(state: GameState, owner: Side) {
-  const augment = requireAugmentState(state);
+/**
+ * Reconstructs action-piece IDs from replay geometry only. Piece types are
+ * deliberately discarded before reconstruction, so hidden-rank permutations
+ * cannot change the result. Partial legacy replays honestly cover only moves
+ * recorded after their baseline.
+ */
+export function movedPieceIdsFromReplay(replay: ReplayArchive | null): string[] {
+  if (!replay) return [];
+  const pieces: PublicReplayTrackerPiece[] = replay.initialPieces.map(
+    ({ id, side, row, col, alive }) => ({ id, side, row, col, alive }),
+  );
+  const moved = new Set<string>();
+
+  for (const move of replay.moves) {
+    if (move.kind === "exchange" && move.secondaryFrom && move.secondaryTo) {
+      const first = pieces.find(
+        (piece) => piece.alive && piece.side === move.actor && samePosition(piece, move.from),
+      );
+      const second = pieces.find(
+        (piece) =>
+          piece.alive && piece.side === move.actor && samePosition(piece, move.secondaryFrom!),
+      );
+      if (!first || !second) break;
+      moved.add(first.id);
+      moved.add(second.id);
+      [first.row, second.row] = [second.row, first.row];
+      [first.col, second.col] = [second.col, first.col];
+      continue;
+    }
+
+    const attacker = pieces.find(
+      (piece) => piece.alive && piece.side === move.actor && samePosition(piece, move.from),
+    );
+    const defender = pieces.find(
+      (piece) => piece.alive && piece.side !== move.actor && samePosition(piece, move.to),
+    );
+    if (!attacker) break;
+    moved.add(attacker.id);
+
+    if (move.result === "move") {
+      attacker.row = move.to.row;
+      attacker.col = move.to.col;
+    } else if (move.result === "attacker_survives") {
+      if (defender) defender.alive = false;
+      attacker.row = move.to.row;
+      attacker.col = move.to.col;
+    } else if (move.result === "defender_survives") {
+      if (!hasAttackerRetreatAugment(move)) attacker.alive = false;
+    } else if (move.result === "both_removed") {
+      attacker.alive = false;
+      if (defender) defender.alive = false;
+    } else {
+      // Capturing the flag terminates the game, so the attacker's post-capture
+      // survival is irrelevant to all later action-ID reconstruction.
+      if (defender) defender.alive = false;
+      attacker.row = move.to.row;
+      attacker.col = move.to.col;
+    }
+  }
+  return [...moved].sort();
+}
+
+function publicMovedPieceIds(state: GameState) {
+  return [
+    ...new Set([
+      ...(Array.isArray(state.movedPieceIds) ? state.movedPieceIds : []),
+      ...movedPieceIdsFromReplay(state.replay),
+    ]),
+  ].sort();
+}
+
+function recordMovedPieceIds(state: GameState, ids: readonly string[]) {
+  state.movedPieceIds = [...new Set([...(state.movedPieceIds ?? []), ...ids])].sort();
+}
+
+function isReconTargetEligible(
+  state: GameState,
+  owner: Side,
+  augmentId: AugmentId,
+  piece: Piece,
+) {
+  if (!piece.alive || piece.side === owner) return false;
+  const legacy = state.augment?.draft.catalogVersion === LEGACY_AUGMENT_CATALOG_VERSION;
+  if (legacy && augmentId === "club-frontline-scout") return true;
+
   const known = new Set([
-    ...augment.permanentReveals[owner],
-    ...augment.temporaryReveals[owner],
+    ...(state.augment?.permanentReveals[owner] ?? []),
+    ...(state.augment?.temporaryReveals[owner] ?? []),
   ]);
+  if (known.has(piece.id)) return false;
+  if (!isEnemyIdentityPublic(state, piece)) return true;
+  return legacy && augmentId === "heart-targeted-recon";
+}
+
+function randomAliveEnemiesInFront(
+  state: GameState,
+  owner: Side,
+  augmentId: AugmentId,
+  rowsFromFront: number,
+  count: number,
+) {
+  const enemy = otherSide(owner);
+  const rows = Array.from(
+    { length: rowsFromFront },
+    (_, index) => enemy === "black" ? 6 + index : 5 - index,
+  );
+  const candidates = state.pieces.filter(
+    (piece) =>
+      rows.includes(piece.row) &&
+      piece.side === enemy &&
+      isReconTargetEligible(state, owner, augmentId, piece),
+  );
+  const selected: Piece[] = [];
+  while (selected.length < count && candidates.length) {
+    selected.push(candidates.splice(randomIndex(candidates.length), 1)[0]);
+  }
+  return selected;
+}
+
+function isEnemyIdentityPublic(state: GameState, piece: Piece) {
+  return piece.type === "flag" && state.revealedFlags[piece.side];
+}
+
+function availableReconTargets(state: GameState, owner: Side, augmentId: AugmentId) {
+  requireAugmentState(state);
   return state.pieces.filter(
-    (piece) => piece.alive && piece.side !== owner && !known.has(piece.id),
+    (piece) => isReconTargetEligible(state, owner, augmentId, piece),
   );
 }
 
@@ -1651,13 +2414,24 @@ function applyAugmentRevealTriggers(state: GameState, roundNumber: 1 | 2) {
     const definition = getAugmentDefinition(augmentId);
     const effect = definition.effect;
     if (effect.kind === "reconnaissance" && effect.mode === "choose_enemy") {
-      const remaining = Math.min(effect.count, availableReconTargets(state, side).length);
+      const remaining = Math.min(
+        effect.count,
+        availableReconTargets(state, side, augmentId).length,
+      );
       if (remaining > 0) augment.pendingRecon[side] = { augmentId, remaining };
       else markAugmentUse(state, side, augmentId);
     } else if (effect.kind === "reconnaissance" && effect.mode === "frontline_random") {
-      const target = randomAliveEnemyInFront(state, side);
-      if (target && !augment.temporaryReveals[side].includes(target.id)) {
-        augment.temporaryReveals[side].push(target.id);
+      const targets = randomAliveEnemiesInFront(
+        state,
+        side,
+        augmentId,
+        effect.rowsFromFront,
+        effect.count,
+      );
+      for (const target of targets) {
+        if (!augment.temporaryReveals[side].includes(target.id)) {
+          augment.temporaryReveals[side].push(target.id);
+        }
       }
       markAugmentUse(state, side, augmentId);
     } else if (effect.kind === "clock" && effect.mode === "flat_bonus") {
@@ -1693,10 +2467,11 @@ function applyPostMoveClockBonuses(state: GameState, side: Side) {
     state.clock.incrementThresholdMs &&
     state.clock.remainingMs[side] <= state.clock.incrementThresholdMs
   ) {
-    state.clock.remainingMs[side] = Math.min(
-      state.clock.incrementThresholdMs,
-      state.clock.remainingMs[side] + state.clock.incrementMs,
-    );
+    const incremented = state.clock.remainingMs[side] + state.clock.incrementMs;
+    state.clock.remainingMs[side] =
+      typeof state.clock.incrementCapMs === "number"
+        ? Math.min(state.clock.incrementCapMs, incremented)
+        : incremented;
   }
   for (const augmentId of state.augment?.draft.loadouts[side] ?? []) {
     const effect = getAugmentDefinition(augmentId).effect;
@@ -1745,6 +2520,7 @@ function finalizeSecondAugmentDraft(state: GameState, nowMs: number) {
   state.phase = "playing";
   applyAugmentRevealTriggers(state, 2);
   resolveTurnAfterSecondDraft(state);
+  if (state.phase === "playing") adjudicateThreefoldRepetition(state);
   if (state.phase === "playing" && state.clock) state.clock.turnStartedAt = nowMs;
   return true;
 }
@@ -1803,9 +2579,11 @@ function applyMove(
     : getMoveViolation(state, side, from, to);
   if (violation) throw new GameRuleError(violation);
   const replay = ensureReplayArchive(state);
+  const firstNewAugmentEventId = (state.events.at(-1)?.id ?? 0) + 1;
   const attacker = alivePieceAt(state, from)!;
   const defender = alivePieceAt(state, to);
   const movingPieceId = attacker.id;
+  recordMovedPieceIds(state, [movingPieceId]);
   const attackedHeadquarters = Boolean(defender && isHeadquarters(to));
   let result: BattleResult = "move";
   let resolutionAugmentId: AugmentId | undefined;
@@ -1814,6 +2592,16 @@ function applyMove(
     attacker.row = to.row;
     attacker.col = to.col;
   } else {
+    const bombDisposalId =
+      attacker.type === "engineer" && defender.type === "bomb"
+        ? findAvailableAugment(
+            state,
+            side,
+            (definition) =>
+              definition.effect.kind === "combat" &&
+              definition.effect.mode === "engineer_defuses_bomb",
+          )
+        : undefined;
     if (defender.type === "flag") {
       defender.alive = false;
       if (attacker.type === "bomb") attacker.alive = false;
@@ -1826,17 +2614,13 @@ function applyMove(
       state.finishReason = "flag";
       state.revealedFlags[defender.side] = true;
       result = "flag_captured";
-    } else if (
-      attacker.type === "engineer" &&
-      defender.type === "bomb" &&
-      augmentAvailable(state, side, "heart-bomb-disposal")
-    ) {
+    } else if (bombDisposalId) {
       defender.alive = false;
       attacker.row = to.row;
       attacker.col = to.col;
       result = "attacker_survives";
-      resolutionAugmentId = "heart-bomb-disposal";
-      markAugmentUse(state, side, "heart-bomb-disposal");
+      resolutionAugmentId = bombDisposalId;
+      markAugmentUse(state, side, bombDisposalId);
     } else if (attacker.type === "bomb" || defender.type === "bomb") {
       attacker.alive = false;
       defender.alive = false;
@@ -1869,39 +2653,59 @@ function applyMove(
       }
     }
 
-    if (
-      !attacker.alive &&
-      defender.alive &&
-      augmentAvailable(state, side, "spade-tactical-retreat")
-    ) {
+    const retreatId =
+      !attacker.alive && defender.alive
+        ? findAvailableAugment(state, side, (definition) => {
+            const effect = definition.effect;
+            return effect.kind === "combat" &&
+              effect.mode === "attacker_retreat" &&
+              (effect.eligible !== "junior_attacker" || isJuniorMobilePiece(attacker));
+          })
+        : undefined;
+    if (retreatId) {
       attacker.alive = true;
       result = "defender_survives";
-      resolutionAugmentId = "spade-tactical-retreat";
-      markAugmentUse(state, side, "spade-tactical-retreat");
+      resolutionAugmentId = retreatId;
+      markAugmentUse(state, side, retreatId);
     }
+    const attackerLastStandId = findAvailableAugment(
+      state,
+      side,
+      (definition) =>
+        definition.effect.kind === "combat" &&
+        definition.effect.mode === "engineer_last_stand",
+    );
     if (
       attacker.type === "engineer" &&
       !attacker.alive &&
       defender.alive &&
       defender.type !== "mine" &&
-      augmentAvailable(state, side, "diamond-engineer-screen")
+      attackerLastStandId
     ) {
       defender.alive = false;
       result = "both_removed";
-      resolutionAugmentId = "diamond-engineer-screen";
-      markAugmentUse(state, side, "diamond-engineer-screen");
+      resolutionAugmentId = attackerLastStandId;
+      markAugmentUse(state, side, attackerLastStandId);
     } else if (
       defender.type === "engineer" &&
       !defender.alive &&
-      attacker.alive &&
-      augmentAvailable(state, defender.side, "diamond-engineer-screen")
+      attacker.alive
     ) {
-      attacker.alive = false;
-      attacker.row = from.row;
-      attacker.col = from.col;
-      result = "both_removed";
-      resolutionAugmentId = "diamond-engineer-screen";
-      markAugmentUse(state, defender.side, "diamond-engineer-screen");
+      const defenderLastStandId = findAvailableAugment(
+        state,
+        defender.side,
+        (definition) =>
+          definition.effect.kind === "combat" &&
+          definition.effect.mode === "engineer_last_stand",
+      );
+      if (defenderLastStandId) {
+        attacker.alive = false;
+        attacker.row = from.row;
+        attacker.col = from.col;
+        result = "both_removed";
+        resolutionAugmentId = defenderLastStandId;
+        markAugmentUse(state, defender.side, defenderLastStandId);
+      }
     }
     revealFlagWhenCommanderFalls(state, attacker);
     revealFlagWhenCommanderFalls(state, defender);
@@ -1909,14 +2713,15 @@ function applyMove(
   }
 
   state.moveNumber += 1;
-  replay.moves.push({
+  const replayMove: ReplayMove = {
     moveNumber: state.moveNumber,
     actor: side,
     from: { ...from },
     to: { ...to },
     result,
     ...(augmentId ?? resolutionAugmentId ? { augmentId: augmentId ?? resolutionAugmentId } : {}),
-  });
+  };
+  replay.moves.push(replayMove);
   if (augmentId) markAugmentUse(state, side, augmentId);
   if (state.augment) {
     for (const revealSide of ["black", "white"] as const) {
@@ -1931,14 +2736,43 @@ function applyMove(
   let grantedExtra = false;
   if (!augmentId && !wasExtraMove && state.phase !== "finished") {
     const captured = result === "attacker_survives";
-    const candidate = captured ? "spade-relentless-assault" : result === "move" ? "heart-initiative" : null;
-    if (candidate && augmentAvailable(state, side, candidate)) {
+    const triggerMode = captured
+      ? "after_capture"
+      : result === "move"
+        ? "after_quiet_move"
+        : null;
+    const candidate = triggerMode
+      ? findAvailableAugment(
+          state,
+          side,
+          (definition) =>
+            definition.effect.kind === "extra_turn" &&
+            definition.effect.mode === triggerMode,
+        )
+      : undefined;
+    if (candidate) {
+      const candidateEffect = getAugmentDefinition(candidate).effect;
+      if (candidateEffect.kind !== "extra_turn") {
+        throw new GameRuleError("AUGMENT_ACTION_MISMATCH");
+      }
       markAugmentUse(state, side, candidate);
-      state.augment!.extraMove[side] = { augmentId: candidate, excludedPieceId: movingPieceId };
+      state.augment!.extraMove[side] = {
+        augmentId: candidate,
+        excludedPieceId: candidateEffect.requireDifferentPiece ? movingPieceId : null,
+      };
       grantedExtra = true;
     }
   }
-  addEvent(state, { actor: side, from, to, result, augmentId: augmentId ?? resolutionAugmentId });
+  const resolvedAugmentIds = augmentsUsedSince(state, firstNewAugmentEventId, augmentId);
+  if (resolvedAugmentIds.length) replayMove.augmentIds = [...resolvedAugmentIds];
+  addEvent(state, {
+    actor: side,
+    from,
+    to,
+    result,
+    augmentId: augmentId ?? resolutionAugmentId,
+    ...(resolvedAugmentIds.length ? { augmentIds: [...resolvedAugmentIds] } : {}),
+  });
   if (state.phase === "finished") return;
 
   const nextSide = otherSide(side);
@@ -1961,6 +2795,7 @@ function applyMove(
       state.finishReason = "no_moves";
     }
   }
+  if (state.phase === "playing") adjudicateThreefoldRepetition(state);
 }
 
 export function applyPlayerAction(
@@ -1974,7 +2809,7 @@ export function applyPlayerAction(
 
   if (state.phase === "playing") {
     if (settleExpiredClock(state, nowMs)) return state;
-    if (["move", "augment_move", "augment_exchange", "resign"].includes(action.type)) {
+    if (["move", "augment_move", "augment_exchange", "pass_extra_move", "resign"].includes(action.type)) {
       commitRunningClock(state, nowMs);
     }
   }
@@ -2115,14 +2950,16 @@ export function applyPlayerAction(
     }
     const target = alivePieceAt(state, action.target);
     if (!target || target.side === side) throw new GameRuleError("RECON_TARGET_INVALID");
-    if (
-      augment.permanentReveals[side].includes(target.id) ||
-      augment.temporaryReveals[side].includes(target.id)
-    ) {
+    if (!isReconTargetEligible(state, side, action.augmentId, target)) {
       throw new GameRuleError("RECON_TARGET_ALREADY_KNOWN");
     }
-    augment.permanentReveals[side].push(target.id);
-    pending.remaining = Math.min(pending.remaining - 1, availableReconTargets(state, side).length);
+    if (!augment.permanentReveals[side].includes(target.id)) {
+      augment.permanentReveals[side].push(target.id);
+    }
+    pending.remaining = Math.min(
+      pending.remaining - 1,
+      availableReconTargets(state, side, action.augmentId).length,
+    );
     if (pending.remaining <= 0) {
       augment.pendingRecon[side] = null;
       markAugmentUse(state, side, action.augmentId);
@@ -2132,6 +2969,36 @@ export function applyPlayerAction(
         state.finishReason = "no_moves";
         stopClock(state);
       }
+      if (state.phase === "playing") adjudicateThreefoldRepetition(state);
+    }
+    return state;
+  }
+
+  if (action.type === "pass_extra_move") {
+    if (state.phase !== "playing") throw new GameRuleError("GAME_NOT_STARTED");
+    const augment = requireAugmentState(state);
+    if (state.turn !== side) throw new GameRuleError("NOT_YOUR_TURN");
+    const extraMove = augment.extraMove[side];
+    if (!extraMove) throw new GameRuleError("EXTRA_MOVE_NOT_PENDING");
+
+    augment.extraMove[side] = null;
+    addEvent(state, {
+      actor: side,
+      result: "extra_move_passed",
+      augmentId: extraMove.augmentId,
+    });
+    state.turn = otherSide(side);
+    maybeApplyLowTimeRescue(state, state.turn);
+    if (!hasAnyLegalAction(state, state.turn)) {
+      state.phase = "finished";
+      state.winner = side;
+      state.finishReason = "no_moves";
+      stopClock(state);
+    } else {
+      adjudicateThreefoldRepetition(state);
+    }
+    if (state.phase === "playing" && state.clock) {
+      state.clock.turnStartedAt = nowMs;
     }
     return state;
   }
@@ -2146,12 +3013,14 @@ export function applyPlayerAction(
     );
     if (violation) throw new GameRuleError(violation);
     const replay = ensureReplayArchive(state);
+    const firstNewAugmentEventId = (state.events.at(-1)?.id ?? 0) + 1;
     const first = alivePieceAt(state, action.from)!;
     const second = alivePieceAt(state, action.to)!;
+    recordMovedPieceIds(state, [first.id, second.id]);
     [first.row, second.row] = [second.row, first.row];
     [first.col, second.col] = [second.col, first.col];
     state.moveNumber += 1;
-    replay.moves.push({
+    const replayMove: ReplayMove = {
       moveNumber: state.moveNumber,
       actor: side,
       from: { ...action.from },
@@ -2161,7 +3030,8 @@ export function applyPlayerAction(
       result: "move",
       kind: "exchange",
       augmentId: action.augmentId,
-    });
+    };
+    replay.moves.push(replayMove);
     markAugmentUse(state, side, action.augmentId, { from: action.from, to: action.to });
     if (state.augment) {
       for (const revealSide of ["black", "white"] as const) {
@@ -2170,6 +3040,23 @@ export function applyPlayerAction(
       }
     }
     applyPostMoveClockBonuses(state, side);
+    const resolvedAugmentIds = augmentsUsedSince(
+      state,
+      firstNewAugmentEventId,
+      action.augmentId,
+    );
+    replayMove.augmentIds = [...resolvedAugmentIds];
+    addEvent(state, {
+      actor: side,
+      result: "move",
+      kind: "exchange",
+      from: { ...action.from },
+      to: { ...action.to },
+      secondaryFrom: { ...action.to },
+      secondaryTo: { ...action.from },
+      augmentId: action.augmentId,
+      augmentIds: [...resolvedAugmentIds],
+    });
     state.turn = otherSide(side);
     if (!beginSecondDraftIfDue(state, nowMs)) {
       maybeApplyLowTimeRescue(state, state.turn);
@@ -2178,6 +3065,7 @@ export function applyPlayerAction(
         state.winner = side;
         state.finishReason = "no_moves";
       }
+      if (state.phase === "playing") adjudicateThreefoldRepetition(state);
     }
     if (state.phase === "playing" && state.clock) state.clock.turnStartedAt = nowMs;
     else stopClock(state);
@@ -2241,6 +3129,7 @@ export function projectGame(
     turn: state.turn,
     winner: state.winner,
     finishReason: state.finishReason,
+    drawReason: state.drawReason ?? null,
     revealedFlags: { ...state.revealedFlags },
     pieces: state.pieces
       .map((piece) => {
@@ -2278,9 +3167,17 @@ export function projectGame(
           first.col - second.col ||
           first.id.localeCompare(second.id),
       ),
-    events: state.events.map((event) => ({ ...event })),
+    events: state.events.map((event) => ({
+      ...event,
+      ...(event.from ? { from: { ...event.from } } : {}),
+      ...(event.to ? { to: { ...event.to } } : {}),
+      ...(event.secondaryFrom ? { secondaryFrom: { ...event.secondaryFrom } } : {}),
+      ...(event.secondaryTo ? { secondaryTo: { ...event.secondaryTo } } : {}),
+      ...(event.augmentIds ? { augmentIds: [...event.augmentIds] } : {}),
+    })),
     moveNumber: state.moveNumber,
     replay: canSeeReplay && availableReplay ? cloneReplayArchive(availableReplay) : null,
+    movedPieceIds: publicMovedPieceIds(state),
     clock: projectClock(state, nowMs),
     mode: gameModeForState(state),
     augment:
@@ -2305,9 +3202,37 @@ export function projectGame(
                 ]),
               ),
             },
-            pendingRecon: knowledgeSide ? state.augment.pendingRecon[knowledgeSide] : null,
+            ...(knowledgeSide
+              ? {
+                  permanentRevealIds: [
+                    ...state.augment.permanentReveals[knowledgeSide],
+                  ],
+                  temporaryRevealIds: [
+                    ...state.augment.temporaryReveals[knowledgeSide],
+                  ],
+                }
+              : {}),
+            pendingRecon:
+              knowledgeSide && state.augment.pendingRecon[knowledgeSide]
+                ? {
+                    ...state.augment.pendingRecon[knowledgeSide],
+                    legalTargets: availableReconTargets(
+                      state,
+                      knowledgeSide,
+                      state.augment.pendingRecon[knowledgeSide]!.augmentId,
+                    ).map(({ row, col }) => ({ row, col })),
+                  }
+                : null,
             extraMove: knowledgeSide ? state.augment.extraMove[knowledgeSide] : null,
             draftDeadlineAt: state.augment.draftDeadlineAt,
+          }
+        : null,
+    repetition:
+      state.rulesVersion === AUGMENT_RULES_VERSION
+        ? {
+            threshold: THREEFOLD_REPETITION_THRESHOLD,
+            currentOccurrences: state.repetitionTracker?.currentOccurrences ?? 0,
+            active: isThreefoldRepetitionActive(state),
           }
         : null,
   };

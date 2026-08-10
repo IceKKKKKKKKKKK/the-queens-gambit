@@ -1,4 +1,8 @@
-export const AUGMENT_CATALOG_VERSION = "junqi-augments-v1" as const;
+export const LEGACY_AUGMENT_CATALOG_VERSION = "junqi-augments-v1" as const;
+export const AUGMENT_CATALOG_VERSION = "junqi-augments-v2" as const;
+export type AugmentCatalogVersion =
+  | typeof LEGACY_AUGMENT_CATALOG_VERSION
+  | typeof AUGMENT_CATALOG_VERSION;
 export const SECOND_AUGMENT_MOVE_NUMBER = 10 as const;
 
 export const AUGMENT_SUITS = ["spades", "hearts", "clubs", "diamonds"] as const;
@@ -28,25 +32,25 @@ export type MovementAugmentEffect =
   | {
       kind: "movement";
       mode: "engineer_rail";
-      eligible: "any_mobile_piece";
-      destination: "empty_or_enemy";
+      eligible: "any_mobile_piece" | "junior_mobile_piece";
+      destination: "empty" | "empty_or_enemy";
       consumesTurn: true;
     }
   | {
       kind: "movement";
       mode: "rail_turn";
-      eligible: "non_engineer_mobile_piece";
-      maxTurns: 1;
-      destination: "empty";
+      eligible: "non_engineer_mobile_piece" | "junior_mobile_piece";
+      maxTurns: 1 | 2;
+      destination: "empty" | "empty_or_enemy";
       consumesTurn: true;
     }
   | {
       kind: "movement";
       mode: "road_dash";
-      eligible: "any_mobile_piece";
-      exactEdges: 2;
+      eligible: "any_mobile_piece" | "junior_mobile_piece";
+      exactEdges: 2 | 3;
       intermediate: "empty";
-      destination: "empty";
+      destination: "empty" | "empty_or_enemy";
       consumesTurn: true;
     }
   | {
@@ -62,8 +66,8 @@ export type MovementAugmentEffect =
   | {
       kind: "movement";
       mode: "camp_transfer";
-      eligible: "mobile_piece_in_camp";
-      destination: "empty_friendly_half_camp";
+      eligible: "mobile_piece_in_camp" | "junior_piece_in_camp";
+      destination: "empty_friendly_half_camp" | "empty_any_camp";
       consumesTurn: true;
     };
 
@@ -71,7 +75,7 @@ export type ExtraTurnAugmentEffect = {
   kind: "extra_turn";
   mode: "after_capture" | "after_quiet_move";
   maxExtraMoves: 1;
-  requireDifferentPiece: true;
+  requireDifferentPiece: boolean;
   normalMovesOnly: true;
   canChain: false;
 };
@@ -83,6 +87,7 @@ export type CombatAugmentEffect =
       trigger: "attacker_would_lose_while_defender_survives";
       attackerOutcome: "return_to_origin";
       defenderOutcome: "unchanged";
+      eligible?: "any_attacker" | "junior_attacker";
     }
   | {
       kind: "combat";
@@ -103,15 +108,15 @@ export type ReconnaissanceAugmentEffect =
   | {
       kind: "reconnaissance";
       mode: "choose_enemy";
-      count: 1 | 2;
+      count: 1 | 2 | 3;
       reveal: "permanent";
       trigger: "after_round_reveal";
     }
   | {
       kind: "reconnaissance";
       mode: "frontline_random";
-      count: 1;
-      rowsFromFront: 2;
+      count: 1 | 2;
+      rowsFromFront: 1 | 2 | 3;
       selection: "server_random";
       reveal: "until_piece_moves";
       trigger: "after_round_reveal";
@@ -158,13 +163,13 @@ export type SetupAugmentEffect =
   | {
       kind: "setup";
       mode: "forward_bomb";
-      allowance: 1;
+      allowance: 1 | 2;
       destination: "front_setup_row";
     }
   | {
       kind: "setup";
       mode: "deep_mine";
-      allowance: 1;
+      allowance: 1 | 2;
       destination: "third_row_from_home";
     };
 
@@ -185,21 +190,51 @@ export const AUGMENT_IDS = [
   "spade-tactical-retreat",
   "spade-total-intelligence",
   "spade-strategic-reserve",
+  "spade-rail-dominion",
+  "spade-serpentine-offensive",
+  "spade-deep-strike",
+  "spade-global-redeployment",
+  "spade-command-chain",
+  "spade-counteroffensive",
+  "spade-shadow-retreat",
+  "spade-supreme-recon",
   "heart-rail-turn",
   "heart-initiative",
   "heart-remote-exchange",
   "heart-bomb-disposal",
   "heart-targeted-recon",
+  "heart-mobile-rail",
+  "heart-double-turn",
+  "heart-breakthrough",
+  "heart-camp-network",
+  "heart-victory-momentum",
+  "heart-orderly-withdrawal",
+  "heart-wide-recon",
+  "heart-reserve-clock",
   "club-forced-march",
   "club-line-hop",
   "club-field-exchange",
   "club-steady-tempo",
   "club-frontline-scout",
+  "club-rail-passage",
+  "club-rail-switch",
+  "club-road-patrol",
+  "club-camp-relay",
+  "club-local-recon",
+  "club-pocket-time",
+  "club-engineer-oath",
   "diamond-camp-transfer",
   "diamond-forward-bomb",
   "diamond-deep-mine",
   "diamond-engineer-screen",
   "diamond-time-cache",
+  "diamond-road-step",
+  "diamond-camp-relay",
+  "diamond-front-watch",
+  "diamond-pocket-watch",
+  "diamond-drill",
+  "diamond-forward-pair",
+  "diamond-deep-pair",
 ] as const;
 
 export type AugmentId = (typeof AUGMENT_IDS)[number];
@@ -310,6 +345,156 @@ export const AUGMENT_CATALOG = [
     },
   },
   {
+    id: "spade-rail-dominion",
+    name: "铁路统御",
+    shortName: "铁路统御",
+    suit: "spades",
+    suitSymbol: "♠",
+    description: "三次：令任意可移动棋子按工兵铁路规则移动，并可攻击终点敌子。",
+    timing: "你的行动阶段",
+    activation: "active",
+    charges: 3,
+    effect: {
+      kind: "movement",
+      mode: "engineer_rail",
+      eligible: "any_mobile_piece",
+      destination: "empty_or_enemy",
+      consumesTurn: true,
+    },
+  },
+  {
+    id: "spade-serpentine-offensive",
+    name: "穿云迂回",
+    shortName: "穿云迂回",
+    suit: "spades",
+    suitSymbol: "♠",
+    description: "两次：一枚非工兵可沿连续铁路转弯至多两次，并可攻击终点敌子。",
+    timing: "你的行动阶段",
+    activation: "active",
+    charges: 2,
+    effect: {
+      kind: "movement",
+      mode: "rail_turn",
+      eligible: "non_engineer_mobile_piece",
+      maxTurns: 2,
+      destination: "empty_or_enemy",
+      consumesTurn: true,
+    },
+  },
+  {
+    id: "spade-deep-strike",
+    name: "长驱突击",
+    shortName: "长驱突击",
+    suit: "spades",
+    suitSymbol: "♠",
+    description: "一次：沿相连公路前进恰好三段，中间必须为空，并可攻击终点敌子。",
+    timing: "你的行动阶段",
+    activation: "active",
+    charges: 1,
+    effect: {
+      kind: "movement",
+      mode: "road_dash",
+      eligible: "any_mobile_piece",
+      exactEdges: 3,
+      intermediate: "empty",
+      destination: "empty_or_enemy",
+      consumesTurn: true,
+    },
+  },
+  {
+    id: "spade-global-redeployment",
+    name: "全域转进",
+    shortName: "全域转进",
+    suit: "spades",
+    suitSymbol: "♠",
+    description: "三次：将行营中的一枚可移动棋子调至棋盘上任意空行营。",
+    timing: "你的行动阶段",
+    activation: "active",
+    charges: 3,
+    effect: {
+      kind: "movement",
+      mode: "camp_transfer",
+      eligible: "mobile_piece_in_camp",
+      destination: "empty_any_camp",
+      consumesTurn: true,
+    },
+  },
+  {
+    id: "spade-command-chain",
+    name: "连环军令",
+    shortName: "连环军令",
+    suit: "spades",
+    suitSymbol: "♠",
+    description: "三次：完成不发生战斗的普通移动后，用另一枚棋子追加一次普通行动。",
+    timing: "你的非战斗移动后",
+    activation: "automatic",
+    charges: 3,
+    effect: {
+      kind: "extra_turn",
+      mode: "after_quiet_move",
+      maxExtraMoves: 1,
+      requireDifferentPiece: true,
+      normalMovesOnly: true,
+      canChain: false,
+    },
+  },
+  {
+    id: "spade-counteroffensive",
+    name: "反攻号角",
+    shortName: "反攻号角",
+    suit: "spades",
+    suitSymbol: "♠",
+    description: "三次：完成一次吃子后，用另一枚棋子追加一次普通行动。",
+    timing: "你的吃子结算后",
+    activation: "automatic",
+    charges: 3,
+    effect: {
+      kind: "extra_turn",
+      mode: "after_capture",
+      maxExtraMoves: 1,
+      requireDifferentPiece: true,
+      normalMovesOnly: true,
+      canChain: false,
+    },
+  },
+  {
+    id: "spade-shadow-retreat",
+    name: "影遁",
+    shortName: "影遁",
+    suit: "spades",
+    suitSymbol: "♠",
+    description: "三次：进攻方本应落败且守方存活时，进攻方退回起点。",
+    timing: "你的进攻战斗结算时",
+    activation: "automatic",
+    charges: 3,
+    effect: {
+      kind: "combat",
+      mode: "attacker_retreat",
+      trigger: "attacker_would_lose_while_defender_survives",
+      attackerOutcome: "return_to_origin",
+      defenderOutcome: "unchanged",
+      eligible: "any_attacker",
+    },
+  },
+  {
+    id: "spade-supreme-recon",
+    name: "天网侦察",
+    shortName: "天网侦察",
+    suit: "spades",
+    suitSymbol: "♠",
+    description: "本轮强化公开后，选择三枚敌子，永久获知其身份。",
+    timing: "本轮强化公开后",
+    activation: "active",
+    charges: 1,
+    effect: {
+      kind: "reconnaissance",
+      mode: "choose_enemy",
+      count: 3,
+      reveal: "permanent",
+      trigger: "after_round_reveal",
+    },
+  },
+  {
     id: "heart-rail-turn",
     name: "铁路转向",
     shortName: "铁路转向",
@@ -398,6 +583,157 @@ export const AUGMENT_CATALOG = [
       count: 1,
       reveal: "permanent",
       trigger: "after_round_reveal",
+    },
+  },
+  {
+    id: "heart-mobile-rail",
+    name: "机动铁军",
+    shortName: "机动铁军",
+    suit: "hearts",
+    suitSymbol: "♥",
+    description: "两次：令任意可移动棋子按工兵铁路规则移动，但终点必须为空。",
+    timing: "你的行动阶段",
+    activation: "active",
+    charges: 2,
+    effect: {
+      kind: "movement",
+      mode: "engineer_rail",
+      eligible: "any_mobile_piece",
+      destination: "empty",
+      consumesTurn: true,
+    },
+  },
+  {
+    id: "heart-double-turn",
+    name: "双向转轨",
+    shortName: "双向转轨",
+    suit: "hearts",
+    suitSymbol: "♥",
+    description: "一次：一枚非工兵可沿连续铁路转弯至多两次，终点必须为空。",
+    timing: "你的行动阶段",
+    activation: "active",
+    charges: 1,
+    effect: {
+      kind: "movement",
+      mode: "rail_turn",
+      eligible: "non_engineer_mobile_piece",
+      maxTurns: 2,
+      destination: "empty",
+      consumesTurn: true,
+    },
+  },
+  {
+    id: "heart-breakthrough",
+    name: "纵队突进",
+    shortName: "纵队突进",
+    suit: "hearts",
+    suitSymbol: "♥",
+    description: "一次：沿相连公路前进恰好三段，中间与终点必须为空。",
+    timing: "你的行动阶段",
+    activation: "active",
+    charges: 1,
+    effect: {
+      kind: "movement",
+      mode: "road_dash",
+      eligible: "any_mobile_piece",
+      exactEdges: 3,
+      intermediate: "empty",
+      destination: "empty",
+      consumesTurn: true,
+    },
+  },
+  {
+    id: "heart-camp-network",
+    name: "行营联络",
+    shortName: "行营联络",
+    suit: "hearts",
+    suitSymbol: "♥",
+    description: "一次：将行营中的一枚可移动棋子调至棋盘上任意空行营。",
+    timing: "你的行动阶段",
+    activation: "active",
+    charges: 1,
+    effect: {
+      kind: "movement",
+      mode: "camp_transfer",
+      eligible: "mobile_piece_in_camp",
+      destination: "empty_any_camp",
+      consumesTurn: true,
+    },
+  },
+  {
+    id: "heart-victory-momentum",
+    name: "胜势推进",
+    shortName: "胜势推进",
+    suit: "hearts",
+    suitSymbol: "♥",
+    description: "一次：完成一次吃子后，用同一枚或另一枚棋子追加一次普通行动。",
+    timing: "你的吃子结算后",
+    activation: "automatic",
+    charges: 1,
+    effect: {
+      kind: "extra_turn",
+      mode: "after_capture",
+      maxExtraMoves: 1,
+      requireDifferentPiece: false,
+      normalMovesOnly: true,
+      canChain: false,
+    },
+  },
+  {
+    id: "heart-orderly-withdrawal",
+    name: "有序撤退",
+    shortName: "有序撤退",
+    suit: "hearts",
+    suitSymbol: "♥",
+    description: "一次：连长、排长或工兵进攻落败且守方存活时，退回起点。",
+    timing: "低阶棋子的进攻战斗结算时",
+    activation: "automatic",
+    charges: 1,
+    effect: {
+      kind: "combat",
+      mode: "attacker_retreat",
+      trigger: "attacker_would_lose_while_defender_survives",
+      attackerOutcome: "return_to_origin",
+      defenderOutcome: "unchanged",
+      eligible: "junior_attacker",
+    },
+  },
+  {
+    id: "heart-wide-recon",
+    name: "扇区侦察",
+    shortName: "扇区侦察",
+    suit: "hearts",
+    suitSymbol: "♥",
+    description: "公开后随机侦察敌方前三排两枚棋子；各自首次移动后失去情报。",
+    timing: "本轮强化公开后",
+    activation: "automatic",
+    charges: 1,
+    effect: {
+      kind: "reconnaissance",
+      mode: "frontline_random",
+      count: 2,
+      rowsFromFront: 3,
+      selection: "server_random",
+      reveal: "until_piece_moves",
+      trigger: "after_round_reveal",
+    },
+  },
+  {
+    id: "heart-reserve-clock",
+    name: "后备时限",
+    shortName: "后备时限",
+    suit: "hearts",
+    suitSymbol: "♥",
+    description: "一次：你的回合开始且剩余不足60秒时，立即增加90秒。",
+    timing: "低时间回合开始时",
+    activation: "automatic",
+    charges: 1,
+    effect: {
+      kind: "clock",
+      mode: "low_time_rescue",
+      trigger: "start_of_turn_below_threshold",
+      thresholdMs: 60_000,
+      bonusMs: 90_000,
     },
   },
   {
@@ -498,6 +834,136 @@ export const AUGMENT_CATALOG = [
     },
   },
   {
+    id: "club-rail-passage",
+    name: "铁路通行",
+    shortName: "铁路通行",
+    suit: "clubs",
+    suitSymbol: "♣",
+    description: "一次：令任意可移动棋子按工兵铁路规则移动，终点必须为空。",
+    timing: "你的行动阶段",
+    activation: "active",
+    charges: 1,
+    effect: {
+      kind: "movement",
+      mode: "engineer_rail",
+      eligible: "any_mobile_piece",
+      destination: "empty",
+      consumesTurn: true,
+    },
+  },
+  {
+    id: "club-rail-switch",
+    name: "临时转轨",
+    shortName: "临时转轨",
+    suit: "clubs",
+    suitSymbol: "♣",
+    description: "一次：连长、排长或工兵可沿连续铁路转一次弯，终点必须为空。",
+    timing: "你的行动阶段",
+    activation: "active",
+    charges: 1,
+    effect: {
+      kind: "movement",
+      mode: "rail_turn",
+      eligible: "junior_mobile_piece",
+      maxTurns: 1,
+      destination: "empty",
+      consumesTurn: true,
+    },
+  },
+  {
+    id: "club-road-patrol",
+    name: "公路巡行",
+    shortName: "公路巡行",
+    suit: "clubs",
+    suitSymbol: "♣",
+    description: "两次：沿相连公路前进恰好两段，中间与终点必须为空。",
+    timing: "你的行动阶段",
+    activation: "active",
+    charges: 2,
+    effect: {
+      kind: "movement",
+      mode: "road_dash",
+      eligible: "any_mobile_piece",
+      exactEdges: 2,
+      intermediate: "empty",
+      destination: "empty",
+      consumesTurn: true,
+    },
+  },
+  {
+    id: "club-camp-relay",
+    name: "行营接力",
+    shortName: "行营接力",
+    suit: "clubs",
+    suitSymbol: "♣",
+    description: "两次：将行营中的一枚可移动棋子调至己方半场另一空行营。",
+    timing: "你的行动阶段",
+    activation: "active",
+    charges: 2,
+    effect: {
+      kind: "movement",
+      mode: "camp_transfer",
+      eligible: "mobile_piece_in_camp",
+      destination: "empty_friendly_half_camp",
+      consumesTurn: true,
+    },
+  },
+  {
+    id: "club-local-recon",
+    name: "阵前观察",
+    shortName: "阵前观察",
+    suit: "clubs",
+    suitSymbol: "♣",
+    description: "公开后随机侦察敌方前三排一枚棋子；该棋首次移动后失去情报。",
+    timing: "本轮强化公开后",
+    activation: "automatic",
+    charges: 1,
+    effect: {
+      kind: "reconnaissance",
+      mode: "frontline_random",
+      count: 1,
+      rowsFromFront: 3,
+      selection: "server_random",
+      reveal: "until_piece_moves",
+      trigger: "after_round_reveal",
+    },
+  },
+  {
+    id: "club-pocket-time",
+    name: "整备时间",
+    shortName: "整备时间",
+    suit: "clubs",
+    suitSymbol: "♣",
+    description: "本轮强化公开后，立即为你的棋钟增加45秒。",
+    timing: "本轮强化公开后",
+    activation: "automatic",
+    charges: 1,
+    effect: {
+      kind: "clock",
+      mode: "flat_bonus",
+      trigger: "after_round_reveal",
+      bonusMs: 45_000,
+    },
+  },
+  {
+    id: "club-engineer-oath",
+    name: "工兵誓约",
+    shortName: "工兵誓约",
+    suit: "clubs",
+    suitSymbol: "♣",
+    description: "两次：工兵在非地雷战斗中本应落败时，改为与对手同时移除。",
+    timing: "工兵战斗结算时",
+    activation: "automatic",
+    charges: 2,
+    effect: {
+      kind: "combat",
+      mode: "engineer_last_stand",
+      trigger: "engineer_would_lose_non_mine_combat",
+      attackerOutcome: "removed",
+      defenderOutcome: "removed",
+    },
+  },
+  {
     id: "diamond-camp-transfer",
     name: "行营转进",
     shortName: "行营转进",
@@ -584,9 +1050,161 @@ export const AUGMENT_CATALOG = [
       bonusMs: 20_000,
     },
   },
+  {
+    id: "diamond-road-step",
+    name: "短促推进",
+    shortName: "短促推进",
+    suit: "diamonds",
+    suitSymbol: "♦",
+    description: "一次：连长、排长或工兵沿相连公路前进恰好两段，中间与终点必须为空。",
+    timing: "你的行动阶段",
+    activation: "active",
+    charges: 1,
+    effect: {
+      kind: "movement",
+      mode: "road_dash",
+      eligible: "junior_mobile_piece",
+      exactEdges: 2,
+      intermediate: "empty",
+      destination: "empty",
+      consumesTurn: true,
+    },
+  },
+  {
+    id: "diamond-camp-relay",
+    name: "营地轮换",
+    shortName: "营地轮换",
+    suit: "diamonds",
+    suitSymbol: "♦",
+    description: "两次：将行营中的连长、排长或工兵调至己方半场另一空行营。",
+    timing: "你的行动阶段",
+    activation: "active",
+    charges: 2,
+    effect: {
+      kind: "movement",
+      mode: "camp_transfer",
+      eligible: "junior_piece_in_camp",
+      destination: "empty_friendly_half_camp",
+      consumesTurn: true,
+    },
+  },
+  {
+    id: "diamond-front-watch",
+    name: "前哨观察",
+    shortName: "前哨观察",
+    suit: "diamonds",
+    suitSymbol: "♦",
+    description: "公开后随机侦察敌方最前排一枚棋子；该棋首次移动后失去情报。",
+    timing: "本轮强化公开后",
+    activation: "automatic",
+    charges: 1,
+    effect: {
+      kind: "reconnaissance",
+      mode: "frontline_random",
+      count: 1,
+      rowsFromFront: 1,
+      selection: "server_random",
+      reveal: "until_piece_moves",
+      trigger: "after_round_reveal",
+    },
+  },
+  {
+    id: "diamond-pocket-watch",
+    name: "怀表",
+    shortName: "怀表",
+    suit: "diamonds",
+    suitSymbol: "♦",
+    description: "本轮强化公开后，立即为你的棋钟增加10秒。",
+    timing: "本轮强化公开后",
+    activation: "automatic",
+    charges: 1,
+    effect: {
+      kind: "clock",
+      mode: "flat_bonus",
+      trigger: "after_round_reveal",
+      bonusMs: 10_000,
+    },
+  },
+  {
+    id: "diamond-drill",
+    name: "计时操演",
+    shortName: "计时操演",
+    suit: "diamonds",
+    suitSymbol: "♦",
+    description: "获得后接下来的五次己方有效行动各返还2秒。",
+    timing: "每次己方有效行动后",
+    activation: "automatic",
+    charges: 5,
+    effect: {
+      kind: "clock",
+      mode: "move_increment",
+      trigger: "after_completed_own_move",
+      bonusMs: 2_000,
+      maxTriggers: 5,
+    },
+  },
+  {
+    id: "diamond-forward-pair",
+    name: "双弹前置",
+    shortName: "双弹前置",
+    suit: "diamonds",
+    suitSymbol: "♦",
+    description: "布阵时至多两枚炸弹可以放在本方最前排。",
+    timing: "布阵阶段",
+    activation: "setup",
+    charges: 1,
+    effect: {
+      kind: "setup",
+      mode: "forward_bomb",
+      allowance: 2,
+      destination: "front_setup_row",
+    },
+  },
+  {
+    id: "diamond-deep-pair",
+    name: "双线布雷",
+    shortName: "双线布雷",
+    suit: "diamonds",
+    suitSymbol: "♦",
+    description: "布阵时至多两枚地雷可以放在从本方大本营数第三排。",
+    timing: "布阵阶段",
+    activation: "setup",
+    charges: 1,
+    effect: {
+      kind: "setup",
+      mode: "deep_mine",
+      allowance: 2,
+      destination: "third_row_from_home",
+    },
+  },
 ] as const satisfies readonly AugmentDefinition[];
 
+/** The immutable 20-card pool used by rooms persisted before the v2 expansion. */
+export const LEGACY_AUGMENT_IDS = [
+  "spade-grand-maneuver",
+  "spade-relentless-assault",
+  "spade-tactical-retreat",
+  "spade-total-intelligence",
+  "spade-strategic-reserve",
+  "heart-rail-turn",
+  "heart-initiative",
+  "heart-remote-exchange",
+  "heart-bomb-disposal",
+  "heart-targeted-recon",
+  "club-forced-march",
+  "club-line-hop",
+  "club-field-exchange",
+  "club-steady-tempo",
+  "club-frontline-scout",
+  "diamond-camp-transfer",
+  "diamond-forward-bomb",
+  "diamond-deep-mine",
+  "diamond-engineer-screen",
+  "diamond-time-cache",
+] as const satisfies readonly AugmentId[];
+
 const AUGMENT_ID_SET = new Set<string>(AUGMENT_CATALOG.map((augment) => augment.id));
+const LEGACY_AUGMENT_ID_SET = new Set<string>(LEGACY_AUGMENT_IDS);
 const AUGMENT_BY_ID = new Map<AugmentId, AugmentDefinition>(
   AUGMENT_CATALOG.map((augment) => [augment.id, augment]),
 );
@@ -678,7 +1296,7 @@ export interface AugmentDraftRoundState {
 }
 
 export interface AugmentDraftState {
-  catalogVersion: typeof AUGMENT_CATALOG_VERSION;
+  catalogVersion: AugmentCatalogVersion;
   activeRound: AugmentDraftRoundNumber | null;
   rounds: AugmentDraftRoundState[];
   seenBySide: Record<AugmentSide, AugmentId[]>;
@@ -712,7 +1330,7 @@ export interface ProjectedAugmentDraftRound {
 }
 
 export interface ProjectedAugmentDraft {
-  catalogVersion: typeof AUGMENT_CATALOG_VERSION;
+  catalogVersion: AugmentCatalogVersion;
   activeRound: AugmentDraftRoundNumber | null;
   rounds: ProjectedAugmentDraftRound[];
   seenIds: AugmentId[] | null;
@@ -725,7 +1343,7 @@ export function createAugmentDraftState(
   const random = options.random ?? systemAugmentRandom;
   const initialSuit = options.initialSuit ?? chooseRandomSuit(AUGMENT_SUITS, random);
   const seenBySide: Record<AugmentSide, AugmentId[]> = { black: [], white: [] };
-  const round = createRound(1, initialSuit, seenBySide, random);
+  const round = createRound(1, initialSuit, AUGMENT_CATALOG_VERSION, seenBySide, random);
   const state: AugmentDraftState = {
     catalogVersion: AUGMENT_CATALOG_VERSION,
     activeRound: 1,
@@ -759,18 +1377,19 @@ export function beginSecondAugmentDraft(
       "The second augment draft must use a different suit.",
     );
   }
-  const eligibleSuits = AUGMENT_SUITS.filter(
-    (suit) => suit !== firstRound.suit && suit !== "diamonds",
+  const eligibleSuits = AUGMENT_SUITS.filter((suit) =>
+    suit !== firstRound.suit &&
+    getEligibleAugments(state.catalogVersion, 2, suit).length >= 3
   );
   if (options.suit && !eligibleSuits.includes(options.suit)) {
     throw new AugmentRuleError(
       "SUIT_NOT_AVAILABLE_FOR_ROUND",
-      "Setup-only diamond augments cannot be offered in the move-10 draft.",
+      "That suit has fewer than three eligible move-10 augments.",
     );
   }
   const suit = options.suit ?? chooseRandomSuit(eligibleSuits, random);
   const next = cloneAugmentDraftState(state);
-  next.rounds.push(createRound(2, suit, next.seenBySide, random));
+  next.rounds.push(createRound(2, suit, next.catalogVersion, next.seenBySide, random));
   next.activeRound = 2;
   assertValidAugmentDraftState(next);
   return next;
@@ -810,7 +1429,14 @@ export function refreshAugmentOption(
     );
   }
   const replacedId = player.options[slot];
-  const [replacement] = drawAugments(round.suit, 1, next.seenBySide[side], random);
+  const [replacement] = drawAugments(
+    round.suit,
+    round.number,
+    next.catalogVersion,
+    1,
+    next.seenBySide[side],
+    random,
+  );
   player.options[slot] = replacement;
   player.refreshedSlot = slot;
   if (player.selectedId === replacedId) player.selectedId = null;
@@ -928,7 +1554,12 @@ export function assertValidAugmentDraftState(state: AugmentDraftState): void {
   const invalid = (message: string): never => {
     throw new AugmentRuleError("INVALID_STATE", message);
   };
-  if (state.catalogVersion !== AUGMENT_CATALOG_VERSION) invalid("Unknown augment catalog version.");
+  if (
+    state.catalogVersion !== AUGMENT_CATALOG_VERSION &&
+    state.catalogVersion !== LEGACY_AUGMENT_CATALOG_VERSION
+  ) {
+    invalid("Unknown augment catalog version.");
+  }
   if (state.rounds.length < 1 || state.rounds.length > 2) invalid("Expected one or two rounds.");
   if (state.rounds[0]?.number !== 1 || state.rounds[0].trigger !== "setup") {
     invalid("The first draft round must be the setup round.");
@@ -939,8 +1570,11 @@ export function assertValidAugmentDraftState(state: AugmentDraftState): void {
   if (state.rounds[1]?.suit === state.rounds[0]?.suit) {
     invalid("Draft rounds must use different suits.");
   }
-  if (state.rounds[1]?.suit === "diamonds") {
-    invalid("The move-10 draft cannot offer setup-only diamond augments.");
+  if (
+    state.catalogVersion === LEGACY_AUGMENT_CATALOG_VERSION &&
+    state.rounds[1]?.suit === "diamonds"
+  ) {
+    invalid("Legacy move-10 drafts cannot offer the diamond tier.");
   }
   const activeRounds = state.rounds.filter((round) => !round.revealed);
   if (activeRounds.length > 1) invalid("Only one augment round can be active.");
@@ -954,7 +1588,15 @@ export function assertValidAugmentDraftState(state: AugmentDraftState): void {
 
   for (const side of AUGMENT_SIDES) {
     const seen = state.seenBySide[side];
-    if (seen.some((id) => !isAugmentId(id)) || new Set(seen).size !== seen.length) {
+    if (
+      seen.some(
+        (id) =>
+          !isAugmentId(id) ||
+          (state.catalogVersion === LEGACY_AUGMENT_CATALOG_VERSION &&
+            !LEGACY_AUGMENT_ID_SET.has(id)),
+      ) ||
+      new Set(seen).size !== seen.length
+    ) {
       invalid(`The ${side} seen list contains an unknown or duplicate augment.`);
     }
     const expectedLoadout: AugmentId[] = [];
@@ -965,7 +1607,11 @@ export function assertValidAugmentDraftState(state: AugmentDraftState): void {
       }
       if (
         player.options.some(
-          (id) => !isAugmentId(id) || getAugmentDefinition(id).suit !== round.suit || !seen.includes(id),
+          (id) =>
+            !isAugmentId(id) ||
+            !isAugmentEligibleForVersionAndRound(id, state.catalogVersion, round.number) ||
+            getAugmentDefinition(id).suit !== round.suit ||
+            !seen.includes(id),
         )
       ) {
         invalid(`The ${side} offer in round ${round.number} is outside its suit or seen list.`);
@@ -993,11 +1639,26 @@ export function assertValidAugmentDraftState(state: AugmentDraftState): void {
 function createRound(
   number: AugmentDraftRoundNumber,
   suit: AugmentSuit,
+  catalogVersion: AugmentCatalogVersion,
   seenBySide: Record<AugmentSide, AugmentId[]>,
   random: AugmentRandomSource,
 ): AugmentDraftRoundState {
-  const blackOptions = drawAugments(suit, 3, seenBySide.black, random) as AugmentOptions;
-  const whiteOptions = drawAugments(suit, 3, seenBySide.white, random) as AugmentOptions;
+  const blackOptions = drawAugments(
+    suit,
+    number,
+    catalogVersion,
+    3,
+    seenBySide.black,
+    random,
+  ) as AugmentOptions;
+  const whiteOptions = drawAugments(
+    suit,
+    number,
+    catalogVersion,
+    3,
+    seenBySide.white,
+    random,
+  ) as AugmentOptions;
   seenBySide.black.push(...blackOptions);
   seenBySide.white.push(...whiteOptions);
   return {
@@ -1014,11 +1675,13 @@ function createRound(
 
 function drawAugments(
   suit: AugmentSuit,
+  roundNumber: AugmentDraftRoundNumber,
+  catalogVersion: AugmentCatalogVersion,
   count: number,
   seen: readonly AugmentId[],
   random: AugmentRandomSource,
 ): AugmentId[] {
-  const pool = getAugmentsBySuit(suit)
+  const pool = getEligibleAugments(catalogVersion, roundNumber, suit)
     .map((augment) => augment.id)
     .filter((id) => !seen.includes(id));
   if (pool.length < count) {
@@ -1032,6 +1695,34 @@ function drawAugments(
     drawn.push(pool.splice(randomIndex(pool.length, random), 1)[0]);
   }
   return drawn;
+}
+
+function getEligibleAugments(
+  catalogVersion: AugmentCatalogVersion,
+  roundNumber: AugmentDraftRoundNumber,
+  suit: AugmentSuit,
+) {
+  return getAugmentsBySuit(suit).filter((definition) =>
+    isAugmentEligibleForVersionAndRound(definition.id, catalogVersion, roundNumber)
+  );
+}
+
+function isAugmentEligibleForVersionAndRound(
+  augmentId: AugmentId,
+  catalogVersion: AugmentCatalogVersion,
+  roundNumber: AugmentDraftRoundNumber,
+) {
+  if (
+    catalogVersion === LEGACY_AUGMENT_CATALOG_VERSION &&
+    !LEGACY_AUGMENT_ID_SET.has(augmentId)
+  ) {
+    return false;
+  }
+  if (roundNumber === 1) return true;
+  if (catalogVersion === LEGACY_AUGMENT_CATALOG_VERSION) {
+    return getAugmentDefinition(augmentId).suit !== "diamonds";
+  }
+  return getAugmentDefinition(augmentId).activation !== "setup";
 }
 
 function chooseRandomSuit(

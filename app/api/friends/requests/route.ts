@@ -5,6 +5,7 @@ import {
 } from "../../../../db/platform";
 import { IdentityError, requireAuthenticatedIdentity } from "../../../../lib/identity";
 import { RequestBodyTooLargeError, readBoundedJson } from "../../../../lib/request";
+import { rejectCrossOriginMutation } from "../../security";
 
 const responseHeaders = {
   "Cache-Control": "no-store",
@@ -13,6 +14,8 @@ const responseHeaders = {
 
 export async function POST(request: Request) {
   try {
+    const originError = rejectCrossOriginMutation(request, responseHeaders);
+    if (originError) return originError;
     const identity = requireAuthenticatedIdentity(request);
     const user = await getOrCreatePlatformUser(identity);
     const parsed = await readBoundedJson(request, 1_024);

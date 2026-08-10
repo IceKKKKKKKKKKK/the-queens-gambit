@@ -8,6 +8,7 @@ import {
   normalizeHandle,
   requireAuthenticatedIdentity,
 } from "../lib/identity.ts";
+import { rejectCrossOriginMutation } from "../app/api/security.ts";
 
 test("authenticated identity requires both trusted Sites headers", () => {
   assert.equal(getAuthenticatedIdentity(new Request("https://example.test")), null);
@@ -69,4 +70,39 @@ test("default handles are deterministic, private, and valid", async () => {
   assert.match(first.handle, /^棋手_[0-9a-f]{6}$/);
   assert.equal(first.handle.includes(identity.authUserId), false);
   assert.equal(first.handle.includes("ice"), false);
+});
+
+test("browser-authenticated mutations require a same-origin request", async () => {
+  const responseHeaders = { "Cache-Control": "no-store" };
+  assert.equal(
+    rejectCrossOriginMutation(new Request("https://game.example/api/matchmaking"), responseHeaders),
+    null,
+  );
+  assert.equal(
+    rejectCrossOriginMutation(
+      new Request("https://game.example/api/matchmaking", {
+        headers: {
+          Origin: "https://game.example",
+          "Sec-Fetch-Site": "same-origin",
+        },
+      }),
+      responseHeaders,
+    ),
+    null,
+  );
+
+  const crossOriginHeaderSets: Array<Record<string, string>> = [
+    { Origin: "https://attacker.example" },
+    { Origin: "null" },
+    { Origin: "https://game.example", "Sec-Fetch-Site": "cross-site" },
+  ];
+  for (const headers of crossOriginHeaderSets) {
+    const rejected = rejectCrossOriginMutation(
+      new Request("https://game.example/api/matchmaking", { headers }),
+      responseHeaders,
+    );
+    assert.ok(rejected);
+    assert.equal(rejected.status, 403);
+    assert.deepEqual(await rejected.json(), { error: "CROSS_ORIGIN_REQUEST" });
+  }
 });

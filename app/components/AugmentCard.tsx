@@ -16,6 +16,8 @@ export type AugmentCardState =
   | "hidden"
   | "used";
 
+export type AugmentCardBurnState = "none" | "burning" | "burnt";
+
 export interface AugmentCardProps {
   augment?: AugmentDefinition | null;
   state?: AugmentCardState;
@@ -29,6 +31,43 @@ export interface AugmentCardProps {
   tabIndex?: number;
   role?: "radio";
   ariaChecked?: boolean;
+  actionCard?: boolean;
+  burnState?: AugmentCardBurnState;
+}
+
+function cardLayers(
+  augment: AugmentDefinition | null | undefined,
+  hidden: boolean,
+  status: string,
+  burnState: AugmentCardBurnState,
+) {
+  return (
+    <>
+      <span className={styles.cardBody}>
+        <span className={`${styles.cardFace} ${styles.cardFront}`}>
+          {cardContents(augment, hidden, status)}
+        </span>
+        <span className={`${styles.cardFace} ${styles.cardBack}`} aria-hidden="true">
+          <span className={styles.backFrame}>
+            <span className={styles.backLattice} />
+            <span className={styles.backMedallion}>
+              <span>令</span>
+            </span>
+          </span>
+          <span className={styles.backStatus}>{status}</span>
+        </span>
+      </span>
+      {burnState !== "none" ? (
+        <span className={styles.burnLayer} aria-hidden="true">
+          <span className={styles.burnEdge} />
+          <span className={`${styles.ember} ${styles.emberOne}`} />
+          <span className={`${styles.ember} ${styles.emberTwo}`} />
+          <span className={`${styles.ember} ${styles.emberThree}`} />
+          <span className={styles.burnLabel}>牌令已尽</span>
+        </span>
+      ) : null}
+    </>
+  );
 }
 
 const STATE_LABELS: Record<AugmentCardState, string> = {
@@ -107,6 +146,8 @@ export default function AugmentCard({
   tabIndex,
   role,
   ariaChecked,
+  actionCard = false,
+  burnState = "none",
 }: AugmentCardProps) {
   const hidden = state === "hidden" || !augment;
   const status = statusLabel ?? STATE_LABELS[hidden ? "hidden" : state];
@@ -121,6 +162,9 @@ export default function AugmentCard({
     state === "locked" && styles.cardLocked,
     state === "used" && styles.cardUsed,
     hidden && styles.cardHidden,
+    actionCard && styles.cardAction,
+    burnState === "burning" && styles.cardBurning,
+    burnState === "burnt" && styles.cardBurnt,
   );
 
   if (onSelect) {
@@ -132,6 +176,8 @@ export default function AugmentCard({
         data-augment-id={hidden ? undefined : augment?.id}
         data-state={hidden ? "hidden" : state}
         data-suit={hidden ? undefined : augment?.suit}
+        data-action-card={actionCard ? "true" : "false"}
+        data-exhausted-transition={burnState}
         disabled={disabled}
         onClick={onSelect}
         onKeyDown={onKeyDown}
@@ -141,7 +187,7 @@ export default function AugmentCard({
         aria-pressed={role ? undefined : state === "selected"}
         aria-label={accessibleName}
       >
-        {cardContents(augment, hidden, status)}
+        {cardLayers(augment, hidden, status, burnState)}
       </button>
     );
   }
@@ -152,9 +198,11 @@ export default function AugmentCard({
       data-augment-id={hidden ? undefined : augment?.id}
       data-state={hidden ? "hidden" : state}
       data-suit={hidden ? undefined : augment?.suit}
+      data-action-card={actionCard ? "true" : "false"}
+      data-exhausted-transition={burnState}
       aria-label={accessibleName}
     >
-      {cardContents(augment, hidden, status)}
+      {cardLayers(augment, hidden, status, burnState)}
     </article>
   );
 }

@@ -21,6 +21,7 @@ import {
   type GameMode,
   type SpectatorPolicy,
 } from "../../../db/rooms";
+import { rejectCrossOriginMutation } from "../security";
 
 const responseHeaders = {
   "Cache-Control": "no-store",
@@ -39,8 +40,10 @@ function createError(error: unknown) {
 
 export async function POST(request: Request) {
   try {
-    await ensureRoomsSchema();
+    const originError = rejectCrossOriginMutation(request, responseHeaders);
+    if (originError) return originError;
     const user = await getOrCreatePlatformUser(requireAuthenticatedIdentity(request));
+    await ensureRoomsSchema();
     let gameMode: GameMode = "classic";
     let spectatorPolicy: SpectatorPolicy = "hidden";
     if (await hasNonEmptyRequestBody(request.clone())) {

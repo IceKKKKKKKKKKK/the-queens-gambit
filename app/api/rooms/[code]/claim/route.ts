@@ -13,6 +13,7 @@ import {
   isExpiredRoom,
   normalizeRoomCode,
 } from "../../../../../db/rooms";
+import { rejectCrossOriginMutation } from "../../../security";
 
 const responseHeaders = {
   "Cache-Control": "no-store",
@@ -24,6 +25,8 @@ export async function POST(
   context: { params: Promise<{ code: string }> },
 ) {
   try {
+    const originError = rejectCrossOriginMutation(request, responseHeaders);
+    if (originError) return originError;
     const user = await getOrCreatePlatformUser(requireAuthenticatedIdentity(request));
     const { code: rawCode } = await context.params;
     const code = normalizeRoomCode(rawCode);

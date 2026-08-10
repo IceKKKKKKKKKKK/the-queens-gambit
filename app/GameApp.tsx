@@ -25,6 +25,7 @@ import {
   getProjectedAugmentExchangeViolation,
   getProjectedAugmentLegalTargets,
   getProjectedAugmentMoveViolation,
+  getProjectedAugmentReconTargets,
   getProjectedMoveViolation,
   getSetupDraftPlacementViolation,
   isCamp,
@@ -46,27 +47,82 @@ import {
   type ProjectedGame,
   type PublicEvent,
   type PublicPiece,
+  type ExchangeAnimationTransition,
   type MovementAnimationTransition,
+  type StandardMovementAnimationTransition,
   type SetupDraft,
   type Side,
   type Viewer,
 } from "../lib/game";
 import {
   getAugmentDefinition,
+  type AugmentDefinition,
   type AugmentId,
   type AugmentSlot,
 } from "../lib/augments";
 import AugmentDraft from "./components/AugmentDraft";
 import AugmentRail from "./components/AugmentRail";
+import {
+  canInteractWithAugment,
+  reconcileActiveAugmentAfterProjection,
+  shouldKeepActiveReconSelection,
+  wasAugmentLockConfirmedAfterConflict,
+} from "./components/augmentMotion";
+import {
+  INVITE_RETRY_PARAM,
+  clearPendingRoomInvite,
+  isValidRoomInviteToken,
+  readPendingRoomInvite,
+  signInPathWithInviteRetry,
+  signInPathWithWatchOnly,
+  stageRoomInviteForSignIn,
+  type SessionStorageLike,
+} from "./components/pendingRoomInvite";
+import { roomEnvelopeFromTransport } from "./components/roomEnvelope";
 
 interface RoomEnvelope {
   code: string;
+  displayCode?: string;
   version: number;
   viewer: Viewer;
+  spectatorPerspective?: Side | null;
   snapshot: ProjectedGame;
   roomKind?: "custom" | "ranked";
   gameMode?: "classic" | "augment";
   spectatorPolicy?: "hidden" | "full";
+  matchId?: string | null;
+  setupDeadlineAt?: number | null;
+}
+
+function hasProjectedAugmentTarget(game: ProjectedGame, side: Side, augmentId: AugmentId) {
+  const effect = getAugmentDefinition(augmentId).effect;
+  if (effect.kind === "movement") {
+    return game.pieces.some(
+      (piece) => piece.alive && piece.side === side && isInsideBoard(piece) &&
+        getProjectedAugmentLegalTargets(game, side, augmentId, piece).length > 0,
+    );
+  }
+  if (effect.kind === "exchange") {
+    const pieces = game.pieces.filter(
+      (piece) => piece.alive && piece.side === side && isInsideBoard(piece),
+    );
+    for (let first = 0; first < pieces.length; first += 1) {
+      for (let second = first + 1; second < pieces.length; second += 1) {
+        if (!getProjectedAugmentExchangeViolation(
+          game,
+          side,
+          augmentId,
+          pieces[first],
+          pieces[second],
+        )) return true;
+      }
+    }
+    return false;
+  }
+  if (effect.kind === "reconnaissance" && effect.mode === "choose_enemy") {
+    return getProjectedAugmentReconTargets(game, side, augmentId).length > 0;
+  }
+  return false;
 }
 
 interface CreateRoomEnvelope extends RoomEnvelope {
@@ -82,6 +138,17 @@ interface SetupDraftState {
   roomCode: string;
   side: Side;
   locations: SetupDraft;
+}
+
+interface AugmentDraftVisualHold {
+  roomCode: string;
+  round: 1 | 2;
+  options: readonly AugmentDefinition[];
+  selectedId: AugmentId;
+  opponentLocked: boolean;
+  refreshUsed: boolean;
+  seenCount: number;
+  deadlineAt: number | null;
 }
 
 interface SessionUser {
@@ -102,6 +169,7 @@ interface RecentMatch {
   opponentHandle: string;
   outcome: "win" | "loss" | "draw";
   ratingDelta: number;
+  endedReason: string | null;
   completedAt: number;
 }
 
@@ -132,6 +200,7 @@ interface MatchmakingEnvelope {
     side: Side;
     opponent: { handle: string };
     game: { status: "pending_provisioning" | "ready"; code: string | null };
+    setupDeadlineAt?: number | null;
   };
 }
 
@@ -215,7 +284,13 @@ const ERROR_TEXT: Record<string, string> = {
   RECON_TARGET_ALREADY_KNOWN: "这枚敌子已经被你识别，请选择另一枚。",
   EXTRA_MOVE_DIFFERENT_PIECE: "追加行动必须使用另一枚棋子。",
   EXTRA_MOVE_NORMAL_ONLY: "追加行动只能进行普通移动。",
+  EXTRA_MOVE_NOT_PENDING: "当前没有可以放弃的追加行动。",
   RANKED_TIME_CONTROL_LOCKED: "排位用时固定为 10 分钟，不能修改。",
+  RANKED_SETUP_EXPIRED: "布阵时间已到，本局已作废且不计分。你可以立即重新匹配。",
+  RANKED_SETUP_CANCELLED: "本次排位已在开局前取消，不计分。",
+  RANKED_SETUP_ALREADY_STARTED: "对局已经开始，不能再无损取消。",
+  RANKED_SETUP_CONFLICT: "棋局刚刚发生变化，请同步后再试。",
+  RANKED_SETUP_CANCEL_FAILED: "暂时无法取消本次排位，请重试。",
 };
 
 function cleanCode(value: string) {
@@ -282,6 +357,30 @@ function removeLocalValue(key: string) {
   } catch {
     // The in-memory identity remains usable for this page session.
   }
+}
+
+function browserSessionStorage(): SessionStorageLike | null {
+  try {
+    return window.sessionStorage;
+  } catch {
+    return null;
+  }
+}
+
+function clearInviteNavigationArtifacts(url: URL) {
+  url.hash = "";
+  url.searchParams.delete(INVITE_RETRY_PARAM);
+  window.history.replaceState(null, "", `${url.pathname}${url.search}`);
+}
+
+function isTerminalInviteError(error: unknown) {
+  return error instanceof RequestError && [
+    "INVALID_INVITE_TOKEN",
+    "SEAT_ALREADY_CLAIMED",
+    "ROOM_IDENTITY_CONFLICT",
+    "ROOM_NOT_FOUND",
+    "ROOM_EXPIRED",
+  ].includes(error.code);
 }
 
 function restoreSetupDraft(
@@ -365,6 +464,16 @@ async function claimSeat(code: string, inviteToken: string, playerToken: string)
   return (await parseResponse(response)) as ClaimRoomEnvelope;
 }
 
+function eventAugmentText(event: PublicEvent) {
+  const augmentIds = event.augmentIds?.length
+    ? event.augmentIds
+    : event.augmentId
+      ? [event.augmentId]
+      : [];
+  const names = [...new Set(augmentIds)].map((augmentId) => getAugmentDefinition(augmentId).name);
+  return names.length ? ` · 军令「${names.join(" + ")}」` : "";
+}
+
 function eventText(event: PublicEvent) {
   const actor = sideName(event.actor);
   if (event.result === "ready") return `${actor}锁定了阵型`;
@@ -373,15 +482,28 @@ function eventText(event: PublicEvent) {
   if (event.result === "resigned") return `${actor}认输`;
   if (event.result === "timeout") return `${actor}用时耗尽`;
   if (event.result === "augment_revealed") return "双方军令同时公开";
+  if (event.result === "extra_move_passed") {
+    return `${actor}放弃追加行动${eventAugmentText(event)}`;
+  }
+  if (event.result === "draw_repetition") {
+    return "同一局面第三次出现 · 本局和棋";
+  }
   if (event.result === "augment_used") {
     return `${actor}发动「${event.augmentId ? getAugmentDefinition(event.augmentId).name : "军令"}」`;
   }
   const path = event.from && event.to ? `${boardCoordinate(event.from)} → ${boardCoordinate(event.to)}` : "";
-  if (event.result === "move") return `${actor}移动 · ${path}`;
-  if (event.result === "attacker_survives") return `${actor}进攻成功 · ${path}`;
-  if (event.result === "defender_survives") return `${actor}进攻失利 · ${path}`;
-  if (event.result === "both_removed") return `双方同归于尽 · ${path}`;
-  return `${actor}夺得军旗`;
+  const augmentText = eventAugmentText(event);
+  if (event.kind === "exchange" && event.from && event.to) {
+    const secondaryFrom = event.secondaryFrom ?? event.to;
+    const secondaryTo = event.secondaryTo ?? event.from;
+    const exchangePath = `${boardCoordinate(event.from)} → ${boardCoordinate(event.to)}；${boardCoordinate(secondaryFrom)} → ${boardCoordinate(secondaryTo)}`;
+    return `${actor}换防 · ${exchangePath}${augmentText}`;
+  }
+  if (event.result === "move") return `${actor}移动 · ${path}${augmentText}`;
+  if (event.result === "attacker_survives") return `${actor}进攻成功 · ${path}${augmentText}`;
+  if (event.result === "defender_survives") return `${actor}进攻失利 · ${path}${augmentText}`;
+  if (event.result === "both_removed") return `双方同归于尽 · ${path}${augmentText}`;
+  return `${actor}夺得军旗${path ? ` · ${path}` : ""}${augmentText}`;
 }
 
 function finishReasonText(reason: ProjectedGame["finishReason"]) {
@@ -389,6 +511,11 @@ function finishReasonText(reason: ProjectedGame["finishReason"]) {
   if (reason === "no_moves") return "对方无棋可走";
   if (reason === "resign") return "认输结束";
   if (reason === "timeout") return "用时耗尽";
+  return "和棋";
+}
+
+function drawReasonText(reason: ProjectedGame["drawReason"]) {
+  if (reason === "threefold_repetition") return "三次重复局面";
   return "和棋";
 }
 
@@ -408,7 +535,9 @@ function statusText(room: RoomEnvelope, placedCount?: number) {
     return draft?.players[viewer].locked ? "军令已锁定，等待对手" : "请选择第二项军令";
   }
   if (snapshot.phase === "finished") {
-    if (!snapshot.winner) return "本局和棋";
+    if (!snapshot.winner) {
+      return snapshot.drawReason ? `本局和棋 · ${drawReasonText(snapshot.drawReason)}` : "本局和棋";
+    }
     const reason = finishReasonText(snapshot.finishReason);
     if (viewer === "spectator") return `${sideName(snapshot.winner)}获胜 · ${reason}`;
     return snapshot.winner === viewer ? `你赢得了这局 · ${reason}` : `对手赢得了这局 · ${reason}`;
@@ -527,7 +656,7 @@ function BattleAnimationOverlay({
   animation,
   viewer,
 }: {
-  animation: MovementAnimationTransition;
+  animation: StandardMovementAnimationTransition;
   viewer: Viewer;
 }) {
   const { attacker, defender, event, outcome } = animation;
@@ -564,6 +693,62 @@ function BattleAnimationOverlay({
       ) : null}
     </span>
   );
+}
+
+function ExchangeAnimationOverlay({
+  animation,
+  pieces,
+  viewer,
+}: {
+  animation: ExchangeAnimationTransition;
+  pieces: readonly PublicPiece[];
+  viewer: Viewer;
+}) {
+  const firstPiece = pieces.find((piece) => piece.alive && piece.id === animation.first.pieceId);
+  const secondPiece = pieces.find((piece) => piece.alive && piece.id === animation.second.pieceId);
+  if (!firstPiece || !secondPiece) return null;
+
+  const legs = [
+    { name: "first", leg: animation.first, piece: firstPiece },
+    { name: "second", leg: animation.second, piece: secondPiece },
+  ] as const;
+
+  return (
+    <>
+      {legs.map(({ name, leg, piece }) => {
+        const campMotion = isCamp(leg.to)
+          ? "enter"
+          : isCamp(leg.from)
+            ? "leave"
+            : null;
+        return (
+          <span
+            className="battle-animation-cell exchange-animation-cell"
+            key={`${animation.eventId}:${leg.pieceId}`}
+            style={battleMotionStyle(leg.from, leg.to)}
+            data-outcome="exchange"
+            data-exchange-leg={name}
+            data-exchange-piece-id={leg.pieceId}
+            aria-hidden="true"
+          >
+            <BattlePieceVisual
+              piece={piece}
+              position={leg.to}
+              viewer={viewer}
+              campMotion={campMotion}
+            />
+          </span>
+        );
+      })}
+    </>
+  );
+}
+
+function animatedPieceIds(animation: MovementAnimationTransition | null | undefined) {
+  if (!animation) return [] as string[];
+  return animation.kind === "exchange"
+    ? [animation.first.pieceId, animation.second.pieceId]
+    : [animation.attacker.id, ...(animation.defender ? [animation.defender.id] : [])];
 }
 
 interface BoardProps {
@@ -604,7 +789,10 @@ function Board({
     for (let col = 0; col < 5; col += 1) cells.push({ row, col });
   }
   const alivePieces = pieces.filter((piece) => piece.alive && isInsideBoard(piece));
-  const recentMovement = movementAnimation?.event;
+  const recentMovement = movementAnimation?.kind === "movement"
+    ? movementAnimation.event
+    : undefined;
+  const motionPieceIds = new Set(animatedPieceIds(movementAnimation));
   const columnLabels = Array.from({ length: 5 }, (_, index) =>
     String.fromCharCode(65 + (flipped ? 4 - index : index)),
   );
@@ -672,9 +860,7 @@ function Board({
         const visiblePieceLabel = piece?.type ? PIECE_INFO[piece.type].label : null;
         const hiddenByAnimation = Boolean(
           piece &&
-            movementAnimation &&
-            (piece.id === movementAnimation.attacker.id ||
-              piece.id === movementAnimation.defender?.id),
+            motionPieceIds.has(piece.id),
         );
         const pieceLabel = visiblePieceLabel ?? (piece ? "身份隐藏" : "空位");
         const stationLabel = camp
@@ -791,11 +977,20 @@ function Board({
         );
       })}
       {movementAnimation ? (
-        <BattleAnimationOverlay
-          key={`${movementAnimation.moveNumber}:${movementAnimation.event.id}`}
-          animation={movementAnimation}
-          viewer={viewer}
-        />
+        movementAnimation.kind === "exchange" ? (
+          <ExchangeAnimationOverlay
+            key={`${movementAnimation.moveNumber}:${movementAnimation.eventId}`}
+            animation={movementAnimation}
+            pieces={alivePieces}
+            viewer={viewer}
+          />
+        ) : (
+          <BattleAnimationOverlay
+            key={`${movementAnimation.moveNumber}:${movementAnimation.event.id}`}
+            animation={movementAnimation}
+            viewer={viewer}
+          />
+        )
       ) : null}
       </div>
     </div>
@@ -898,6 +1093,48 @@ function CapturedPieceBox({ pieces }: { pieces: PublicPiece[] }) {
 }
 
 function SignInLanding({ signInPath }: { signInPath: string }) {
+  const [authResolution, setAuthResolution] = useState({
+    path: null as string | null,
+    note: "登录后才能对局、观战与保存战绩。",
+  });
+
+  useEffect(() => {
+    const staged = stageRoomInviteForSignIn(
+      window.location.href,
+      browserSessionStorage(),
+    );
+    if (staged.clearFragment) {
+      try {
+        clearInviteNavigationArtifacts(new URL(window.location.href));
+      } catch {
+        // The sign-in path remains safe even if the cosmetic URL cleanup fails.
+      }
+    }
+    let nextPath = signInPath;
+    let nextNote = "登录后才能对局、观战与保存战绩。";
+    if (staged.status === "stored") {
+      nextNote = "登录后会自动领取这局的玩家席位。";
+    } else if (staged.status === "watch_only") {
+      if (staged.code) {
+        nextPath = signInPathWithWatchOnly(signInPath, staged.code, window.location.origin);
+      }
+    } else if (staged.status === "invalid") {
+      nextNote = "玩家邀请无效。登录后请重新打开一条有效的邀请链接。";
+      if (staged.code) {
+        nextPath = signInPathWithInviteRetry(signInPath, staged.code, window.location.origin);
+      }
+    } else if (staged.status === "storage_unavailable") {
+      nextNote = "当前浏览器无法暂存邀请。请先登录，再重新打开原玩家邀请链接。";
+      if (staged.code) {
+        nextPath = signInPathWithInviteRetry(signInPath, staged.code, window.location.origin);
+      }
+    }
+    const timer = window.setTimeout(() => {
+      setAuthResolution({ path: nextPath, note: nextNote });
+    }, 0);
+    return () => window.clearTimeout(timer);
+  }, [signInPath]);
+
   return (
     <main className="landing auth-landing">
       <div className="auth-stage">
@@ -906,8 +1143,12 @@ function SignInLanding({ signInPath }: { signInPath: string }) {
           <span className="product-kicker">经典规则 · 军令强化</span>
           <h1><span>军令</span><span>陆战棋</span></h1>
           <p>邮件账号 · 在线匹配 · 公平三选一</p>
-          <a className="button primary sign-in-button" href={signInPath}>使用邮箱登录</a>
-          <small className="auth-note">登录后才能对局、观战与保存战绩。</small>
+          {authResolution.path ? (
+            <a className="button primary sign-in-button" href={authResolution.path}>使用邮箱登录</a>
+          ) : (
+            <button className="button primary sign-in-button" type="button" disabled>使用邮箱登录</button>
+          )}
+          <small className="auth-note" role="status">{authResolution.note}</small>
         </section>
         <div className="auth-court-card auth-king" aria-hidden="true" />
       </div>
@@ -988,7 +1229,7 @@ function Landing({
               <strong>经典暗军棋</strong><small>原版规则，完全不变</small>
             </button>
             <button className={mode === "augment" ? "is-selected" : ""} type="button" role="radio" aria-checked={mode === "augment"} onClick={() => setMode("augment")}>
-              <strong>军令强化</strong><small>两轮强化，20 张牌池</small>
+              <strong>军令强化</strong><small>两轮强化，50 张牌池</small>
             </button>
           </div>
           <label className="spectator-setting">
@@ -1036,7 +1277,12 @@ function Landing({
             {recentMatches.length ? recentMatches.map((match) => (
               <li key={match.id}>
                 <span className={`outcome outcome-${match.outcome}`}>{match.outcome === "win" ? "胜" : match.outcome === "loss" ? "负" : "和"}</span>
-                <strong>{match.opponentHandle}</strong>
+                <span className="history-opponent">
+                  <strong>{match.opponentHandle}</strong>
+                  {match.outcome === "draw" && match.endedReason === "threefold_repetition"
+                    ? <small>和 · 重复局面</small>
+                    : null}
+                </span>
                 <small>{match.ratingDelta > 0 ? "+" : ""}{match.ratingDelta} · {new Date(match.completedAt).toLocaleDateString("zh-CN")}</small>
               </li>
             )) : <li className="empty-row">完成第一局后，这里会显示最近战绩。</li>}
@@ -1111,6 +1357,8 @@ export default function GameApp({
   const [matchmaking, setMatchmaking] = useState<MatchmakingEnvelope>({ state: "idle" });
   const [watchingMatchId, setWatchingMatchId] = useState<string | null>(null);
   const [activeAugmentId, setActiveAugmentId] = useState<AugmentId | null>(null);
+  const [augmentDraftVisualHold, setAugmentDraftVisualHold] =
+    useState<AugmentDraftVisualHold | null>(null);
   const roomRef = useRef<RoomEnvelope | null>(null);
   const roomSessionRef = useRef(0);
   const busyRef = useRef(false);
@@ -1155,7 +1403,7 @@ export default function GameApp({
   useEffect(() => {
     if (!movementAnimation) return;
     const duration =
-      movementAnimation.outcome === "move"
+      movementAnimation.kind === "exchange" || movementAnimation.outcome === "move"
         ? MOVEMENT_ANIMATION_MS
         : BATTLE_ANIMATION_MS;
     const timer = window.setTimeout(() => {
@@ -1297,13 +1545,37 @@ export default function GameApp({
     };
   }, [user, room?.code, matchmaking.state]);
 
+  useEffect(() => {
+    if (!user || !room?.code) return;
+    let stopped = false;
+    const heartbeat = async () => {
+      try {
+        await parseResponse(await fetch("/api/presence", { method: "POST" }));
+      } catch (error) {
+        if (!stopped && error instanceof RequestError && error.status === 401) {
+          setFatalError("登录状态已失效，请重新登录。");
+        }
+      }
+    };
+    void heartbeat();
+    const timer = window.setInterval(heartbeat, 30_000);
+    return () => {
+      stopped = true;
+      window.clearInterval(timer);
+    };
+  }, [user, room?.code]);
+
   function acceptRoom(next: RoomEnvelope, allowRoomChange = false) {
     const current = roomRef.current;
     if (current && current.code !== next.code && !allowRoomChange) return false;
     if (current && current.code === next.code && next.version < current.version) return false;
-    if (!current || current.code !== next.code || current.viewer !== next.viewer) {
+    const preservesInteractionContext = Boolean(
+      current && current.code === next.code && current.viewer === next.viewer,
+    );
+    if (!preservesInteractionContext) {
       setMovementAnimation(null);
-    } else if (next.version > current.version) {
+      setAugmentDraftVisualHold(null);
+    } else if (current && next.version > current.version) {
       const animation =
         replayIndexRef.current === null &&
         !reduceMotionRef.current &&
@@ -1367,9 +1639,12 @@ export default function GameApp({
     setClockTick(receivedAt);
     roomRef.current = next;
     setRoom(next);
-    if (isPlayer(next.viewer) && next.snapshot.augment?.pendingRecon) {
-      setActiveAugmentId(next.snapshot.augment.pendingRecon.augmentId);
-    }
+    setActiveAugmentId((active) =>
+      reconcileActiveAugmentAfterProjection(
+        preservesInteractionContext ? active : null,
+        isPlayer(next.viewer) ? next.snapshot.augment?.pendingRecon : null,
+      ),
+    );
     return true;
   }
 
@@ -1379,6 +1654,7 @@ export default function GameApp({
     setBusy(false);
     setSelectedPieceId(null);
     setActiveAugmentId(null);
+    setAugmentDraftVisualHold(null);
     setSetupDraftState(null);
     setRulesOpen(false);
     replayIndexRef.current = null;
@@ -1419,35 +1695,59 @@ export default function GameApp({
     }
     void (async () => {
       let code = "";
+      let inviteContext = false;
+      let inviteUrl: URL | null = null;
       try {
         const url = new URL(window.location.href);
+        inviteUrl = url;
         code = cleanCode(url.searchParams.get("room") ?? "");
         if (code.length !== 8) return;
         const watchOnly = url.searchParams.get("watch") === "1";
+        const inviteRetry = url.searchParams.get(INVITE_RETRY_PARAM) === "1";
         const fragment = new URLSearchParams(url.hash.replace(/^#/, ""));
-        const invitedToken = fragment.get("invite");
+        const directInvitePresent = fragment.has("invite");
+        const directInviteValue = fragment.get("invite") ?? "";
+        const directInviteToken = isValidRoomInviteToken(directInviteValue)
+          ? directInviteValue
+          : null;
+        const inviteStorage = browserSessionStorage();
+        const recoveredInvite = !watchOnly && !directInvitePresent
+          ? readPendingRoomInvite(inviteStorage, code)
+          : null;
+        const invitedToken = directInviteToken ?? recoveredInvite;
+        inviteContext = directInvitePresent || Boolean(recoveredInvite) || inviteRetry;
         let storedToken = readLocalValue(roomTokenKey(code));
-        if (invitedToken && !watchOnly) {
-          if (storedToken) {
-            try {
-              const existing = await fetchRoom(code, storedToken);
-              if (!existing) throw new Error("EMPTY_ROOM_RESPONSE");
-              if (cancelled || session !== roomSessionRef.current) return;
-              acceptRoom(existing, true);
-              setToken(storedToken);
-              setInviteToken(readLocalValue(inviteTokenKey(code)));
-              setFlipped(false);
-              setFatalError(null);
-              setConnection("live");
-              url.hash = "";
-              window.history.replaceState(null, "", `${url.pathname}${url.search}`);
-              return;
-            } catch (error) {
-              if (!(error instanceof RequestError) || error.status !== 401) throw error;
-              removeLocalValue(roomTokenKey(code));
-              storedToken = null;
-            }
+        if (!watchOnly && inviteContext && storedToken) {
+          try {
+            const existing = await fetchRoom(code, storedToken);
+            if (!existing) throw new Error("EMPTY_ROOM_RESPONSE");
+            if (cancelled || session !== roomSessionRef.current) return;
+            clearPendingRoomInvite(inviteStorage, code);
+            clearInviteNavigationArtifacts(url);
+            acceptRoom(existing, true);
+            setToken(storedToken);
+            setInviteToken(readLocalValue(inviteTokenKey(code)));
+            setFlipped(false);
+            setFatalError(null);
+            setConnection("live");
+            return;
+          } catch (error) {
+            if (!(error instanceof RequestError) || error.status !== 401) throw error;
+            removeLocalValue(roomTokenKey(code));
+            storedToken = null;
           }
+        }
+        if (watchOnly) {
+          if (directInvitePresent || inviteRetry) clearInviteNavigationArtifacts(url);
+        } else if (directInvitePresent && !directInviteToken) {
+          clearPendingRoomInvite(inviteStorage, code);
+          clearInviteNavigationArtifacts(url);
+          throw new RequestError(400, "INVALID_INVITE_TOKEN");
+        } else if (inviteRetry && !invitedToken) {
+          clearInviteNavigationArtifacts(url);
+          setFatalError("登录成功，但浏览器未能保留玩家邀请。请重新打开原邀请链接。");
+          return;
+        } else if (invitedToken) {
           let candidateToken = readLocalValue(pendingTokenKey(code)) ?? createClientToken();
           writeLocalValue(pendingTokenKey(code), candidateToken);
           let claimed: ClaimRoomEnvelope;
@@ -1467,12 +1767,9 @@ export default function GameApp({
           if (cancelled || session !== roomSessionRef.current) return;
           const identitySaved = writeLocalValue(roomTokenKey(code), candidateToken);
           removeLocalValue(pendingTokenKey(code));
-          url.hash = "";
-          window.history.replaceState(null, "", `${url.pathname}${url.search}`);
-          acceptRoom(
-            { code: claimed.code, version: claimed.version, viewer: claimed.viewer, snapshot: claimed.snapshot },
-            true,
-          );
+          clearPendingRoomInvite(inviteStorage, code);
+          clearInviteNavigationArtifacts(url);
+          acceptRoom(roomEnvelopeFromTransport(claimed), true);
           setToken(candidateToken);
           setInviteToken(null);
           setFlipped(false);
@@ -1480,10 +1777,6 @@ export default function GameApp({
           setConnection("live");
           if (!identitySaved) showToast("玩家身份只能在当前页面保留，请勿刷新。");
           return;
-        }
-        if (invitedToken) {
-          url.hash = "";
-          window.history.replaceState(null, "", `${url.pathname}${url.search}`);
         }
         let activeToken = watchOnly ? null : storedToken;
         let envelope: RoomEnvelope | null;
@@ -1510,6 +1803,10 @@ export default function GameApp({
         if (!cancelled && session === roomSessionRef.current) {
           const codeValue = error instanceof RequestError ? error.code : "ROOM_READ_FAILED";
           setFatalError(ERROR_TEXT[codeValue] ?? "暂时无法进入这个房间。");
+          if (code && inviteContext && isTerminalInviteError(error)) {
+            clearPendingRoomInvite(browserSessionStorage(), code);
+            if (inviteUrl) clearInviteNavigationArtifacts(inviteUrl);
+          }
           if (
             code &&
             error instanceof RequestError &&
@@ -1592,10 +1889,7 @@ export default function GameApp({
       window.history.replaceState(null, "", `/?room=${created.code}`);
       setToken(created.playerToken);
       setInviteToken(created.opponentInviteToken);
-      acceptRoom(
-        { code: created.code, version: created.version, viewer: created.viewer, snapshot: created.snapshot },
-        true,
-      );
+      acceptRoom(roomEnvelopeFromTransport(created), true);
       setFlipped(false);
       setConnection("live");
       showToast(playerSaved && inviteSaved ? "房间已创建" : "房间已创建；身份只能在当前页面保留，请勿刷新。");
@@ -1719,32 +2013,58 @@ export default function GameApp({
 
   async function performAction(action: PlayerAction) {
     const current = roomRef.current;
-    if (!current || !isPlayer(current.viewer) || busyRef.current) return;
+    if (!current || !isPlayer(current.viewer) || busyRef.current) return false;
+    const requestedAugmentRound = action.type === "augment_lock"
+      ? current.snapshot.augment?.draft.activeRound ?? null
+      : null;
     const session = roomSessionRef.current;
     busyRef.current = true;
     setBusy(true);
     setConnection("syncing");
     try {
       const next = await postAction(current.code, token, current.version, action);
-      if (session !== roomSessionRef.current || roomRef.current?.code !== current.code) return;
+      if (session !== roomSessionRef.current || roomRef.current?.code !== current.code) return false;
       acceptRoom(next);
       setConnection("live");
       setSelectedPieceId(null);
-      if (["augment_move", "augment_exchange", "augment_recon"].includes(action.type)) {
+      if (action.type === "augment_recon") {
+        if (!shouldKeepActiveReconSelection(
+          action.augmentId,
+          next.snapshot.augment?.pendingRecon,
+        )) {
+          setActiveAugmentId(null);
+        }
+      } else if (
+        action.type === "augment_move" ||
+        action.type === "augment_exchange" ||
+        action.type === "pass_extra_move"
+      ) {
         setActiveAugmentId(null);
       }
+      return true;
     } catch (error) {
-      if (session !== roomSessionRef.current || roomRef.current?.code !== current.code) return;
+      if (session !== roomSessionRef.current || roomRef.current?.code !== current.code) return false;
       if (error instanceof RequestError && error.status === 409) {
         setSelectedPieceId(null);
         showToast(ERROR_TEXT.VERSION_CONFLICT);
         try {
           const latest = await fetchRoom(current.code, token);
-          if (session !== roomSessionRef.current || roomRef.current?.code !== current.code) return;
+          if (session !== roomSessionRef.current || roomRef.current?.code !== current.code) return false;
           if (latest) acceptRoom(latest);
           setConnection("live");
+          if (
+            action.type === "augment_lock" &&
+            latest &&
+            wasAugmentLockConfirmedAfterConflict(
+              latest.viewer,
+              requestedAugmentRound,
+              latest.snapshot.augment?.draft.rounds,
+            )
+          ) {
+            return true;
+          }
         } catch (syncError) {
-          if (session !== roomSessionRef.current || roomRef.current?.code !== current.code) return;
+          if (session !== roomSessionRef.current || roomRef.current?.code !== current.code) return false;
           if (syncError instanceof RequestError && [401, 404, 410].includes(syncError.status)) {
             setFatalError(ERROR_TEXT[syncError.code] ?? "这个房间已经不可用。");
             removeLocalValue(roomTokenKey(current.code));
@@ -1765,6 +2085,7 @@ export default function GameApp({
         showToast(ERROR_TEXT[errorCode] ?? ERROR_TEXT.ACTION_FAILED);
         setConnection(error instanceof RequestError ? "live" : "offline");
       }
+      return false;
     } finally {
       if (session === roomSessionRef.current) {
         busyRef.current = false;
@@ -1828,9 +2149,11 @@ export default function GameApp({
     if (room.snapshot.phase === "playing" && activeAugmentId) {
       const effect = getAugmentDefinition(activeAugmentId).effect;
       if (effect.kind === "reconnaissance") {
-        return room.snapshot.pieces
-          .filter((piece) => piece.alive && piece.side !== room.viewer && piece.type === null)
-          .map((piece) => ({ row: piece.row, col: piece.col }));
+        return getProjectedAugmentReconTargets(
+          room.snapshot,
+          room.viewer,
+          activeAugmentId,
+        );
       }
       if (!selectedPieceId || !selectedPosition) return [] as Position[];
       if (effect.kind === "movement") {
@@ -2145,9 +2468,34 @@ export default function GameApp({
   }
 
   function activateAugment(augmentId: AugmentId) {
-    const effect = getAugmentDefinition(augmentId).effect;
-    if (!["movement", "exchange", "reconnaissance"].includes(effect.kind)) {
+    if (!room || !isPlayer(room.viewer)) return;
+    const augment = getAugmentDefinition(augmentId);
+    const effect = augment.effect;
+    const pendingReconId = room.snapshot.augment?.pendingRecon?.augmentId ?? null;
+    if (!canInteractWithAugment(augment, {
+      enabled: room.snapshot.phase === "playing",
+      isOwnTurn: room.snapshot.turn === room.viewer,
+      pendingReconId,
+    })) {
+      if (augment.activation !== "active") {
+        showToast("这张强化会在满足条件时自动生效。");
+      } else if (effect.kind === "reconnaissance") {
+        showToast("这张侦察牌尚未进入选取目标阶段。");
+      } else {
+        showToast("轮到你行动时才能发动这张强化。");
+      }
+      return;
+    }
+    if (
+      effect.kind !== "movement" &&
+      effect.kind !== "exchange" &&
+      !(effect.kind === "reconnaissance" && effect.mode === "choose_enemy")
+    ) {
       showToast("这张强化会在满足条件时自动生效。");
+      return;
+    }
+    if (!hasProjectedAugmentTarget(room.snapshot, room.viewer, augmentId)) {
+      showToast("当前棋面没有可发动的合法目标。");
       return;
     }
     setSelectedPieceId(null);
@@ -2160,6 +2508,43 @@ export default function GameApp({
   function requestResign() {
     if (!room || !isPlayer(room.viewer) || !["playing", "augment_draft"].includes(room.snapshot.phase)) return;
     if (window.confirm("确定认输并结束本局吗？")) void performAction({ type: "resign" });
+  }
+
+  async function cancelRankedSetup() {
+    const current = roomRef.current;
+    if (
+      !current ||
+      current.roomKind !== "ranked" ||
+      current.snapshot.phase !== "setup" ||
+      !isPlayer(current.viewer) ||
+      busyRef.current
+    ) return;
+    if (!window.confirm("取消本次排位吗？开局前取消不会改变段位分。")) return;
+    busyRef.current = true;
+    setBusy(true);
+    try {
+      const response = await fetch(`/api/rooms/${current.code}`, { method: "DELETE" });
+      const payload = (await parseResponse(response)) as MatchmakingEnvelope;
+      clearRoom();
+      setMatchmaking(payload);
+      setFatalError(null);
+      setToken(null);
+      setInviteToken(null);
+      window.history.replaceState(null, "", "/");
+      showToast("本次排位已取消，积分不变。");
+      void refreshAccountAndFriends().catch(() => undefined);
+    } catch (error) {
+      showToast(
+        error instanceof RequestError
+          ? ERROR_TEXT[error.code] ?? "取消排位失败，请重试。"
+          : "取消排位失败，请重试。",
+      );
+    } finally {
+      if (roomRef.current?.code === current.code) {
+        busyRef.current = false;
+        setBusy(false);
+      }
+    }
   }
 
   async function copyLink(kind: "player" | "spectator") {
@@ -2199,6 +2584,7 @@ export default function GameApp({
         <>
           <SignInLanding signInPath={signInPath} />
           {fatalError ? <div className="toast error-toast" role="alert" aria-live="assertive">{fatalError}</div> : null}
+          {toast ? <div className="toast" role="status" aria-live="polite">{toast}</div> : null}
         </>
       );
     }
@@ -2222,6 +2608,7 @@ export default function GameApp({
           onWatchFriend={watchFriendMatch}
         />
         {fatalError ? <div className="toast error-toast" role="alert" aria-live="assertive">{fatalError}</div> : null}
+        {toast ? <div className="toast" role="status" aria-live="polite">{toast}</div> : null}
       </>
     );
   }
@@ -2248,13 +2635,13 @@ export default function GameApp({
   const displayedGame = activeReplayFrame
     ? { ...game, pieces: activeReplayFrame.pieces, events: replayMoveEvent ? [replayMoveEvent] : [] }
     : game;
+  const liveAnimatedPieceIds = new Set(animatedPieceIds(liveMovementAnimation));
   const capturedOwnPieces = viewerSide && game.phase !== "setup"
     ? displayedPieces.filter(
         (piece) =>
           piece.side === viewerSide &&
           !piece.alive &&
-          piece.id !== liveMovementAnimation?.attacker.id &&
-          piece.id !== liveMovementAnimation?.defender?.id,
+          !liveAnimatedPieceIds.has(piece.id),
       )
     : [];
   const replayHasGap = Boolean(
@@ -2321,13 +2708,56 @@ export default function GameApp({
       viewerDraft?.options &&
       (!viewerDraft.locked || game.phase === "augment_draft"),
   );
+  const liveDraftPresentation = showAugmentDraft && activeDraftRound && viewerDraft?.options
+    ? {
+        round: activeDraftRound.number,
+        options: draftOptions,
+        selectedId: viewerDraft.selectedId,
+        locked: viewerDraft.locked,
+        opponentLocked: opponentDraft?.locked ?? false,
+        refreshUsed: viewerDraft.refreshed,
+        seenCount: game.augment?.draft.seenIds?.length ?? 0,
+        deadlineAt: game.augment?.draftDeadlineAt ?? null,
+      }
+    : null;
+  const heldDraftPresentation = augmentDraftVisualHold?.roomCode === room.code
+    ? {
+        round: augmentDraftVisualHold.round,
+        options: augmentDraftVisualHold.options,
+        selectedId: augmentDraftVisualHold.selectedId,
+        locked: true,
+        opponentLocked: augmentDraftVisualHold.opponentLocked,
+        refreshUsed: augmentDraftVisualHold.refreshUsed,
+        seenCount: augmentDraftVisualHold.seenCount,
+        deadlineAt: augmentDraftVisualHold.deadlineAt,
+      }
+    : null;
+  const draftPresentation = liveDraftPresentation ?? heldDraftPresentation;
   const augmentRailItems = (side: Side) =>
     (game.augment?.draft.loadouts[side] ?? []).map((id) => ({
       augment: getAugmentDefinition(id),
       triggerCount: game.augment?.triggerCounts[side][id] ?? 0,
+      publiclyRevealed: game.augment?.draft.rounds.some(
+        (round) => round.revealed && round.players[side].selectedId === id,
+      ) ?? false,
+      hasLegalTarget: side === viewerSide && game.phase === "playing" && game.turn === side
+        ? hasProjectedAugmentTarget(game, side, id)
+        : undefined,
     }));
   const primaryRailSide: Side = viewerSide ?? "black";
   const secondaryRailSide: Side = otherSide(primaryRailSide);
+  const canPassExtraMove = Boolean(
+    viewerSide &&
+      game.phase === "playing" &&
+      game.turn === viewerSide &&
+      game.augment?.extraMove,
+  );
+  const showRepetitionWarning = Boolean(
+    game.mode === "augment" &&
+      game.phase !== "finished" &&
+      game.repetition?.active &&
+      game.repetition.currentOccurrences === 2,
+  );
 
   return (
     <main className="room-page">
@@ -2383,22 +2813,50 @@ export default function GameApp({
         </div>
       </header>
 
-      {showAugmentDraft && activeDraftRound && viewerDraft ? (
+      {draftPresentation ? (
         <div className="augment-draft-overlay" role="dialog" aria-modal="true" aria-label="强化选择">
           <AugmentDraft
-            round={activeDraftRound.number}
-            options={draftOptions}
-            selectedId={viewerDraft.selectedId}
-            locked={viewerDraft.locked}
-            opponentLocked={opponentDraft?.locked ?? false}
-            refreshUsed={viewerDraft.refreshed}
-            seenCount={game.augment?.draft.seenIds?.length ?? 0}
-            deadlineAt={game.augment?.draftDeadlineAt ?? null}
+            key={`${room.code}-${draftPresentation.round}`}
+            round={draftPresentation.round}
+            options={draftPresentation.options}
+            selectedId={draftPresentation.selectedId}
+            locked={draftPresentation.locked}
+            opponentLocked={draftPresentation.opponentLocked}
+            refreshUsed={draftPresentation.refreshUsed}
+            seenCount={draftPresentation.seenCount}
+            deadlineAt={draftPresentation.deadlineAt}
             pending={busy}
             onSelect={(augmentId) => void performAction({ type: "augment_select", augmentId })}
             onRefresh={(slot: AugmentSlot) => void performAction({ type: "augment_refresh", slot })}
-            onConfirm={() => void performAction({ type: "augment_lock" })}
-            onResign={game.phase === "augment_draft" ? requestResign : undefined}
+            onConfirm={() => {
+              if (!liveDraftPresentation?.selectedId) return false;
+              setAugmentDraftVisualHold({
+                roomCode: room.code,
+                round: liveDraftPresentation.round,
+                options: liveDraftPresentation.options,
+                selectedId: liveDraftPresentation.selectedId,
+                opponentLocked: liveDraftPresentation.opponentLocked,
+                refreshUsed: liveDraftPresentation.refreshUsed,
+                seenCount: liveDraftPresentation.seenCount,
+                deadlineAt: liveDraftPresentation.deadlineAt,
+              });
+              return performAction({ type: "augment_lock" });
+            }}
+            onResign={
+              game.phase === "augment_draft"
+                ? requestResign
+                : game.phase === "setup" && room.roomKind === "ranked"
+                  ? () => void cancelRankedSetup()
+                  : undefined
+            }
+            resignLabel={game.phase === "setup" ? "取消本次排位（不计分）" : "认输"}
+            onMotionComplete={() => {
+              setAugmentDraftVisualHold((current) =>
+                current?.roomCode === room.code && current.round === draftPresentation.round
+                  ? null
+                  : current,
+              );
+            }}
           />
         </div>
       ) : null}
@@ -2406,15 +2864,42 @@ export default function GameApp({
       <section className={`game-shell ${game.phase === "setup" ? "is-setup" : ""}`}>
         <aside className="side-panel setup-panel">
           <h2>{statusText(room, placedSetupCount)}</h2>
+          {showRepetitionWarning ? (
+            <div className="repetition-notice" role="status" aria-live="polite" aria-label="重复局面第二次出现">
+              <span aria-hidden="true">♠</span>
+              <div><strong>重复局面</strong><small>再次重复即和棋</small></div>
+              <b>2/3</b>
+            </div>
+          ) : null}
           {game.augment ? (
             <AugmentRail
               label={viewerSide ? "我的" : sideName(primaryRailSide)}
               items={augmentRailItems(primaryRailSide)}
               activeId={viewerSide === primaryRailSide ? activeAugmentId : null}
               canActivate={Boolean(viewerSide === primaryRailSide && game.phase === "playing")}
+              isOwnTurn={Boolean(viewerSide === primaryRailSide && game.turn === viewerSide)}
+              pendingReconId={viewerSide === primaryRailSide
+                ? game.augment.pendingRecon?.augmentId ?? null
+                : null}
               pending={busy}
+              dockTarget={Boolean(viewerSide === primaryRailSide)}
               onActivate={viewerSide === primaryRailSide ? activateAugment : undefined}
             />
+          ) : null}
+          {canPassExtraMove ? (
+            <div className="extra-move-pass" aria-label="追加行动待处理">
+              <div>
+                <strong>追加行动</strong>
+                <span>局面不利时可主动交回行动权</span>
+              </div>
+              <button
+                type="button"
+                disabled={busy}
+                onClick={() => void performAction({ type: "pass_extra_move" })}
+              >
+                放弃追加行动
+              </button>
+            </div>
           ) : null}
           {game.phase === "setup" && timeControlMinutes !== null ? (
             <div className="time-control-card">
@@ -2456,6 +2941,11 @@ export default function GameApp({
                 </div>
               )}
               <small>{room.roomKind === "ranked" ? "排位标准：合法落子扣时后余时≤5:00，则增加 5 秒" : timeControlLocked ? "限时已锁定" : room.viewer === "black" ? "房主可在确认布阵前修改" : "由房主设置"}</small>
+              {room.roomKind === "ranked" && room.setupDeadlineAt ? (
+                <small>
+                  请在 {new Date(room.setupDeadlineAt).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })} 前完成布阵；开局前任一方均可无损取消。
+                </small>
+              ) : null}
             </div>
           ) : null}
           {viewerSide && game.phase === "setup" ? (
@@ -2497,6 +2987,16 @@ export default function GameApp({
                     ? "先锁定强化"
                     : "完成布阵"}
               </button>
+              {room.roomKind === "ranked" ? (
+                <button
+                  className="button secondary"
+                  type="button"
+                  disabled={busy}
+                  onClick={() => void cancelRankedSetup()}
+                >
+                  取消本次排位（不计分）
+                </button>
+              ) : null}
             </div>
           ) : null}
           {viewerSide && (game.phase === "playing" || game.phase === "augment_draft") ? (
@@ -2514,7 +3014,11 @@ export default function GameApp({
           {highlightedMove?.from && highlightedMove.to ? (
             <p className="last-move-summary">
               <strong>{activeReplayFrame ? "复盘" : room.viewer === "spectator" ? "上一手" : "对手上一步"}</strong>
-              <span>{sideName(highlightedMove.actor)} · {boardCoordinate(highlightedMove.from)} → {boardCoordinate(highlightedMove.to)}</span>
+              <span>
+                {sideName(highlightedMove.actor)} · {boardCoordinate(highlightedMove.from)}
+                {highlightedMove.kind === "exchange" ? " ⇄ " : " → "}
+                {boardCoordinate(highlightedMove.to)}
+              </span>
             </p>
           ) : activeReplayFrame ? (
             <p className="last-move-summary"><strong>复盘</strong><span>{replayHasGap ? "回放记录不完整" : replayIsPartial ? `从第 ${activeReplayFrame.moveNumber} 手开始` : "开局阵型"}</span></p>
@@ -2619,7 +3123,12 @@ export default function GameApp({
           </section>
           <section>
             <h3>目标</h3>
-            <p>夺取对方军旗、使对方无合法着法、用尽对局时间，或对方认输即可获胜。没有自动和棋或回合上限。</p>
+            <p>
+              夺取对方军旗、使对方无合法着法、用尽对局时间，或对方认输即可获胜。
+              {game.repetition
+                ? " 强化局中，同一完整局面第三次出现时自动和棋；第二次出现会在牌桌旁提示。"
+                : " 本局没有自动和棋或回合上限。"}
+            </p>
           </section>
           <section>
             <h3>暗棋与观战</h3>
@@ -2634,7 +3143,7 @@ export default function GameApp({
           </section>
           <section>
             <h3>布阵</h3>
-            <p>棋子只能放在本方兵站或大本营，行营必须留空。军旗只能在大本营；地雷只能在最后两排；炸弹不能在第一排。强化局中，仅已选择的“前置炸弹”或“纵深布雷”可以提供牌面写明的单枚例外。双方确认后随机决定先手。</p>
+            <p>棋子只能放在本方兵站或大本营，行营必须留空。军旗只能在大本营；地雷只能在最后两排；炸弹不能在第一排。强化局中，相关布阵牌可按牌面写明的 1 或 2 枚额度提供例外。双方确认后随机决定先手。</p>
           </section>
           <section>
             <h3>强化选择</h3>
@@ -2647,6 +3156,10 @@ export default function GameApp({
           <section>
             <h3>强化次数</h3>
             <p>主动强化需从牌桌旁启用，自动强化会在条件满足时结算。牌面显示已触发次数；只有达到总次数才标为“已耗尽”。非法请求、取消或网络失败不会消耗次数。</p>
+          </section>
+          <section>
+            <h3>追加行动</h3>
+            <p>获得追加行动后，可以移动牌面要求的棋子，也可以主动放弃并把行动权交给对手。放弃会计算本次思考时间，但不增加手数、不写入落子回放，也不会获得排位的 5 秒落子增益。</p>
           </section>
           <section>
             <h3>移动</h3>
