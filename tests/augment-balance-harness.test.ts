@@ -16,6 +16,7 @@ import {
   createAugmentGame,
   createInitialGame,
   getLegalTargets,
+  isValidAugmentRuleStateForState,
   isValidRepetitionTrackerForState,
   projectGame,
   seedRepetitionTrackerFromCurrentPosition,
@@ -66,6 +67,7 @@ import {
   pairedSearchStateKey,
   policyDecisionFingerprint,
   policyDecisionSeed,
+  publicFallTriggerExpectation,
   projectedRevealKnowledge,
   SeededRandom,
   selectSearchCandidates,
@@ -2166,6 +2168,798 @@ test("ongoing hidden worlds keep the flag alive and preserve every visible ident
   }
 });
 
+function refreshHiddenFallMetadata(state: GameState, side: Side) {
+  const ruleState = state.augment?.ruleState;
+  assert.ok(ruleState);
+  const sidePieces = state.pieces.filter((piece) => piece.side === side);
+  ruleState.casualties[side] = sidePieces.filter((piece) => !piece.alive).length;
+  ruleState.commanderFallen[side] = sidePieces.some(
+    (piece) => !piece.alive && ruleState.baseTypes[piece.id] === "commander",
+  );
+  ruleState.generalFallen[side] = sidePieces.some(
+    (piece) => !piece.alive && ruleState.baseTypes[piece.id] === "general",
+  );
+}
+
+function whiteFallTriggerFixture(
+  augmentId: "diamond-engineer-mutiny" | "diamond-command-fusion",
+  seed: string,
+) {
+  return createControlledPairGame(
+    "diamond-camp-assault",
+    augmentId,
+    "black",
+    seed,
+  );
+}
+
+test("an unrevealed flag excludes dead commander candidates across 256 sampled worlds", () => {
+  const state = createControlledPairGame(
+    "diamond-camp-assault",
+    "diamond-camp-assault",
+    "black",
+    "dead-commander-needs-public-flag",
+  );
+  const ruleState = state.augment?.ruleState;
+  assert.ok(ruleState);
+  const dead = state.pieces
+    .filter(
+      (piece) =>
+        piece.side === "white" &&
+        !["commander", "general", "flag"].includes(ruleState.baseTypes[piece.id]),
+    )
+    .slice(0, 8);
+  assert.equal(dead.length, 8);
+  for (const piece of dead) piece.alive = false;
+  refreshHiddenFallMetadata(state, "white");
+  assert.equal(state.revealedFlags.white, false);
+  const sourceFingerprint = visibleStateFingerprint(state, "black", 1_000_000);
+
+  for (let seed = 0; seed < 256; seed += 1) {
+    const determined = determinizeFromProjection(
+      state,
+      "black",
+      `dead-commander-needs-public-flag:${seed}`,
+      1_000_000,
+    );
+    assert.equal(isValidAugmentRuleStateForState(determined), true);
+    assert.equal(
+      visibleStateFingerprint(determined, "black", 1_000_000),
+      sourceFingerprint,
+    );
+    assert.equal(
+      determined.pieces.some(
+        (piece) =>
+          piece.side === "white" &&
+          !piece.alive &&
+          determined.augment?.ruleState?.baseTypes[piece.id] === "commander",
+      ),
+      false,
+    );
+  }
+
+  const impossible = createControlledPairGame(
+    "diamond-camp-assault",
+    "diamond-camp-assault",
+    "black",
+    "known-dead-commander-with-hidden-flag",
+  );
+  const commander = impossible.pieces.find(
+    (piece) =>
+      piece.side === "white" &&
+      impossible.augment?.ruleState?.baseTypes[piece.id] === "commander",
+  );
+  assert.ok(commander);
+  commander.alive = false;
+  impossible.augment!.permanentReveals.black = [commander.id];
+  refreshHiddenFallMetadata(impossible, "white");
+  assert.equal(impossible.revealedFlags.white, false);
+  for (let seed = 0; seed < 256; seed += 1) {
+    assert.throws(
+      () => determinizeFromProjection(
+        impossible,
+        "black",
+        `known-dead-commander-with-hidden-flag:${seed}`,
+      ),
+      /no public base-rank explanation|No rules-legal hidden identity assignment/i,
+    );
+  }
+});
+
+test("public mutiny and fusion trigger zero and one constrain sampled fall history", () => {
+  const cases = [
+    {
+      augmentId: "diamond-engineer-mutiny" as const,
+      baseType: "commander" as const,
+    },
+    {
+      augmentId: "diamond-command-fusion" as const,
+      baseType: "general" as const,
+    },
+  ];
+
+  for (const { augmentId, baseType } of cases) {
+    const triggerZero = whiteFallTriggerFixture(
+      augmentId,
+      `${augmentId}:trigger-zero`,
+    );
+    const triggerZeroOther = triggerZero.pieces.find(
+      (piece) =>
+        piece.side === "white" &&
+        triggerZero.augment?.ruleState?.baseTypes[piece.id] === "company",
+    );
+    assert.ok(triggerZeroOther);
+    triggerZeroOther.alive = false;
+    if (baseType === "commander") triggerZero.revealedFlags.white = true;
+    refreshHiddenFallMetadata(triggerZero, "white");
+    assert.equal(triggerZero.augment!.triggerCounts.white[augmentId] ?? 0, 0);
+    const triggerZeroFingerprint = visibleStateFingerprint(
+      triggerZero,
+      "black",
+      1_000_000,
+    );
+    for (let seed = 0; seed < 256; seed += 1) {
+      const determined = determinizeFromProjection(
+        triggerZero,
+        "black",
+        `${augmentId}:trigger-zero:${seed}`,
+        1_000_000,
+      );
+      const sampledOriginal = determined.pieces.find(
+        (piece) =>
+          piece.side === "white" &&
+          determined.augment?.ruleState?.baseTypes[piece.id] === baseType,
+      );
+      assert.ok(sampledOriginal?.alive);
+      assert.equal(isValidAugmentRuleStateForState(determined), true);
+      assert.equal(
+        visibleStateFingerprint(determined, "black", 1_000_000),
+        triggerZeroFingerprint,
+      );
+    }
+
+    const impossibleZero = whiteFallTriggerFixture(
+      augmentId,
+      `${augmentId}:impossible-trigger-zero`,
+    );
+    const knownFallen = impossibleZero.pieces.find(
+      (piece) =>
+        piece.side === "white" &&
+        impossibleZero.augment?.ruleState?.baseTypes[piece.id] === baseType,
+    );
+    assert.ok(knownFallen);
+    knownFallen.alive = false;
+    impossibleZero.augment!.permanentReveals.black = [knownFallen.id];
+    if (baseType === "commander") impossibleZero.revealedFlags.white = true;
+    refreshHiddenFallMetadata(impossibleZero, "white");
+    assert.equal(impossibleZero.augment!.triggerCounts.white[augmentId] ?? 0, 0);
+    assert.throws(
+      () => determinizeFromProjection(
+        impossibleZero,
+        "black",
+        `${augmentId}:impossible-trigger-zero`,
+      ),
+      /no public base-rank explanation|No rules-legal hidden identity assignment/i,
+    );
+
+    const triggerOne = whiteFallTriggerFixture(
+      augmentId,
+      `${augmentId}:trigger-one`,
+    );
+    const hiddenFallen = triggerOne.pieces.find(
+      (piece) =>
+        piece.side === "white" &&
+        triggerOne.augment?.ruleState?.baseTypes[piece.id] === baseType,
+    );
+    assert.ok(hiddenFallen);
+    hiddenFallen.alive = false;
+    triggerOne.augment!.triggerCounts.white[augmentId] = 1;
+    if (baseType === "commander") triggerOne.revealedFlags.white = true;
+    refreshHiddenFallMetadata(triggerOne, "white");
+    const triggerOneFingerprint = visibleStateFingerprint(
+      triggerOne,
+      "black",
+      1_000_000,
+    );
+    for (let seed = 0; seed < 256; seed += 1) {
+      const determined = determinizeFromProjection(
+        triggerOne,
+        "black",
+        `${augmentId}:trigger-one:${seed}`,
+        1_000_000,
+      );
+      assert.equal(
+        determined.augment?.ruleState?.baseTypes[hiddenFallen.id],
+        baseType,
+      );
+      assert.equal(isValidAugmentRuleStateForState(determined), true);
+      assert.equal(
+        visibleStateFingerprint(determined, "black", 1_000_000),
+        triggerOneFingerprint,
+      );
+    }
+
+    const impossibleOne = whiteFallTriggerFixture(
+      augmentId,
+      `${augmentId}:impossible-trigger-one`,
+    );
+    impossibleOne.augment!.triggerCounts.white[augmentId] = 1;
+    if (baseType === "commander") impossibleOne.revealedFlags.white = true;
+    assert.throws(
+      () => determinizeFromProjection(
+        impossibleOne,
+        "black",
+        `${augmentId}:impossible-trigger-one`,
+      ),
+      /No rules-legal hidden identity assignment/i,
+    );
+  }
+});
+
+function lockedUnrevealedFallTriggerFixture(
+  augmentId: "diamond-engineer-mutiny" | "diamond-command-fusion",
+  baseType: "commander" | "general",
+) {
+  let state = createControlledPairGame(
+    "heart-rail-turn",
+    "heart-mobile-rail",
+    "black",
+    `${augmentId}:owner-locked-unrevealed`,
+  );
+  const fallen = state.pieces.find(
+    (piece) =>
+      piece.side === "black" &&
+      state.augment?.ruleState?.baseTypes[piece.id] === baseType,
+  );
+  assert.ok(fallen);
+  fallen.alive = false;
+  if (baseType === "commander") state.revealedFlags.black = true;
+  refreshHiddenFallMetadata(state, "black");
+  state.moveNumber = 9;
+
+  let secondDraft: ReturnType<typeof beginSecondAugmentDraft> | null = null;
+  for (let attempt = 0; attempt < 256 && !secondDraft; attempt += 1) {
+    const random = new SeededRandom(`${augmentId}:owner-offer:${attempt}`);
+    const candidate = beginSecondAugmentDraft(state.augment!.draft, {
+      suit: "diamonds",
+      random: () => random.next(),
+    });
+    const round = candidate.rounds.find((entry) => entry.number === 2)!;
+    if (round.players.black.options.includes(augmentId)) secondDraft = candidate;
+  }
+  assert.ok(secondDraft);
+  state.augment!.draft = secondDraft;
+  state.augment!.resumeTurn = state.turn;
+  state.augment!.draftDeadlineAt = 1_045_000;
+  state.phase = "augment_draft";
+  state = applyPlayerAction(
+    state,
+    "black",
+    { type: "augment_select", augmentId },
+    1_000_000,
+  );
+  state = applyPlayerAction(state, "black", { type: "augment_lock" }, 1_000_000);
+  assert.equal(state.augment?.draft.rounds[1].revealed, false);
+  assert.equal(state.augment?.triggerCounts.black[augmentId] ?? 0, 0);
+  assert.equal(isValidAugmentRuleStateForState(state), true);
+  return { state, fallen };
+}
+
+test("an owner-locked unrevealed fall passive does not reinterpret trigger zero", () => {
+  for (const { augmentId, baseType } of [
+    {
+      augmentId: "diamond-engineer-mutiny" as const,
+      baseType: "commander" as const,
+    },
+    {
+      augmentId: "diamond-command-fusion" as const,
+      baseType: "general" as const,
+    },
+  ]) {
+    const { state, fallen } = lockedUnrevealedFallTriggerFixture(
+      augmentId,
+      baseType,
+    );
+    const ownerView = projectGame(state, "black", 1_000_000);
+    assert.ok(ownerView.augment?.draft.loadouts.black.includes(augmentId));
+    assert.equal(
+      ownerView.augment?.draft.rounds[1].players.black.selectedId,
+      augmentId,
+    );
+    assert.equal(ownerView.augment?.draft.rounds[1].revealed, false);
+    assert.equal(
+      publicFallTriggerExpectation(ownerView, "black", baseType),
+      null,
+    );
+
+    const determined = determinizeFromProjection(
+      state,
+      "black",
+      `${augmentId}:owner-locked-unrevealed`,
+      1_000_000,
+    );
+    assert.equal(isValidAugmentRuleStateForState(determined), true);
+    assert.equal(determined.pieces.find((piece) => piece.id === fallen.id)?.alive, false);
+    assert.equal(
+      determined.augment?.ruleState?.baseTypes[fallen.id],
+      baseType,
+    );
+    assert.equal(
+      visibleStateFingerprint(determined, "black", 1_000_000),
+      visibleStateFingerprint(state, "black", 1_000_000),
+    );
+
+    const premature = structuredClone(state);
+    premature.augment!.triggerCounts.black[augmentId] = 1;
+    assert.equal(isValidAugmentRuleStateForState(premature), false);
+    assert.equal(
+      publicFallTriggerExpectation(
+        projectGame(premature, "black", 1_000_000),
+        "black",
+        baseType,
+      ),
+      null,
+    );
+    assert.throws(
+      () => determinizeFromProjection(
+        premature,
+        "black",
+        `${augmentId}:owner-premature-trigger`,
+        1_000_000,
+      ),
+      /invalid v3 rule state/i,
+    );
+  }
+});
+
+test("an opponent-locked unrevealed fall passive stays private and remains executable", () => {
+  for (const { augmentId, baseType } of [
+    {
+      augmentId: "diamond-engineer-mutiny" as const,
+      baseType: "commander" as const,
+    },
+    {
+      augmentId: "diamond-command-fusion" as const,
+      baseType: "general" as const,
+    },
+  ]) {
+    const { state } = lockedUnrevealedFallTriggerFixture(augmentId, baseType);
+    const alternateAuthority = structuredClone(state);
+    const alternateRound = alternateAuthority.augment!.draft.rounds[1];
+    const alternateId = alternateRound.players.black.options.find(
+      (candidate) => candidate !== augmentId,
+    );
+    assert.ok(alternateId);
+    alternateRound.players.black.selectedId = alternateId;
+    alternateAuthority.augment!.draft.loadouts.black[1] = alternateId;
+    delete alternateAuthority.augment!.triggerCounts.black[augmentId];
+    assert.equal(isValidAugmentRuleStateForState(alternateAuthority), true);
+
+    const originalProjection = projectGame(state, "white", 1_000_000);
+    assert.equal(originalProjection.augment?.draft.rounds[1].players.black.locked, true);
+    assert.equal(originalProjection.augment?.draft.rounds[1].players.black.selectedId, null);
+    assert.equal(originalProjection.augment?.draft.loadouts.black.includes(augmentId), false);
+    assert.deepEqual(
+      projectGame(alternateAuthority, "white", 1_000_000),
+      originalProjection,
+    );
+
+    const seed = `${augmentId}:opponent-locked-unrevealed`;
+    const determined = determinizeFromProjection(
+      state,
+      "white",
+      seed,
+      1_000_000,
+    );
+    assert.deepEqual(
+      determinizeFromProjection(
+        alternateAuthority,
+        "white",
+        seed,
+        1_000_000,
+      ),
+      determined,
+    );
+    assert.equal(isValidAugmentRuleStateForState(determined), true);
+    assert.deepEqual(
+      projectGame(determined, "white", 1_000_000),
+      originalProjection,
+    );
+
+    const sampledRound = determined.augment!.draft.rounds[1];
+    const sampledOpponentId = sampledRound.players.black.selectedId;
+    assert.ok(sampledOpponentId);
+    assert.equal(sampledRound.players.black.locked, true);
+    assert.equal(
+      determined.augment!.draft.loadouts.black.includes(sampledOpponentId),
+      true,
+    );
+    assert.equal(
+      determined.augment!.triggerCounts.black[sampledOpponentId] ?? 0,
+      0,
+    );
+    assert.equal(
+      determined.augment!.usedBySide.black.includes(sampledOpponentId),
+      false,
+    );
+
+    const viewerId = sampledRound.players.white.options[0];
+    let revealed = applyPlayerAction(
+      determined,
+      "white",
+      { type: "augment_select", augmentId: viewerId },
+      1_000_000,
+    );
+    revealed = applyPlayerAction(
+      revealed,
+      "white",
+      { type: "augment_lock" },
+      1_000_000,
+    );
+    assert.equal(revealed.phase, "playing");
+    assert.equal(revealed.augment?.draft.rounds[1].revealed, true);
+    assert.equal(isValidAugmentRuleStateForState(revealed), true);
+    assert.ok(
+      enumerateVisibleActions(
+        projectGame(revealed, revealed.turn, 1_000_000),
+        revealed.turn,
+      ).length > 0,
+    );
+  }
+});
+
+function whiteLightningFixture(seed: string) {
+  return createControlledPairGame(
+    "spade-last-headquarters",
+    "spade-lightning-doctrine",
+    "white",
+    seed,
+  );
+}
+
+function sideTypeCounts(
+  state: GameState,
+  side: Side,
+  source: "current" | "base",
+) {
+  return Object.fromEntries(
+    (Object.keys(PIECE_INFO) as PieceType[]).map((type) => [
+      type,
+      state.pieces.filter(
+        (piece) =>
+          piece.side === side &&
+          (source === "current"
+            ? piece.type
+            : state.augment?.ruleState?.baseTypes[piece.id]) === type,
+      ).length,
+    ]),
+  );
+}
+
+test("lightning sampled worlds separate canonical bases from effective current ranks", () => {
+  const state = whiteLightningFixture("lightning-effective-current-pool");
+  const sourceFingerprint = visibleStateFingerprint(state, "black", 1_000_000);
+  for (let seed = 0; seed < 64; seed += 1) {
+    const determined = determinizeFromProjection(
+      state,
+      "black",
+      `lightning-effective-current-pool:${seed}`,
+      1_000_000,
+    );
+    assert.equal(isValidAugmentRuleStateForState(determined), true);
+    assert.equal(
+      visibleStateFingerprint(determined, "black", 1_000_000),
+      sourceFingerprint,
+    );
+    assert.deepEqual(
+      sideTypeCounts(determined, "white", "base"),
+      Object.fromEntries(
+        (Object.keys(PIECE_INFO) as PieceType[]).map((type) => [type, PIECE_INFO[type].count]),
+      ),
+    );
+    const current = sideTypeCounts(determined, "white", "current");
+    assert.equal(current.commander, 2);
+    assert.equal(current.general, 2);
+    assert.equal(current.battalion, 3);
+    assert.equal(current.company, 3);
+    assert.equal(current.platoon, 0);
+    for (const type of ["commander", "engineer", "bomb", "mine", "flag"] as const) {
+      for (const piece of determined.pieces.filter(
+        (candidate) =>
+          candidate.side === "white" &&
+          determined.augment?.ruleState?.baseTypes[candidate.id] === type,
+      )) {
+        assert.equal(piece.type, type);
+      }
+    }
+  }
+});
+
+test("lightning capacity accepts two known generals and rejects a third", () => {
+  const state = whiteLightningFixture("lightning-two-generals");
+  const divisions = state.pieces.filter(
+    (piece) =>
+      piece.side === "white" &&
+      state.augment?.ruleState?.baseTypes[piece.id] === "division",
+  );
+  assert.equal(divisions.length, 2);
+  state.augment!.permanentReveals.black = divisions.map((piece) => piece.id);
+  for (let seed = 0; seed < 64; seed += 1) {
+    const determined = determinizeFromProjection(
+      state,
+      "black",
+      `lightning-two-generals:${seed}`,
+    );
+    assert.equal(isValidAugmentRuleStateForState(determined), true);
+    for (const piece of divisions) {
+      assert.equal(
+        determined.augment?.ruleState?.baseTypes[piece.id],
+        "division",
+      );
+      assert.equal(
+        determined.pieces.find((candidate) => candidate.id === piece.id)?.type,
+        "general",
+      );
+    }
+  }
+
+  const impossible = structuredClone(state);
+  const third = impossible.pieces.find(
+    (piece) =>
+      piece.side === "white" &&
+      impossible.augment?.ruleState?.baseTypes[piece.id] === "brigade",
+  );
+  assert.ok(third);
+  third.type = "general";
+  impossible.augment!.permanentReveals.black.push(third.id);
+  assert.throws(
+    () => determinizeFromProjection(impossible, "black", "lightning-three-generals"),
+    /No rules-legal hidden identity assignment/,
+  );
+});
+
+test("without lightning a second known current general remains impossible", () => {
+  const state = createControlledPairGame(
+    "spade-last-headquarters",
+    "spade-cherry-bomb",
+    "white",
+    "two-generals-without-lightning",
+  );
+  const general = state.pieces.find(
+    (piece) => piece.side === "white" && piece.type === "general",
+  );
+  const division = state.pieces.find(
+    (piece) => piece.side === "white" && piece.type === "division",
+  );
+  assert.ok(general && division);
+  division.type = "general";
+  state.augment!.permanentReveals.black = [general.id, division.id];
+  assert.throws(
+    () => determinizeFromProjection(state, "black", "two-generals-without-lightning"),
+    /No rules-legal hidden identity assignment/,
+  );
+});
+
+test("lightning commander ambiguity is sampled from public capacity only", () => {
+  const state = whiteLightningFixture("lightning-two-commanders");
+  const commanders = state.pieces.filter(
+    (piece) => piece.side === "white" && piece.type === "commander",
+  );
+  assert.equal(commanders.length, 2);
+  state.augment!.permanentReveals.black = commanders.map((piece) => piece.id);
+
+  const swappedAuthority = structuredClone(state);
+  const firstBase = swappedAuthority.augment!.ruleState!.baseTypes[commanders[0].id];
+  const secondBase = swappedAuthority.augment!.ruleState!.baseTypes[commanders[1].id];
+  swappedAuthority.augment!.ruleState!.baseTypes[commanders[0].id] = secondBase;
+  swappedAuthority.augment!.ruleState!.baseTypes[commanders[1].id] = firstBase;
+  assert.equal(isValidAugmentRuleStateForState(state), true);
+  assert.equal(isValidAugmentRuleStateForState(swappedAuthority), true);
+  assert.deepEqual(
+    projectGame(swappedAuthority, "black", 1_000_000),
+    projectGame(state, "black", 1_000_000),
+  );
+  const posteriorScore = evaluateVisibleState(state, "black", 1_000_000);
+  assert.equal(Number.isFinite(posteriorScore), true);
+  assert.equal(
+    evaluateVisibleState(swappedAuthority, "black", 1_000_000),
+    posteriorScore,
+  );
+
+  for (let seed = 0; seed < 64; seed += 1) {
+    const first = determinizeFromProjection(
+      state,
+      "black",
+      `lightning-two-commanders:${seed}`,
+    );
+    const second = determinizeFromProjection(
+      swappedAuthority,
+      "black",
+      `lightning-two-commanders:${seed}`,
+    );
+    assert.deepEqual(second, first);
+    assert.deepEqual(
+      commanders
+        .map((piece) => first.augment?.ruleState?.baseTypes[piece.id])
+        .sort(),
+      ["commander", "general"],
+    );
+    assert.equal(isValidAugmentRuleStateForState(first), true);
+  }
+
+  const impossible = structuredClone(state);
+  const third = impossible.pieces.find(
+    (piece) =>
+      piece.side === "white" &&
+      impossible.augment?.ruleState?.baseTypes[piece.id] === "division",
+  );
+  assert.ok(third);
+  third.type = "commander";
+  impossible.augment!.permanentReveals.black.push(third.id);
+  assert.throws(
+    () => determinizeFromProjection(impossible, "black", "lightning-three-commanders"),
+    /No rules-legal hidden identity assignment/,
+  );
+});
+
+test("dead lightning ranks do not reveal whether doctrine applied before removal", () => {
+  const afterDoctrine = whiteLightningFixture("dead-lightning-private-history");
+  const target = afterDoctrine.pieces.find(
+    (piece) =>
+      piece.side === "white" &&
+      afterDoctrine.augment?.ruleState?.baseTypes[piece.id] === "regiment",
+  );
+  assert.ok(target);
+  target.alive = false;
+  afterDoctrine.augment!.ruleState!.casualties.white = 1;
+  const beforeDoctrine = structuredClone(afterDoctrine);
+  beforeDoctrine.pieces.find((piece) => piece.id === target.id)!.type = "regiment";
+  assert.equal(isValidAugmentRuleStateForState(afterDoctrine), true);
+  assert.equal(isValidAugmentRuleStateForState(beforeDoctrine), true);
+  assert.deepEqual(
+    projectGame(beforeDoctrine, "black", 1_000_000),
+    projectGame(afterDoctrine, "black", 1_000_000),
+  );
+  for (let seed = 0; seed < 32; seed += 1) {
+    assert.deepEqual(
+      determinizeFromProjection(
+        beforeDoctrine,
+        "black",
+        `dead-lightning-private-history:${seed}`,
+      ),
+      determinizeFromProjection(
+        afterDoctrine,
+        "black",
+        `dead-lightning-private-history:${seed}`,
+      ),
+    );
+  }
+});
+
+function lightningWithPublicBattalionPromotion() {
+  let state = createControlledPairGame(
+    "spade-lightning-doctrine",
+    "spade-last-headquarters",
+    "black",
+    "lightning-public-battalion-promotion",
+  );
+  state.moveNumber = 9;
+  let secondDraft: ReturnType<typeof beginSecondAugmentDraft> | null = null;
+  let whitePick: AugmentId | null = null;
+  for (let attempt = 0; attempt < 256 && !secondDraft; attempt += 1) {
+    const random = new SeededRandom(`lightning-public-promotion:${attempt}`);
+    const candidate = beginSecondAugmentDraft(state.augment!.draft, {
+      suit: "hearts",
+      random: () => random.next(),
+    });
+    const round = candidate.rounds.find((entry) => entry.number === 2)!;
+    if (!round.players.black.options.includes("heart-battalion-ascent")) continue;
+    whitePick = round.players.white.options.find(
+      (id) => getAugmentDefinition(id).effect.kind !== "promotion",
+    ) ?? null;
+    if (whitePick) secondDraft = candidate;
+  }
+  assert.ok(secondDraft && whitePick);
+  state.augment!.draft = secondDraft;
+  state.augment!.resumeTurn = state.turn;
+  state.augment!.draftDeadlineAt = 1_045_000;
+  state.phase = "augment_draft";
+  state = applyPlayerAction(
+    state,
+    "black",
+    { type: "augment_select", augmentId: "heart-battalion-ascent" },
+    1_000_000,
+  );
+  state = applyPlayerAction(state, "black", { type: "augment_lock" }, 1_000_000);
+  state = applyPlayerAction(
+    state,
+    "white",
+    { type: "augment_select", augmentId: whitePick },
+    1_000_000,
+  );
+  state = applyPlayerAction(state, "white", { type: "augment_lock" }, 1_000_000);
+
+  const promoted = state.pieces.find(
+    (piece) =>
+      piece.side === "black" &&
+      state.augment?.ruleState?.baseTypes[piece.id] === "battalion",
+  );
+  assert.ok(promoted);
+  promoted.type = "brigade";
+  state.augment!.ruleState!.promotedPublicIds.push(promoted.id);
+  state.augment!.triggerCounts.black["heart-battalion-ascent"] = 1;
+  assert.equal(isValidAugmentRuleStateForState(state), true);
+  return { state, promoted };
+}
+
+test("public promotion composes with lightning without exposing authoritative bases", () => {
+  const { state, promoted } = lightningWithPublicBattalionPromotion();
+  const sourceFingerprint = visibleStateFingerprint(state, "white", 1_000_000);
+  for (let seed = 0; seed < 32; seed += 1) {
+    const determined = determinizeFromProjection(
+      state,
+      "white",
+      `lightning-public-battalion-promotion:${seed}`,
+      1_000_000,
+    );
+    assert.equal(isValidAugmentRuleStateForState(determined), true);
+    assert.equal(
+      visibleStateFingerprint(determined, "white", 1_000_000),
+      sourceFingerprint,
+    );
+    assert.equal(
+      determined.augment?.ruleState?.baseTypes[promoted.id],
+      "battalion",
+    );
+    assert.equal(
+      determined.pieces.find((piece) => piece.id === promoted.id)?.type,
+      "brigade",
+    );
+  }
+});
+
+test("a public promotion marker with no public source fails closed", () => {
+  const state = whiteLightningFixture("invalid-public-promotion-source");
+  const target = state.pieces.find(
+    (piece) =>
+      piece.side === "white" &&
+      state.augment?.ruleState?.baseTypes[piece.id] === "division",
+  );
+  assert.ok(target);
+  state.augment!.ruleState!.promotedPublicIds.push(target.id);
+  assert.throws(
+    () => determinizeFromProjection(state, "black", "invalid-public-promotion-source"),
+    /no public base-rank explanation/,
+  );
+});
+
+test("the exact lightning projection regression now finishes one uncapped leg", () => {
+  const pairing = {
+    suit: "spades" as const,
+    cardA: "spade-last-headquarters" as const,
+    cardB: "spade-lightning-doctrine" as const,
+    pairKey: "stability:spades:spade-last-headquarters::spade-lightning-doctrine",
+  };
+  const group = scheduleGroup(pairing, 6, 0);
+  const result = playLeg(
+    group,
+    mirrorLegs(group.cardA, group.cardB)[2],
+    {
+      seed: 20260811,
+      maxActions: 300,
+      thinkTimeMinMs: 0,
+      thinkTimeMaxMs: 0,
+      search: SEARCH,
+      refreshMargin: 4,
+    },
+  );
+  assert.equal(result.pairedSeed, 4073025779);
+  assert.equal(result.exception, null);
+  assert.equal(result.finished, true);
+  assert.equal(result.capped, false);
+  assert.equal(result.stuck, false);
+});
+
 test("determinization rejects an ongoing projection with no legal living flag host", () => {
   const state = createControlledPairGame(
     "club-forced-march",
@@ -2326,6 +3120,38 @@ test("determinization preserves temporary reveal expiry and supports legacy proj
     permanent: [mover.id],
     temporary: [],
   });
+});
+
+test("a permanent reconnaissance reveal survives a later public flag reveal", () => {
+  const state = createControlledPairGame(
+    "club-local-recon",
+    "club-line-hop",
+    "black",
+    "permanent-recon-then-public-flag",
+  );
+  const flag = state.pieces.find(
+    (piece) => piece.side === "white" && piece.type === "flag",
+  );
+  assert.ok(flag);
+  state.augment!.permanentReveals.black = [flag.id];
+  state.augment!.temporaryReveals.black = [];
+  state.revealedFlags.white = true;
+  const projected = projectGame(state, "black", 1_000_000);
+  assert.deepEqual(projectedRevealKnowledge(projected, "black"), {
+    permanent: [flag.id],
+    temporary: [],
+  });
+  const determined = determinizeFromProjection(
+    state,
+    "black",
+    "permanent-recon-then-public-flag",
+    1_000_000,
+  );
+  assert.deepEqual(determined.augment?.permanentReveals.black, [flag.id]);
+  assert.equal(
+    visibleStateFingerprint(determined, "black", 1_000_000),
+    visibleStateFingerprint(state, "black", 1_000_000),
+  );
 });
 
 test("revealing any rank changes only the explicit information value at full inventory", () => {
@@ -2643,6 +3469,10 @@ test("second-round opponent reconnaissance stays executable in sampled worlds an
     .slice(0, 10)) {
     target.alive = false;
   }
+  refreshHiddenFallMetadata(base, "black");
+  if (base.augment!.ruleState!.commanderFallen.black) {
+    base.revealedFlags.black = true;
+  }
 
   let state: GameState | null = null;
   for (let attempt = 0; attempt < 100 && !state; attempt += 1) {
@@ -2870,7 +3700,10 @@ test("visible policy consumes the server-authoritative legacy reconnaissance tar
     "black",
     "legacy-recon-targets",
   );
+  state.rulesVersion = LEGACY_AUGMENT_RULES_VERSION;
   state.augment!.draft.catalogVersion = LEGACY_AUGMENT_CATALOG_VERSION;
+  delete state.augment!.ruleState;
+  delete state.repetitionTracker;
   const openingRound = state.augment!.draft.rounds[0];
   openingRound.suit = "hearts";
   openingRound.players.black.options = [
@@ -3097,10 +3930,13 @@ function extraMoveChoiceState(kind: "forced_loss" | "capture_flag") {
     (candidate) => candidate.side === "black" && candidate.type === "platoon",
   );
   assert.ok(previousMover);
+  Object.assign(previousMover, { alive: true, row: 11, col: 0 });
   state.augment!.extraMove.black = {
     augmentId: "spade-command-chain",
     excludedPieceId: previousMover.id,
   };
+  state.augment!.triggerCounts.black["spade-command-chain"] = 1;
+  state.augment!.usedBySide.black = ["spade-command-chain"];
 
   if (kind === "forced_loss") {
     const engineer = state.pieces.find(
@@ -3126,6 +3962,12 @@ function extraMoveChoiceState(kind: "forced_loss" | "capture_flag") {
     Object.assign(commander, { alive: true, row: 0, col: 0 });
     Object.assign(flag, { alive: true, row: 0, col: 1 });
     state.revealedFlags.white = true;
+  }
+  for (const side of ["black", "white"] as const) {
+    refreshHiddenFallMetadata(state, side);
+    if (state.augment!.ruleState!.commanderFallen[side]) {
+      state.revealedFlags[side] = true;
+    }
   }
   return state;
 }
@@ -3326,12 +4168,12 @@ test("checkpoint validation and remaining schedule make resume idempotent", () =
   assert.equal(restored.algorithmVersion, BALANCE_ALGORITHM_VERSION);
   assert.equal(
     BALANCE_ALGORITHM_VERSION,
-    "product-stability-v15-v3-no-clock-zero-time-deterministic-ids-slot-stable-drafts-relocation-aware-worlds",
+    "product-stability-v17-v3-no-clock-zero-time-deterministic-ids-slot-stable-drafts-relocation-aware-public-rank-capacity-worlds-private-draft-fidelity",
   );
   assert.equal(restored.engineRulesFingerprint, BALANCE_ENGINE_RULES_FINGERPRINT);
   assert.equal(
     BALANCE_ENGINE_RULES_FINGERPRINT,
-    "augment-duel-dark-v3:threefold-3:strategic-sha256-v2",
+    "augment-duel-dark-v3:threefold-3:strategic-sha256-v3",
   );
   assert.notEqual(
     tournamentConfigFingerprint(OPTIONS),
@@ -3363,6 +4205,16 @@ test("checkpoint validation and remaining schedule make resume idempotent", () =
     "product-stability-v14-v3-no-clock-zero-time-deterministic-ids-slot-stable-drafts";
   assert.throws(() => validateCheckpoint(v14, OPTIONS, pairings), /algorithm/i);
 
+  const v15 = JSON.parse(JSON.stringify(checkpoint));
+  v15.algorithmVersion =
+    "product-stability-v15-v3-no-clock-zero-time-deterministic-ids-slot-stable-drafts-relocation-aware-worlds";
+  assert.throws(() => validateCheckpoint(v15, OPTIONS, pairings), /algorithm/i);
+
+  const v16 = JSON.parse(JSON.stringify(checkpoint));
+  v16.algorithmVersion =
+    "product-stability-v16-v3-no-clock-zero-time-deterministic-ids-slot-stable-drafts-relocation-aware-public-rank-capacity-worlds";
+  assert.throws(() => validateCheckpoint(v16, OPTIONS, pairings), /algorithm/i);
+
   const v6 = JSON.parse(JSON.stringify(checkpoint));
   v6.algorithmVersion = "hidden-info-balance-v6-full-threshold-increment";
   assert.throws(() => validateCheckpoint(v6, OPTIONS, pairings), /algorithm/i);
@@ -3386,6 +4238,14 @@ test("checkpoint validation and remaining schedule make resume idempotent", () =
   const wrongRules = JSON.parse(JSON.stringify(checkpoint));
   wrongRules.engineRulesFingerprint = "older-engine-rules";
   assert.throws(() => validateCheckpoint(wrongRules, OPTIONS, pairings), /engine rules/i);
+
+  const previousEngineRules = JSON.parse(JSON.stringify(checkpoint));
+  previousEngineRules.engineRulesFingerprint =
+    "augment-duel-dark-v3:threefold-3:strategic-sha256-v2";
+  assert.throws(
+    () => validateCheckpoint(previousEngineRules, OPTIONS, pairings),
+    /engine rules/i,
+  );
 
   const staleMetrics = JSON.parse(JSON.stringify(checkpoint));
   delete staleMetrics.aggregate.global.passExtraMoves;
@@ -3498,7 +4358,7 @@ test("card aggregation separates opportunity and first-trigger timing from raw n
   );
 });
 
-test("same-tier v15 scores adjudicated threefold draws as 0.5 without hiding action caps", () => {
+test("same-tier v17 scores adjudicated threefold draws as 0.5 without hiding action caps", () => {
   const pairing = buildRoundRobinPairings()[0];
   const group = scheduleGroup(pairing, 0, 0);
   const results = playMirrorGroup(group, OPTIONS).map((result) => ({
@@ -3522,7 +4382,7 @@ test("same-tier v15 scores adjudicated threefold draws as 0.5 without hiding act
   assert.equal(aggregate.cards[group.cardA].threefoldDraws, 4);
 });
 
-test("v15 cross-tier diagnostic schedule balances legal round order and isolates setup cards", () => {
+test("v17 cross-tier diagnostic schedule balances legal round order and isolates setup cards", () => {
   const representatives = selectTierRepresentatives();
   assert.equal(representatives.length, 4);
   assert.equal(buildCrossTierComparisons().length, 6);
@@ -3617,7 +4477,7 @@ test("v15 cross-tier diagnostic schedule balances legal round order and isolates
   assert.ok(setupState.augment?.draft.loadouts[setupSide].includes(setupFocal));
 });
 
-test("v15 second focal is absent at move zero and selected in the formal move-10 draft", () => {
+test("v17 second focal is absent at move zero and selected in the formal move-10 draft", () => {
   const group = buildCrossTierExperimentSchedule(0).find(
     (candidate) =>
       candidate.stratum === "round_order" && candidate.roundOrder === "higher_first",
@@ -3643,7 +4503,7 @@ test("v15 second focal is absent at move zero and selected in the formal move-10
   assert.equal(result.focal.white.selected, true);
 });
 
-test("v15 common random seed excludes card IDs and one four-leg mirror shares it", () => {
+test("v17 common random seed excludes card IDs and one four-leg mirror shares it", () => {
   const group = buildCrossTierExperimentSchedule(0).find(
     (candidate) => candidate.stratum === "round_order",
   );
@@ -3666,7 +4526,7 @@ test("v15 common random seed excludes card IDs and one four-leg mirror shares it
   assert.ok(results.every((result) => result.secondDraftRevealed));
 });
 
-test("v15 leg ledger and report preserve finish, focal trigger, opportunity and stop status", () => {
+test("v17 leg ledger and report preserve finish, focal trigger, opportunity and stop status", () => {
   const group = buildCrossTierExperimentSchedule(0).find(
     (candidate) => candidate.stratum === "round_order",
   );
@@ -3795,7 +4655,7 @@ test("v15 leg ledger and report preserve finish, focal trigger, opportunity and 
   );
 });
 
-test("cross-tier v15 preserves drawReason and scores each product threefold draw as 0.5", () => {
+test("cross-tier v17 preserves drawReason and scores each product threefold draw as 0.5", () => {
   const options = { ...OPTIONS, maxActions: 10 };
   const group = buildCrossTierExperimentSchedule(0).find(
     (candidate) => candidate.stratum === "round_order",
@@ -3826,7 +4686,7 @@ test("cross-tier v15 preserves drawReason and scores each product threefold draw
   assert.equal(row?.higherScore?.estimate, 0.5);
 });
 
-test("v15 setup results remain outside pure round-order tier estimates", () => {
+test("v17 setup results remain outside pure round-order tier estimates", () => {
   const group = buildCrossTierExperimentSchedule(0).find(
     (candidate) => candidate.stratum === "setup",
   );
@@ -3866,7 +4726,7 @@ test("v15 setup results remain outside pure round-order tier estimates", () => {
   assert.equal(card?.setupCompleteMirrorGroups, 1);
 });
 
-test("v15 cross-tier estimates are card-equal and use deterministic mirror-group bootstrap", () => {
+test("v17 cross-tier estimates are card-equal and use deterministic mirror-group bootstrap", () => {
   const samples: CrossTierMirrorSample[] = [
     {
       groupKey: "g0",
@@ -3914,7 +4774,7 @@ test("v15 cross-tier estimates are card-equal and use deterministic mirror-group
   assert.ok(first && first.low >= 0 && first.high <= 1);
 });
 
-test("v15 technical acceptance rejects an incomplete favorable sample without gating on ordering", () => {
+test("v17 technical acceptance rejects an incomplete favorable sample without gating on ordering", () => {
   const tournament = { ...OPTIONS, maxActions: 10 };
   const groups = buildCrossTierComparisons().map((comparison) => {
     const group = buildCrossTierExperimentSchedule(0).find(
@@ -4013,6 +4873,22 @@ test("cross-tier checkpoints bind the balance algorithm and reject legacy eviden
     /algorithm/i,
   );
 
+  const v15 = JSON.parse(JSON.stringify(checkpoint));
+  v15.algorithmVersion =
+    "product-stability-v15-v3-no-clock-zero-time-deterministic-ids-slot-stable-drafts-relocation-aware-worlds";
+  assert.throws(
+    () => validateCrossTierCheckpoint(v15, OPTIONS),
+    /algorithm/i,
+  );
+
+  const v16 = JSON.parse(JSON.stringify(checkpoint));
+  v16.algorithmVersion =
+    "product-stability-v16-v3-no-clock-zero-time-deterministic-ids-slot-stable-drafts-relocation-aware-public-rank-capacity-worlds";
+  assert.throws(
+    () => validateCrossTierCheckpoint(v16, OPTIONS),
+    /algorithm/i,
+  );
+
   const v6 = JSON.parse(JSON.stringify(checkpoint));
   v6.algorithmVersion = "hidden-info-balance-v6-full-threshold-increment";
   assert.throws(() => validateCrossTierCheckpoint(v6, OPTIONS), /algorithm/i);
@@ -4036,6 +4912,14 @@ test("cross-tier checkpoints bind the balance algorithm and reject legacy eviden
   const wrongRules = JSON.parse(JSON.stringify(checkpoint));
   wrongRules.engineRulesFingerprint = "older-engine-rules";
   assert.throws(() => validateCrossTierCheckpoint(wrongRules, OPTIONS), /engine rules/i);
+
+  const previousEngineRules = JSON.parse(JSON.stringify(checkpoint));
+  previousEngineRules.engineRulesFingerprint =
+    "augment-duel-dark-v3:threefold-3:strategic-sha256-v2";
+  assert.throws(
+    () => validateCrossTierCheckpoint(previousEngineRules, OPTIONS),
+    /engine rules/i,
+  );
 
   const missingOptions = JSON.parse(JSON.stringify(checkpoint));
   delete missingOptions.options;

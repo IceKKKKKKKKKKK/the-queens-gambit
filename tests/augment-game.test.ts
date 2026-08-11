@@ -55,6 +55,7 @@ import {
   isValidRepetitionTrackerForState,
   isValidAugmentRuleStateForState,
   isAllowedSetupPosition,
+  isHeadquarters,
   movementAnimationForTransition,
   projectGame,
   seedRepetitionTrackerFromCurrentPosition,
@@ -466,6 +467,64 @@ function forceSecondRoundSpades(state: GameState) {
   return round;
 }
 
+function forceSecondRoundOption(state: GameState, blackId: AugmentId) {
+  const round = state.augment!.draft.rounds[1];
+  const previousOptions = {
+    black: [...round.players.black.options],
+    white: [...round.players.white.options],
+  };
+  const suit = getAugmentDefinition(blackId).suit;
+  const options: Record<Side, AugmentOptions> = {
+    black: optionsWith(blackId, 2),
+    white: optionsWith(SAFE_WHITE_SELECTION[suit], 2),
+  };
+  round.suit = suit;
+  for (const side of ["black", "white"] as const) {
+    state.augment!.draft.seenBySide[side] = state.augment!.draft.seenBySide[side]
+      .filter((id) => !previousOptions[side].includes(id));
+    round.players[side] = {
+      options: options[side],
+      selectedId: null,
+      locked: false,
+      refreshedSlot: null,
+    };
+    state.augment!.draft.seenBySide[side].push(...options[side]);
+  }
+  return round;
+}
+
+function advanceFullStateToSecondDraft(
+  state: GameState,
+  nowMs: number,
+  excludedTargets: readonly Position[] = [],
+) {
+  state.moveNumber = 8;
+  const side = state.turn;
+  const quietMove = state.pieces
+    .filter((piece) => piece.alive && piece.side === side)
+    .flatMap((piece) =>
+      getLegalTargets(state, side, piece)
+        .filter(
+          (target) =>
+            !state.pieces.some(
+              (candidate) => candidate.alive && candidate.row === target.row && candidate.col === target.col,
+            ) &&
+            !excludedTargets.some(
+              (excluded) => excluded.row === target.row && excluded.col === target.col,
+            ),
+        )
+        .map((target) => ({
+          from: { row: piece.row, col: piece.col },
+          to: target,
+        })),
+    )[0];
+  assert.ok(quietMove);
+  if (state.clock) state.clock.turnStartedAt = nowMs;
+  const next = applyPlayerAction(state, side, { type: "move", ...quietMove }, nowMs + 1);
+  assert.equal(next.phase, "augment_draft");
+  return next;
+}
+
 test("the augment engine catalog exposes every one of the seventy cards", () => {
   assert.deepEqual([...ALL_AUGMENT_IDS].sort(), AUGMENT_CATALOG.map((augment) => augment.id).sort());
 });
@@ -504,7 +563,7 @@ test("the v2 repetition contract stays frozen while v3 is current and legacy roo
   );
   assert.equal(
     THREEFOLD_REPETITION_RULES_FINGERPRINT,
-    "augment-duel-dark-v3:threefold-3:strategic-sha256-v2",
+    "augment-duel-dark-v3:threefold-3:strategic-sha256-v3",
   );
   const deterministic = createAugmentGame({ repetitionSalt: "paired-seed-17" });
   assert.equal(deterministic.repetitionTracker?.salt, "paired-seed-17");
@@ -1502,6 +1561,7 @@ test("either player may resign during the paused second draft", () => {
 test("a 45-second second-draft deadline preserves one locked choice and deterministically fills the timeout", () => {
   const enteredAt = 10_000;
   let state = enterSecondDraft(enteredAt);
+  forceSecondRoundOption(state, "club-forced-march");
   assert.equal(AUGMENT_DRAFT_TIMEOUT_MS, 45_000);
   assert.equal(state.augment?.draftDeadlineAt, enteredAt + AUGMENT_DRAFT_TIMEOUT_MS);
   const round = state.augment!.draft.rounds[1];
@@ -3902,10 +3962,10 @@ test("v3 objective and setup cards enforce the extra headquarters and rear-row d
     blackAugments: ["spade-grand-maneuver"],
     whiteAugments: ["spade-last-headquarters"],
     pieces: [
-      piece("flag", "white", "flag", 11, 1),
-      piece("attacker", "black", "platoon", 10, 1),
-      piece("occupier", "black", "platoon", 10, 3),
-      piece("white-spare", "white", "platoon", 8, 4),
+      piece("flag", "white", "flag", 0, 1),
+      piece("attacker", "black", "platoon", 1, 1),
+      piece("occupier", "black", "platoon", 1, 3),
+      piece("white-spare", "white", "platoon", 3, 4),
     ],
   });
   const objectiveBefore = projectGame(objective, "black");
@@ -3913,15 +3973,15 @@ test("v3 objective and setup cards enforce the extra headquarters and rear-row d
     getProjectedMoveViolation(
       objectiveBefore,
       "black",
-      { row: 10, col: 1 },
-      { row: 11, col: 1 },
+      { row: 1, col: 1 },
+      { row: 0, col: 1 },
     ),
     null,
   );
   const protectedFlag = applyPlayerAction(objective, "black", {
     type: "move",
-    from: { row: 10, col: 1 },
-    to: { row: 11, col: 1 },
+    from: { row: 1, col: 1 },
+    to: { row: 0, col: 1 },
   });
   assert.equal(protectedFlag.phase, "playing");
   assert.equal(protectedFlag.turn, "white");
@@ -3929,7 +3989,7 @@ test("v3 objective and setup cards enforce the extra headquarters and rear-row d
   assert.equal(protectedFlag.events.at(-1)?.result, "flag_protected");
   assert.equal(protectedFlag.replay?.moves[0].result, "flag_protected");
   assert.equal(protectedFlag.pieces.find((candidate) => candidate.id === "flag")?.alive, true);
-  assert.equal(protectedFlag.pieces.find((candidate) => candidate.id === "attacker")?.row, 10);
+  assert.equal(protectedFlag.pieces.find((candidate) => candidate.id === "attacker")?.row, 1);
   assert.equal(
     movementAnimationForTransition(objectiveBefore, projectGame(protectedFlag, "black"))?.outcome,
     "repelled",
@@ -3937,19 +3997,43 @@ test("v3 objective and setup cards enforce the extra headquarters and rear-row d
   protectedFlag.turn = "black";
   const unlocked = applyPlayerAction(protectedFlag, "black", {
     type: "move",
-    from: { row: 10, col: 3 },
-    to: { row: 11, col: 3 },
+    from: { row: 1, col: 3 },
+    to: { row: 0, col: 3 },
   });
   assert.equal(unlocked.augment?.ruleState?.headquartersUnlocked.white, true);
   assert.equal(unlocked.replay?.moves.at(-1)?.effects?.[0]?.result, "headquarters_unlocked");
   unlocked.turn = "black";
   const captured = applyPlayerAction(unlocked, "black", {
     type: "move",
-    from: { row: 10, col: 1 },
-    to: { row: 11, col: 1 },
+    from: { row: 1, col: 1 },
+    to: { row: 0, col: 1 },
   });
   assert.equal(captured.finishReason, "flag");
   assert.equal(captured.winner, "black");
+
+  const ownHeadquarters = v3PlayingState({
+    blackAugments: ["spade-grand-maneuver"],
+    whiteAugments: ["spade-last-headquarters"],
+    pieces: [
+      piece("black-flag", "black", "flag", 11, 1),
+      piece("own-occupier", "black", "platoon", 10, 3),
+      piece("white-flag", "white", "flag", 0, 1),
+      piece("white-spare", "white", "platoon", 3, 4),
+    ],
+  });
+  const ownHeadquartersOccupied = applyPlayerAction(ownHeadquarters, "black", {
+    type: "move",
+    from: { row: 10, col: 3 },
+    to: { row: 11, col: 3 },
+  });
+  assert.equal(
+    ownHeadquartersOccupied.augment?.ruleState?.headquartersUnlocked.white,
+    false,
+  );
+  assert.equal(
+    ownHeadquartersOccupied.augment?.triggerCounts.white["spade-last-headquarters"] ?? 0,
+    0,
+  );
 
   const flexibleFlag = v3PlayingState({
     blackAugments: ["spade-grand-maneuver", "diamond-camp-transfer"],
@@ -4535,6 +4619,271 @@ test("v3 lightning boosts only eligible combat ranks and destroys its own flag a
   assert.equal(expired.replay?.moves[0].effects?.some((effect) => effect.result === "flag_destroyed"), true);
 });
 
+test("v3 fallen command passives catch up exactly once when the second round is jointly revealed", () => {
+  for (const [baseType, fallenKey, augmentId] of [
+    ["commander", "commanderFallen", "diamond-engineer-mutiny"],
+    ["general", "generalFallen", "diamond-command-fusion"],
+  ] as const) {
+    let state = startWithOpeningAugment("spade-grand-maneuver", 1_000);
+    const ruleState = state.augment!.ruleState!;
+    const victim = state.pieces.find(
+      (piece) => piece.side === "black" && ruleState.baseTypes[piece.id] === baseType,
+    )!;
+    const bomb = state.pieces.find(
+      (piece) => piece.side === "white" && ruleState.baseTypes[piece.id] === "bomb",
+    )!;
+    const placeBySwap = (selected: Piece, target: Position) => {
+      const occupant = state.pieces.find(
+        (piece) =>
+          piece.alive &&
+          piece.id !== selected.id &&
+          piece.row === target.row &&
+          piece.col === target.col,
+      );
+      if (occupant) swapPositions(selected, occupant);
+      else Object.assign(selected, target);
+    };
+    placeBySwap(victim, { row: 6, col: 0 });
+    placeBySwap(bomb, { row: 5, col: 0 });
+    state.turn = "white";
+    state.clock!.turnStartedAt = 1_000;
+    assert.equal(
+      getMoveViolation(state, "white", { row: 5, col: 0 }, { row: 6, col: 0 }),
+      null,
+    );
+
+    state = applyPlayerAction(state, "white", {
+      type: "move",
+      from: { row: 5, col: 0 },
+      to: { row: 6, col: 0 },
+    }, 1_001);
+    assert.equal(state.augment?.ruleState?.[fallenKey].black, true);
+    if (baseType === "commander") assert.equal(state.revealedFlags.black, true);
+    assert.equal(state.augment?.triggerCounts.black[augmentId] ?? 0, 0);
+    assert.equal(isValidAugmentRuleStateForState(state), true);
+    assert.equal(
+      isValidAugmentRuleStateForState(JSON.parse(JSON.stringify(state)) as GameState),
+      true,
+    );
+
+    state = advanceFullStateToSecondDraft(
+      state,
+      1_002,
+      [{ row: 6, col: 0 }, { row: 5, col: 0 }],
+    );
+    forceSecondRoundOption(state, augmentId);
+    state = applyPlayerAction(state, "black", { type: "augment_select", augmentId });
+    state = applyPlayerAction(state, "black", { type: "augment_lock" });
+    assert.equal(state.phase, "augment_draft");
+    assert.equal(state.augment?.draft.rounds[1].revealed, false);
+    assert.equal(state.augment?.triggerCounts.black[augmentId] ?? 0, 0);
+    assert.equal(isValidAugmentRuleStateForState(state), true);
+
+    const prematureTrigger = JSON.parse(JSON.stringify(state)) as GameState;
+    prematureTrigger.augment!.triggerCounts.black[augmentId] = 1;
+    assert.equal(isValidAugmentRuleStateForState(prematureTrigger), false);
+
+    const whiteId = state.augment!.draft.rounds[1].players.white.options[0];
+    state = applyPlayerAction(state, "white", {
+      type: "augment_select",
+      augmentId: whiteId,
+    });
+    state = applyPlayerAction(state, "white", { type: "augment_lock" });
+    assert.equal(state.phase, "playing");
+    assert.equal(state.augment?.draft.rounds[1].revealed, true);
+    assert.equal(state.augment?.triggerCounts.black[augmentId], 1);
+    assert.equal(isValidAugmentRuleStateForState(state), true);
+    assert.equal(
+      isValidAugmentRuleStateForState(JSON.parse(JSON.stringify(state)) as GameState),
+      true,
+    );
+
+    const missingTrigger = JSON.parse(JSON.stringify(state)) as GameState;
+    missingTrigger.augment!.triggerCounts.black[augmentId] = 0;
+    assert.equal(isValidAugmentRuleStateForState(missingTrigger), false);
+    const duplicateTrigger = JSON.parse(JSON.stringify(state)) as GameState;
+    duplicateTrigger.augment!.triggerCounts.black[augmentId] = 2;
+    assert.equal(isValidAugmentRuleStateForState(duplicateTrigger), false);
+
+    const notFallen = JSON.parse(JSON.stringify(state)) as GameState;
+    const restored = notFallen.pieces.find((piece) => piece.id === victim.id)!;
+    restored.alive = true;
+    notFallen.augment!.ruleState!.casualties.black -= 1;
+    notFallen.augment!.ruleState![fallenKey].black = false;
+    notFallen.augment!.triggerCounts.black[augmentId] = 0;
+    assert.equal(isValidAugmentRuleStateForState(notFallen), true);
+    notFallen.augment!.triggerCounts.black[augmentId] = 1;
+    assert.equal(isValidAugmentRuleStateForState(notFallen), false);
+  }
+});
+
+test("v3 persisted objective state keeps last-headquarters triggers one-way rather than iff", () => {
+  let state = startWithOpeningAugment("spade-last-headquarters", 2_000);
+  const ruleState = state.augment!.ruleState!;
+  const flag = state.pieces.find(
+    (piece) => piece.side === "black" && ruleState.baseTypes[piece.id] === "flag",
+  )!;
+  const deadGuard = state.pieces.find(
+    (piece) => piece.side === "black" && ruleState.baseTypes[piece.id] === "platoon",
+  )!;
+  const [attacker, occupier] = state.pieces.filter(
+    (piece) =>
+      piece.side === "white" &&
+      ruleState.baseTypes[piece.id] === "platoon" &&
+      !isHeadquarters(piece),
+  );
+  const placeBySwap = (selected: Piece, target: Position) => {
+    const occupant = state.pieces.find(
+      (piece) =>
+        piece.alive &&
+        piece.id !== selected.id &&
+        piece.row === target.row &&
+        piece.col === target.col,
+    );
+    if (occupant) swapPositions(selected, occupant);
+    else Object.assign(selected, target);
+  };
+  placeBySwap(flag, { row: 11, col: 1 });
+  placeBySwap(deadGuard, { row: 11, col: 3 });
+  deadGuard.alive = false;
+  ruleState.casualties.black += 1;
+  placeBySwap(attacker, { row: 10, col: 1 });
+  placeBySwap(occupier, { row: 10, col: 3 });
+  assert.equal(isValidAugmentRuleStateForState(state), true);
+
+  let naturalUnlockWithHiddenFlag = JSON.parse(JSON.stringify(state)) as GameState;
+  naturalUnlockWithHiddenFlag.turn = "white";
+  naturalUnlockWithHiddenFlag.clock!.turnStartedAt = 2_000;
+  naturalUnlockWithHiddenFlag = applyPlayerAction(naturalUnlockWithHiddenFlag, "white", {
+    type: "move",
+    from: { row: 10, col: 3 },
+    to: { row: 11, col: 3 },
+  }, 2_001);
+  assert.equal(naturalUnlockWithHiddenFlag.revealedFlags.black, false);
+  assert.equal(
+    naturalUnlockWithHiddenFlag.augment?.ruleState?.headquartersUnlocked.black,
+    true,
+  );
+  assert.equal(
+    naturalUnlockWithHiddenFlag.augment?.triggerCounts.black["spade-last-headquarters"],
+    1,
+  );
+  assert.equal(isValidAugmentRuleStateForState(naturalUnlockWithHiddenFlag), true);
+
+  const unlockedWithoutTrigger = JSON.parse(JSON.stringify(state)) as GameState;
+  unlockedWithoutTrigger.augment!.ruleState!.headquartersUnlocked.black = true;
+  assert.equal(isValidAugmentRuleStateForState(unlockedWithoutTrigger), false);
+
+  state.turn = "white";
+  state.clock!.turnStartedAt = 2_000;
+  state = applyPlayerAction(state, "white", {
+    type: "move",
+    from: { row: 10, col: 1 },
+    to: { row: 11, col: 1 },
+  }, 2_001);
+  assert.equal(state.augment?.ruleState?.headquartersUnlocked.black, false);
+  assert.equal(state.augment?.triggerCounts.black["spade-last-headquarters"], 1);
+  assert.equal(isValidAugmentRuleStateForState(state), true);
+  const protectedFlagHiddenAgain = JSON.parse(JSON.stringify(state)) as GameState;
+  protectedFlagHiddenAgain.revealedFlags.black = false;
+  assert.equal(isValidAugmentRuleStateForState(protectedFlagHiddenAgain), false);
+
+  state.turn = "white";
+  state.clock!.turnStartedAt = 2_001;
+  state = applyPlayerAction(state, "white", {
+    type: "move",
+    from: { row: 10, col: 3 },
+    to: { row: 11, col: 3 },
+  }, 2_002);
+  assert.equal(state.augment?.ruleState?.headquartersUnlocked.black, true);
+  assert.equal(state.augment?.triggerCounts.black["spade-last-headquarters"], 2);
+  assert.equal(isValidAugmentRuleStateForState(state), true);
+  assert.equal(
+    isValidAugmentRuleStateForState(JSON.parse(JSON.stringify(state)) as GameState),
+    true,
+  );
+
+  const catchupOnly = JSON.parse(JSON.stringify(state)) as GameState;
+  catchupOnly.augment!.triggerCounts.black["spade-last-headquarters"] = 1;
+  assert.equal(isValidAugmentRuleStateForState(catchupOnly), true);
+  catchupOnly.augment!.triggerCounts.black["spade-last-headquarters"] = 0;
+  assert.equal(isValidAugmentRuleStateForState(catchupOnly), false);
+
+  let noObjectiveCard = startWithOpeningAugment("heart-rail-turn", 3_000);
+  const noObjectiveRuleState = noObjectiveCard.augment!.ruleState!;
+  const noObjectiveFlag = noObjectiveCard.pieces.find(
+    (piece) =>
+      piece.side === "black" && noObjectiveRuleState.baseTypes[piece.id] === "flag",
+  )!;
+  const noObjectiveGuard = noObjectiveCard.pieces.find(
+    (piece) =>
+      piece.side === "black" && noObjectiveRuleState.baseTypes[piece.id] === "platoon",
+  )!;
+  const noObjectiveInvader = noObjectiveCard.pieces.find(
+    (piece) =>
+      piece.side === "white" && noObjectiveRuleState.baseTypes[piece.id] === "platoon",
+  )!;
+  const placeNoObjectiveBySwap = (selected: Piece, target: Position) => {
+    const occupant = noObjectiveCard.pieces.find(
+      (piece) =>
+        piece.alive &&
+        piece.id !== selected.id &&
+        piece.row === target.row &&
+        piece.col === target.col,
+    );
+    if (occupant) swapPositions(selected, occupant);
+    else Object.assign(selected, target);
+  };
+  placeNoObjectiveBySwap(noObjectiveFlag, { row: 11, col: 1 });
+  placeNoObjectiveBySwap(noObjectiveGuard, { row: 11, col: 3 });
+  noObjectiveGuard.alive = false;
+  noObjectiveRuleState.casualties.black += 1;
+  placeNoObjectiveBySwap(noObjectiveInvader, { row: 10, col: 3 });
+  noObjectiveCard.turn = "white";
+  noObjectiveCard.clock!.turnStartedAt = 3_000;
+  noObjectiveCard = applyPlayerAction(noObjectiveCard, "white", {
+    type: "move",
+    from: { row: 10, col: 3 },
+    to: { row: 11, col: 3 },
+  }, 3_001);
+  assert.equal(noObjectiveCard.revealedFlags.black, false);
+  assert.equal(noObjectiveCard.augment?.ruleState?.headquartersUnlocked.black, true);
+  assert.equal(isValidAugmentRuleStateForState(noObjectiveCard), true);
+
+  const occupiedButLocked = JSON.parse(JSON.stringify(noObjectiveCard)) as GameState;
+  occupiedButLocked.augment!.ruleState!.headquartersUnlocked.black = false;
+  assert.equal(isValidAugmentRuleStateForState(occupiedButLocked), false);
+
+  const historicalUnlock = JSON.parse(JSON.stringify(noObjectiveCard)) as GameState;
+  historicalUnlock.pieces.find((piece) => piece.id === noObjectiveInvader.id)!.alive = false;
+  historicalUnlock.augment!.ruleState!.casualties.white += 1;
+  assert.equal(isValidAugmentRuleStateForState(historicalUnlock), true);
+
+  let lateObjective = advanceFullStateToSecondDraft(noObjectiveCard, 3_002);
+  forceSecondRoundOption(lateObjective, "spade-last-headquarters");
+  lateObjective = applyPlayerAction(lateObjective, "black", {
+    type: "augment_select",
+    augmentId: "spade-last-headquarters",
+  });
+  lateObjective = applyPlayerAction(lateObjective, "black", { type: "augment_lock" });
+  assert.equal(lateObjective.augment?.draft.rounds[1].revealed, false);
+  assert.equal(lateObjective.augment?.triggerCounts.black["spade-last-headquarters"] ?? 0, 0);
+  assert.equal(isValidAugmentRuleStateForState(lateObjective), true);
+  const prematureObjective = JSON.parse(JSON.stringify(lateObjective)) as GameState;
+  prematureObjective.augment!.triggerCounts.black["spade-last-headquarters"] = 1;
+  assert.equal(isValidAugmentRuleStateForState(prematureObjective), false);
+
+  const whiteId = lateObjective.augment!.draft.rounds[1].players.white.options[0];
+  lateObjective = applyPlayerAction(lateObjective, "white", {
+    type: "augment_select",
+    augmentId: whiteId,
+  });
+  lateObjective = applyPlayerAction(lateObjective, "white", { type: "augment_lock" });
+  assert.equal(lateObjective.augment?.draft.rounds[1].revealed, true);
+  assert.equal(lateObjective.augment?.triggerCounts.black["spade-last-headquarters"], 1);
+  assert.equal(isValidAugmentRuleStateForState(lateObjective), true);
+});
+
 test("v3 persisted rule runtime accepts natural ranks and continuations while rejecting corrupted state", () => {
   const baseline = startWithOpeningAugment("spade-grand-maneuver");
   assert.equal(isValidAugmentRuleStateForState(baseline), true);
@@ -4569,7 +4918,9 @@ test("v3 persisted rule runtime accepts natural ranks and continuations while re
   const durableRuleState = durableRecovery.augment!.ruleState!;
   const durableMine = durableRecovery.pieces.find(
     (candidate) =>
-      candidate.side === "black" && durableRuleState.baseTypes[candidate.id] === "mine",
+      candidate.side === "black" &&
+      durableRuleState.baseTypes[candidate.id] === "mine" &&
+      !isHeadquarters(candidate),
   )!;
   const mineAttacker = durableRecovery.pieces.find(
     (candidate) =>

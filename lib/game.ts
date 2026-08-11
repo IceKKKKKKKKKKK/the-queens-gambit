@@ -37,7 +37,7 @@ export const THREEFOLD_REPETITION_THRESHOLD = 3 as const;
 export const FIFTY_CARD_THREEFOLD_REPETITION_RULES_FINGERPRINT =
   "augment-duel-dark-v2:threefold-3:strategic-sha256-v1" as const;
 export const THREEFOLD_REPETITION_RULES_FINGERPRINT =
-  "augment-duel-dark-v3:threefold-3:strategic-sha256-v2" as const;
+  "augment-duel-dark-v3:threefold-3:strategic-sha256-v3" as const;
 export const DEFAULT_TIME_CONTROL_MINUTES = 20;
 export const RANKED_TIME_CONTROL_MINUTES = 10;
 export const RANKED_INCREMENT_THRESHOLD_MS = 5 * 60 * 1000;
@@ -1184,6 +1184,13 @@ export function isValidAugmentRuleStateForState(state: GameState) {
   let continuationSide: Side | null = null;
   for (const side of ["black", "white"] as const) {
     const sidePieces = state.pieces.filter((piece) => piece.side === side);
+    const enemyOccupiesHeadquarters = state.pieces.some(
+      (piece) =>
+        piece.alive &&
+        piece.side === otherSide(side) &&
+        piece.row === (side === "black" ? 11 : 0) &&
+        isHeadquarters(piece),
+    );
     if (sidePieces.length !== 25) return false;
     for (const ids of [
       augment.permanentReveals?.[side],
@@ -1249,7 +1256,9 @@ export function isValidAugmentRuleStateForState(state: GameState) {
       }
     }
     if (
+      typeof state.revealedFlags?.[side] !== "boolean" ||
       typeof ruleState.headquartersUnlocked?.[side] !== "boolean" ||
+      (enemyOccupiesHeadquarters && !ruleState.headquartersUnlocked[side]) ||
       typeof ruleState.commanderFallen?.[side] !== "boolean" ||
       typeof ruleState.generalFallen?.[side] !== "boolean" ||
       !Number.isInteger(ruleState.casualties?.[side]) ||
@@ -1270,9 +1279,53 @@ export function isValidAugmentRuleStateForState(state: GameState) {
     );
     if (
       ruleState.commanderFallen[side] !== commanderFallen ||
-      ruleState.generalFallen[side] !== generalFallen
+      ruleState.generalFallen[side] !== generalFallen ||
+      (commanderFallen && state.revealedFlags[side] !== true)
     ) {
       return false;
+    }
+    const mutinyAugmentId = loadout.find((augmentId) => {
+      const definition = getAugmentDefinition(augmentId);
+      return definition.effect.kind === "combat" &&
+        definition.effect.mode === "engineer_mutiny";
+    });
+    const fusionAugmentId = loadout.find((augmentId) => {
+      const definition = getAugmentDefinition(augmentId);
+      return definition.effect.kind === "combat" &&
+        definition.effect.mode === "command_fusion";
+    });
+    const expectedMutinyTriggers =
+      mutinyAugmentId && revealedForSide(side, mutinyAugmentId) && commanderFallen ? 1 : 0;
+    const expectedFusionTriggers =
+      fusionAugmentId && revealedForSide(side, fusionAugmentId) && generalFallen ? 1 : 0;
+    if (
+      (mutinyAugmentId ? augmentUses(state, side, mutinyAugmentId) : 0) !==
+        expectedMutinyTriggers ||
+      (fusionAugmentId ? augmentUses(state, side, fusionAugmentId) : 0) !==
+        expectedFusionTriggers
+    ) {
+      return false;
+    }
+    const lastHeadquartersAugmentId = loadout.find((augmentId) => {
+      const definition = getAugmentDefinition(augmentId);
+      return definition.effect.kind === "objective" &&
+        definition.effect.mode === "last_headquarters";
+    });
+    if (lastHeadquartersAugmentId) {
+      const lastHeadquartersTriggers = augmentUses(state, side, lastHeadquartersAugmentId);
+      const lastHeadquartersRevealed = revealedForSide(side, lastHeadquartersAugmentId);
+      if (
+        (!lastHeadquartersRevealed && lastHeadquartersTriggers !== 0) ||
+        (lastHeadquartersRevealed &&
+          !ruleState.headquartersUnlocked[side] &&
+          lastHeadquartersTriggers > 0 &&
+          !state.revealedFlags[side]) ||
+        (lastHeadquartersRevealed &&
+          ruleState.headquartersUnlocked[side] &&
+          lastHeadquartersTriggers < 1)
+      ) {
+        return false;
+      }
     }
     const fuse = ruleState.bombSecondFuse?.[side];
     const fuseAugmentId = revealedAugmentMatching(
@@ -3777,6 +3830,9 @@ function maybeUnlockOtherHeadquarters(state: GameState, occupant: Piece | undefi
   const defenderHeadquarters = HEADQUARTERS.filter((headquarters) =>
     defenderSide === "black" ? headquarters.row === 11 : headquarters.row === 0
   );
+  if (!defenderHeadquarters.some((headquarters) => samePosition(headquarters, occupant))) {
+    return;
+  }
   const flag = state.pieces.find(
     (piece) =>
       piece.alive &&

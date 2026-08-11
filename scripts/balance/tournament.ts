@@ -49,7 +49,7 @@ const SCHEMA_VERSION = 5 as const;
 export const BALANCE_ENGINE_RULES_FINGERPRINT =
   THREEFOLD_REPETITION_RULES_FINGERPRINT;
 export const BALANCE_ALGORITHM_VERSION =
-  "product-stability-v15-v3-no-clock-zero-time-deterministic-ids-slot-stable-drafts-relocation-aware-worlds" as const;
+  "product-stability-v17-v3-no-clock-zero-time-deterministic-ids-slot-stable-drafts-relocation-aware-public-rank-capacity-worlds-private-draft-fidelity" as const;
 
 export interface TournamentOptions {
   seed: number;

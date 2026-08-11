@@ -835,6 +835,34 @@ test("authenticated rooms, identity seats, spectator policy, provisioning, and s
   assert.equal(forgedTrackerRecovery.status, 500);
   assert.equal(forgedTrackerRecovery.body.error, "ROOM_READ_FAILED");
 
+  const hiddenFlagAfterCommanderFallRoom = await postJson(
+    `${origin}/api/rooms`,
+    userA.headers,
+    {
+      gameMode: "augment",
+      spectatorPolicy: "hidden",
+    },
+  );
+  assert.equal(hiddenFlagAfterCommanderFallRoom.status, 201);
+  mutatePersistedRoomState(hiddenFlagAfterCommanderFallRoom.body.code, (state) => {
+    const commander = state.pieces.find(
+      (piece) =>
+        piece.side === "white" &&
+        state.augment.ruleState.baseTypes[piece.id] === "commander",
+    );
+    assert.ok(commander);
+    commander.alive = false;
+    state.augment.ruleState.commanderFallen.white = true;
+    state.augment.ruleState.casualties.white += 1;
+    assert.equal(state.revealedFlags.white, false);
+  });
+  const hiddenFlagAfterCommanderFallRecovery = await requestJson(
+    `${origin}/api/rooms/${hiddenFlagAfterCommanderFallRoom.body.code}`,
+    { headers: userA.headers },
+  );
+  assert.equal(hiddenFlagAfterCommanderFallRecovery.status, 500);
+  assert.equal(hiddenFlagAfterCommanderFallRecovery.body.error, "ROOM_READ_FAILED");
+
   const classic = await postJson(`${origin}/api/rooms`, userA.headers, {
     gameMode: "classic",
     spectatorPolicy: "full",

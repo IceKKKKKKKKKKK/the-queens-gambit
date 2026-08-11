@@ -1,6 +1,7 @@
 import {
   AUGMENT_CATALOG,
   AUGMENT_IDS,
+  AUGMENT_PROMOTION_LADDER,
   FIFTY_CARD_AUGMENT_CATALOG_VERSION,
   FIFTY_CARD_AUGMENT_IDS,
   LEGACY_AUGMENT_IDS,
@@ -25,6 +26,7 @@ import {
   getProjectedLegalTargets,
   isCamp,
   isAllowedSetupPosition,
+  isValidAugmentRuleStateForState,
   otherSide,
   projectGame,
   seedRepetitionTrackerFromCurrentPosition,
@@ -297,7 +299,14 @@ function canonicalProjection(view: ProjectedGame, side: Side) {
       view,
       view.augment?.temporaryRevealIds,
     ),
-    pendingRecon: view.augment?.pendingRecon ?? null,
+    pendingRecon: view.augment?.pendingRecon
+      ? {
+          ...view.augment.pendingRecon,
+          legalTargets: [...(view.augment.pendingRecon.legalTargets ?? [])].sort(
+            (first, second) => first.row - second.row || first.col - second.col,
+          ),
+        }
+      : null,
     multiMove: view.augment?.multiMove ?? null,
     ruleState: view.augment?.ruleState ?? null,
     extraMove: view.augment?.extraMove
@@ -310,6 +319,48 @@ function canonicalProjection(view: ProjectedGame, side: Side) {
       : null,
     viewer: side,
   };
+}
+
+function firstProjectionDifferencePath(
+  expected: unknown,
+  actual: unknown,
+  path = "$",
+): string | null {
+  if (stableStringify(expected) === stableStringify(actual)) return null;
+  if (Array.isArray(expected) && Array.isArray(actual)) {
+    if (expected.length !== actual.length) return `${path}.length`;
+    for (let index = 0; index < expected.length; index += 1) {
+      const difference = firstProjectionDifferencePath(
+        expected[index],
+        actual[index],
+        `${path}[${index}]`,
+      );
+      if (difference) return difference;
+    }
+    return path;
+  }
+  if (
+    expected &&
+    actual &&
+    typeof expected === "object" &&
+    typeof actual === "object"
+  ) {
+    const expectedRecord = expected as Record<string, unknown>;
+    const actualRecord = actual as Record<string, unknown>;
+    const keys = [...new Set([
+      ...Object.keys(expectedRecord),
+      ...Object.keys(actualRecord),
+    ])].sort();
+    for (const key of keys) {
+      const difference = firstProjectionDifferencePath(
+        expectedRecord[key],
+        actualRecord[key],
+        `${path}.${key}`,
+      );
+      if (difference) return difference;
+    }
+  }
+  return path;
 }
 
 function projectedRevealPositions(
@@ -377,42 +428,232 @@ export function pairedSearchStateKey(state: GameState, side: Side, nowMs = 1_000
   );
 }
 
-function projectedOriginalType(
-  view: ProjectedGame,
-  piece: PublicPiece,
-): PieceType | null {
-  if (piece.originalType) return piece.originalType;
-  if (!piece.promoted) return piece.type;
-  const promotionSources = (view.augment?.draft.loadouts[piece.side] ?? [])
+const PIECE_TYPES = Object.keys(PIECE_INFO) as PieceType[];
+type LightningEffect = Extract<
+  AugmentDefinition["effect"],
+  { kind: "doctrine"; mode: "lightning_rank_boost" }
+>;
+type PromotionEffect = Extract<AugmentDefinition["effect"], { kind: "promotion" }>;
+
+function publicLightningEffect(view: ProjectedGame, side: Side): LightningEffect | null {
+  if (!view.augment?.ruleState?.lightning[side]) return null;
+  const effects = view.augment.draft.loadouts[side]
     .map((id) => getAugmentDefinition(id).effect)
-    .filter((effect) => effect.kind === "promotion");
-  const sourceTypes = [
-    ...new Set(promotionSources.map((effect) => effect.pieceType)),
-  ];
-  if (sourceTypes.length !== 1) {
-    throw new Error(`Cannot infer the original rank of promoted piece ${piece.id}.`);
+    .filter(
+      (effect): effect is LightningEffect =>
+        effect.kind === "doctrine" && effect.mode === "lightning_rank_boost",
+    );
+  if (effects.length !== 1) {
+    throw new Error(`Public ${side} lightning state has no unique doctrine.`);
   }
-  return sourceTypes[0];
+  return effects[0];
 }
 
-function inferredTypePool(view: ProjectedGame, hiddenSide: Side) {
-  const counts = new Map<PieceType, number>();
-  for (const [type, info] of Object.entries(PIECE_INFO) as Array<
-    [PieceType, (typeof PIECE_INFO)[PieceType]]
-  >) {
-    counts.set(type, info.count);
+function publicPromotionEffect(
+  view: ProjectedGame,
+  side: Side,
+  mode: PromotionEffect["mode"],
+) {
+  const matches = (view.augment?.draft.loadouts[side] ?? [])
+    .map((id) => ({ id, effect: getAugmentDefinition(id).effect }))
+    .filter(
+      (entry): entry is { id: AugmentId; effect: PromotionEffect } =>
+        entry.effect.kind === "promotion" && entry.effect.mode === mode,
+    );
+  if (matches.length > 1) {
+    throw new Error(`Public ${side} promotion state has duplicate ${mode} effects.`);
   }
-  for (const piece of view.pieces) {
-    if (piece.side !== hiddenSide || piece.type === null) continue;
-    const originalType = projectedOriginalType(view, piece);
-    if (!originalType) throw new Error(`Known ${piece.id} has no inferable original type.`);
-    const remaining = (counts.get(originalType) ?? 0) - 1;
-    if (remaining < 0) {
-      throw new Error(`Projection contains too many known ${hiddenSide} ${originalType} pieces.`);
+  return matches[0] ?? null;
+}
+
+function publicCasualties(view: ProjectedGame, side: Side) {
+  return view.pieces.filter((piece) => piece.side === side && !piece.alive).length;
+}
+
+export function publicFallTriggerExpectation(
+  view: ProjectedGame,
+  side: Side,
+  baseType: "commander" | "general",
+) {
+  const mode = baseType === "commander" ? "engineer_mutiny" : "command_fusion";
+  const matches = (view.augment?.draft.loadouts[side] ?? []).filter((id) => {
+    const effect = getAugmentDefinition(id).effect;
+    return effect.kind === "combat" && effect.mode === mode;
+  });
+  if (matches.length > 1) {
+    throw new Error(`Public ${side} state has duplicate ${mode} effects.`);
+  }
+  const augmentId = matches[0];
+  if (!augmentId) return null;
+  const jointlyRevealed = view.augment?.draft.rounds.some(
+    (round) =>
+      round.revealed && round.players[side].selectedId === augmentId,
+  );
+  if (!jointlyRevealed) return null;
+  return (view.augment?.triggerCounts[side][augmentId] ?? 0) > 0;
+}
+
+function promotedRank(type: PieceType, steps: number, maximum: PieceType) {
+  const currentIndex = AUGMENT_PROMOTION_LADDER.indexOf(
+    type as (typeof AUGMENT_PROMOTION_LADDER)[number],
+  );
+  const maximumIndex = AUGMENT_PROMOTION_LADDER.indexOf(
+    maximum as (typeof AUGMENT_PROMOTION_LADDER)[number],
+  );
+  if (currentIndex < 0 || maximumIndex < 0) return type;
+  return AUGMENT_PROMOTION_LADDER[
+    Math.min(maximumIndex, currentIndex + Math.max(0, steps))
+  ] as PieceType;
+}
+
+/**
+ * Returns whether one canonical base identity can produce this public current
+ * identity. It intentionally uses only the projection: public loadouts,
+ * trigger counts, casualties, lightning state and public promotion markers.
+ */
+function publicCurrentTypeIsReachable(
+  view: ProjectedGame,
+  piece: PublicPiece,
+  baseType: PieceType,
+) {
+  if (piece.type === null) return false;
+  if (piece.originalType && piece.originalType !== baseType) return false;
+  const baseRank = AUGMENT_PROMOTION_LADDER.indexOf(
+    baseType as (typeof AUGMENT_PROMOTION_LADDER)[number],
+  );
+  const currentRank = AUGMENT_PROMOTION_LADDER.indexOf(
+    piece.type as (typeof AUGMENT_PROMOTION_LADDER)[number],
+  );
+  if (baseRank < 0 || currentRank < 0) {
+    return !piece.promoted && piece.type === baseType;
+  }
+
+  const lightning = publicLightningEffect(view, piece.side);
+  const lightningEligible = Boolean(
+    lightning && !lightning.excluded.includes(baseType as never),
+  );
+  const lightningApplications = lightningEligible
+    ? piece.alive ? [1] : [0, 1]
+    : [0];
+
+  const ascent = publicPromotionEffect(
+    view,
+    piece.side,
+    "battalion_on_capture",
+  );
+  const aura = publicPromotionEffect(
+    view,
+    piece.side,
+    "platoon_loss_threshold",
+  );
+  let promotionApplications = [0];
+  let promotionMaximumRank = AUGMENT_PROMOTION_LADDER.length - 1;
+  if (baseType === "battalion" && ascent) {
+    const maximumApplications = Math.min(
+      3,
+      view.augment?.triggerCounts[piece.side][ascent.id] ?? 0,
+    );
+    if (piece.promoted && maximumApplications === 0) return false;
+    promotionApplications = piece.promoted
+      ? Array.from({ length: maximumApplications }, (_, index) => index + 1)
+      : [0];
+    promotionMaximumRank = AUGMENT_PROMOTION_LADDER.indexOf("division");
+  } else if (baseType === "platoon" && aura) {
+    const earnedApplications = Math.floor(publicCasualties(view, piece.side) / 4);
+    if (piece.alive) {
+      if (Boolean(piece.promoted) !== (earnedApplications > 0)) return false;
+      promotionApplications = [earnedApplications];
+    } else {
+      promotionApplications = piece.promoted
+        ? Array.from({ length: earnedApplications }, (_, index) => index + 1)
+        : [0];
+      if (piece.promoted && earnedApplications === 0) return false;
     }
-    counts.set(originalType, remaining);
+    promotionMaximumRank = AUGMENT_PROMOTION_LADDER.indexOf("commander");
+  } else if (piece.promoted) {
+    return false;
   }
-  return [...counts].flatMap(([type, count]) => Array.from({ length: count }, () => type));
+
+  for (const promotionCount of promotionApplications) {
+    for (const lightningCount of lightningApplications) {
+      for (
+        let promotionsBeforeLightning = 0;
+        promotionsBeforeLightning <= promotionCount;
+        promotionsBeforeLightning += 1
+      ) {
+        let rank = baseRank;
+        if (promotionsBeforeLightning > 0) {
+          rank = Math.min(
+            promotionMaximumRank,
+            rank + promotionsBeforeLightning,
+          );
+        }
+        rank = Math.min(
+          AUGMENT_PROMOTION_LADDER.length - 1,
+          rank + lightningCount,
+        );
+        const promotionsAfterLightning = promotionCount - promotionsBeforeLightning;
+        if (promotionsAfterLightning > 0) {
+          rank = Math.min(
+            promotionMaximumRank,
+            rank + promotionsAfterLightning,
+          );
+        }
+        if (rank === currentRank) return true;
+      }
+    }
+  }
+  return false;
+}
+
+function baseTypeCanRemainHidden(
+  view: ProjectedGame,
+  piece: PublicPiece,
+  baseType: PieceType,
+) {
+  if (
+    baseType === "commander" &&
+    !piece.alive &&
+    !view.revealedFlags[piece.side]
+  ) {
+    return false;
+  }
+  if (baseType === "commander" || baseType === "general") {
+    const expectedFallen = publicFallTriggerExpectation(
+      view,
+      piece.side,
+      baseType,
+    );
+    if (expectedFallen !== null && expectedFallen !== !piece.alive) {
+      return false;
+    }
+  }
+  if (piece.type !== null) return publicCurrentTypeIsReachable(view, piece, baseType);
+  if (piece.originalType || piece.promoted || piece.publiclyRevealed || piece.flagRevealed) {
+    return false;
+  }
+  if (baseType === "flag" && view.revealedFlags[piece.side]) return false;
+  const aura = publicPromotionEffect(
+    view,
+    piece.side,
+    "platoon_loss_threshold",
+  );
+  return !(
+    baseType === "platoon" &&
+    aura &&
+    piece.alive &&
+    Math.floor(publicCasualties(view, piece.side) / 4) > 0
+  );
+}
+
+function publicBaseTypeCandidates(view: ProjectedGame, piece: PublicPiece) {
+  const candidates = PIECE_TYPES.filter((baseType) =>
+    baseTypeCanRemainHidden(view, piece, baseType),
+  );
+  if (!candidates.length) {
+    throw new Error(`Projection has no public base-rank explanation for ${piece.id}.`);
+  }
+  return candidates;
 }
 
 function setupAllowance(
@@ -528,141 +769,204 @@ function typeCanOccupyPublicPosition(
   return true;
 }
 
-function assignHiddenTypes(view: ProjectedGame, viewer: Side, random: SeededRandom) {
+interface SampledHiddenTypes {
+  baseTypes: Map<string, PieceType>;
+  currentTypes: Map<string, PieceType>;
+}
+
+function compareHiddenPieces(first: PublicPiece, second: PublicPiece, viewer: Side) {
+  const firstPosition = normalizeForViewer(first, viewer);
+  const secondPosition = normalizeForViewer(second, viewer);
+  return (
+    Number(first.alive) - Number(second.alive) ||
+    firstPosition.row - secondPosition.row ||
+    firstPosition.col - secondPosition.col ||
+    first.id.replace(/^(black|white)-/, "").localeCompare(
+      second.id.replace(/^(black|white)-/, ""),
+    )
+  );
+}
+
+function sampleHiddenTypes(
+  view: ProjectedGame,
+  viewer: Side,
+  random: SeededRandom,
+): SampledHiddenTypes {
   const hiddenSide = otherSide(viewer);
-  const unknown = view.pieces.filter((piece) => piece.side === hiddenSide && piece.type === null);
-  const remaining = inferredTypePool(view, hiddenSide);
-  if (remaining.length !== unknown.length) {
-    throw new Error(
-      `Projection inventory mismatch for ${hiddenSide}: ${remaining.length} types for ${unknown.length} pieces.`,
-    );
+  const hiddenPieces = view.pieces.filter((piece) => piece.side === hiddenSide);
+  const known = hiddenPieces.filter((piece) => piece.type !== null);
+  const unknown = hiddenPieces
+    .filter((piece) => piece.type === null)
+    .sort((first, second) => compareHiddenPieces(first, second, viewer));
+  const domains = new Map(
+    hiddenPieces.map((piece) => [
+      piece.id,
+      publicBaseTypeCandidates(view, piece).filter((baseType) =>
+        typeCanOccupyPublicPosition(view, baseType, hiddenSide, piece),
+      ),
+    ]),
+  );
+  for (const piece of hiddenPieces) {
+    if (!(domains.get(piece.id)?.length)) {
+      throw new Error(`Known ${hiddenSide} ${piece.type} occupies an impossible public position.`);
+    }
   }
 
-  const available = [...unknown].sort(
-    (first, second) => {
-      const firstPosition = normalizeForViewer(first, viewer);
-      const secondPosition = normalizeForViewer(second, viewer);
-      return (
-        Number(first.alive) - Number(second.alive) ||
-        firstPosition.row - secondPosition.row ||
-        firstPosition.col - secondPosition.col ||
-        first.id.replace(/^(black|white)-/, "").localeCompare(
-          second.id.replace(/^(black|white)-/, ""),
-        )
-      );
-    },
+  const knownOrder = [...known].sort((first, second) =>
+    (domains.get(first.id)?.length ?? 0) - (domains.get(second.id)?.length ?? 0) ||
+    compareHiddenPieces(first, second, viewer),
   );
-  const assignments = new Map<string, PieceType>();
+  const remainingCounts = new Map(
+    PIECE_TYPES.map((type) => [type, PIECE_INFO[type].count]),
+  );
+  const knownAssignments = new Map<string, PieceType>();
   const movedIds = new Set(view.movedPieceIds);
-  const known = view.pieces.filter((piece) => piece.side === hiddenSide && piece.type !== null);
   const deepMineAllowance =
     setupAllowance(view, hiddenSide, "deep_mine") +
     setupAllowance(view, hiddenSide, "rear_three_row_mines");
   const forwardBombAllowance = setupAllowance(view, hiddenSide, "forward_bomb");
-  let deepMines = known.filter(
-    (piece) =>
-      projectedOriginalType(view, piece) === "mine" &&
-      !movedIds.has(piece.id) &&
-      isThirdSetupRow(hiddenSide, piece),
-  ).length;
-  let frontBombs = known.filter(
-    (piece) =>
-      projectedOriginalType(view, piece) === "bomb" &&
-      !movedIds.has(piece.id) &&
-      isFrontSetupRow(hiddenSide, piece),
-  ).length;
 
-  for (const piece of known) {
-    const originalType = projectedOriginalType(view, piece);
-    if (!originalType || !typeCanOccupyPublicPosition(view, originalType, hiddenSide, piece)) {
-      throw new Error(`Known ${hiddenSide} ${piece.type} occupies an impossible public position.`);
+  const completeUnknownAssignments = () => {
+    const assignments = new Map(knownAssignments);
+    const available = [...unknown];
+    const tokens = [...remainingCounts].flatMap(([type, count]) =>
+      Array.from({ length: count }, () => type),
+    );
+    if (tokens.length !== available.length) return null;
+
+    let deepMines = known.filter(
+      (piece) =>
+        knownAssignments.get(piece.id) === "mine" &&
+        !movedIds.has(piece.id) &&
+        isThirdSetupRow(hiddenSide, piece),
+    ).length;
+    let frontBombs = known.filter(
+      (piece) =>
+        knownAssignments.get(piece.id) === "bomb" &&
+        !movedIds.has(piece.id) &&
+        isFrontSetupRow(hiddenSide, piece),
+    ).length;
+    if (deepMines > deepMineAllowance || frontBombs > forwardBombAllowance) {
+      return null;
     }
-  }
-  if (deepMines > deepMineAllowance || frontBombs > forwardBombAllowance) {
-    throw new Error(`Known ${hiddenSide} setup pieces exceed their public augment allowance.`);
-  }
 
-  const isConstrainedType = (type: PieceType) =>
-    type === "flag" || type === "mine" || type === "bomb";
-  const constraintPriority = (type: PieceType) =>
-    type === "flag" ? 0 : type === "mine" ? 1 : 2;
-  const constrainedTypes = remaining
-    .filter(isConstrainedType)
-    .sort((first, second) => constraintPriority(first) - constraintPriority(second));
-  const unconstrainedTypes = remaining.filter((type) => !isConstrainedType(type));
+    const constraintPriority = (type: PieceType) =>
+      type === "flag" ? 0 : type === "mine" ? 1 : type === "bomb" ? 2 : 3;
+    tokens.sort((first, second) => {
+      const firstEligible = unknown.filter((piece) =>
+        domains.get(piece.id)?.includes(first),
+      ).length;
+      const secondEligible = unknown.filter((piece) =>
+        domains.get(piece.id)?.includes(second),
+      ).length;
+      return (
+        firstEligible - secondEligible ||
+        constraintPriority(first) - constraintPriority(second) ||
+        first.localeCompare(second)
+      );
+    });
 
-  const search = (index: number): boolean => {
-    if (index >= constrainedTypes.length) return true;
-    const type = constrainedTypes[index];
-    const candidates = random.shuffle(
-      available.filter((piece) => {
-        if (!typeCanOccupyPublicPosition(view, type, hiddenSide, piece)) return false;
-        if (
+    const search = (index: number): boolean => {
+      if (index >= tokens.length) return true;
+      const type = tokens[index];
+      const candidates = random.shuffle(
+        available.filter((piece) => {
+          if (!domains.get(piece.id)?.includes(type)) return false;
+          if (
+            type === "mine" &&
+            !movedIds.has(piece.id) &&
+            isThirdSetupRow(hiddenSide, piece)
+          ) {
+            return deepMines < deepMineAllowance;
+          }
+          if (
+            type === "bomb" &&
+            !movedIds.has(piece.id) &&
+            isFrontSetupRow(hiddenSide, piece)
+          ) {
+            return frontBombs < forwardBombAllowance;
+          }
+          return true;
+        }),
+      );
+      for (const piece of candidates) {
+        const availableIndex = available.findIndex((candidate) => candidate.id === piece.id);
+        available.splice(availableIndex, 1);
+        assignments.set(piece.id, type);
+        const addedDeepMine =
           type === "mine" &&
           !movedIds.has(piece.id) &&
-          isThirdSetupRow(hiddenSide, piece)
-        ) {
-          return deepMines < deepMineAllowance;
-        }
-        if (
+          isThirdSetupRow(hiddenSide, piece);
+        const addedFrontBomb =
           type === "bomb" &&
           !movedIds.has(piece.id) &&
-          isFrontSetupRow(hiddenSide, piece)
-        ) {
-          return frontBombs < forwardBombAllowance;
-        }
-        return true;
-      }),
-    );
-    for (const piece of candidates) {
-      const availableIndex = available.findIndex((candidate) => candidate.id === piece.id);
-      available.splice(availableIndex, 1);
-      assignments.set(piece.id, type);
-      const addedDeepMine =
-        type === "mine" &&
-        !movedIds.has(piece.id) &&
-        isThirdSetupRow(hiddenSide, piece);
-      const addedFrontBomb =
-        type === "bomb" &&
-        !movedIds.has(piece.id) &&
-        isFrontSetupRow(hiddenSide, piece);
-      if (addedDeepMine) deepMines += 1;
-      if (addedFrontBomb) frontBombs += 1;
-      if (search(index + 1)) return true;
-      if (addedDeepMine) deepMines -= 1;
-      if (addedFrontBomb) frontBombs -= 1;
-      assignments.delete(piece.id);
-      available.splice(availableIndex, 0, piece);
-    }
-    return false;
+          isFrontSetupRow(hiddenSide, piece);
+        if (addedDeepMine) deepMines += 1;
+        if (addedFrontBomb) frontBombs += 1;
+        if (search(index + 1)) return true;
+        if (addedDeepMine) deepMines -= 1;
+        if (addedFrontBomb) frontBombs -= 1;
+        assignments.delete(piece.id);
+        available.splice(availableIndex, 0, piece);
+      }
+      return false;
+    };
+    return search(0) ? assignments : null;
   };
-  if (!search(0)) {
+
+  const assignKnown = (index: number): Map<string, PieceType> | null => {
+    if (index >= knownOrder.length) return completeUnknownAssignments();
+    const piece = knownOrder[index];
+    const candidates = random.shuffle(domains.get(piece.id) ?? []);
+    for (const baseType of candidates) {
+      const remaining = remainingCounts.get(baseType) ?? 0;
+      if (remaining <= 0) continue;
+      knownAssignments.set(piece.id, baseType);
+      remainingCounts.set(baseType, remaining - 1);
+      const complete = assignKnown(index + 1);
+      if (complete) return complete;
+      remainingCounts.set(baseType, remaining);
+      knownAssignments.delete(piece.id);
+    }
+    return null;
+  };
+
+  const baseTypes = assignKnown(0);
+  if (!baseTypes) {
     throw new Error(`No rules-legal hidden identity assignment exists for ${hiddenSide}.`);
   }
-
-  const shuffledTypes = random.shuffle(unconstrainedTypes);
-  const shuffledPieces = random.shuffle(available);
-  if (shuffledTypes.length !== shuffledPieces.length) {
-    throw new Error(`Hidden assignment remainder mismatch for ${hiddenSide}.`);
-  }
-  for (let index = 0; index < shuffledTypes.length; index += 1) {
-    assignments.set(shuffledPieces[index].id, shuffledTypes[index]);
-  }
-
   const completeCounts = new Map<PieceType, number>();
-  for (const piece of view.pieces.filter((candidate) => candidate.side === hiddenSide)) {
-    const type = projectedOriginalType(view, piece) ?? assignments.get(piece.id);
-    if (!type) throw new Error(`Hidden assignment omitted ${piece.id}.`);
-    completeCounts.set(type, (completeCounts.get(type) ?? 0) + 1);
+  for (const piece of hiddenPieces) {
+    const baseType = baseTypes.get(piece.id);
+    if (!baseType) throw new Error(`Hidden assignment omitted ${piece.id}.`);
+    completeCounts.set(baseType, (completeCounts.get(baseType) ?? 0) + 1);
   }
-  for (const [type, info] of Object.entries(PIECE_INFO) as Array<
-    [PieceType, (typeof PIECE_INFO)[PieceType]]
-  >) {
-    if (completeCounts.get(type) !== info.count) {
+  for (const type of PIECE_TYPES) {
+    if (completeCounts.get(type) !== PIECE_INFO[type].count) {
       throw new Error(`Hidden assignment produced an invalid ${hiddenSide} ${type} inventory.`);
     }
   }
-  return assignments;
+
+  const lightning = publicLightningEffect(view, hiddenSide);
+  const currentTypes = new Map<string, PieceType>();
+  for (const piece of hiddenPieces) {
+    if (piece.type !== null) {
+      currentTypes.set(piece.id, piece.type);
+      continue;
+    }
+    const baseType = baseTypes.get(piece.id)!;
+    const lightningEligible = Boolean(
+      lightning && !lightning.excluded.includes(baseType as never),
+    );
+    const lightningApplied = lightningEligible && (piece.alive || random.int(2) === 1);
+    currentTypes.set(
+      piece.id,
+      lightningApplied
+        ? promotedRank(baseType, lightning?.rankSteps ?? 0, "commander")
+        : baseType,
+    );
+  }
+  return { baseTypes, currentTypes };
 }
 
 function syntheticRoundOptions(
@@ -709,23 +1013,26 @@ export function projectedRevealKnowledge(
         !(piece.type === "flag" && piece.flagRevealed),
     )
     .map((piece) => piece.id);
-  const hasProvenance =
-    Array.isArray(view.augment.permanentRevealIds) &&
-    Array.isArray(view.augment.temporaryRevealIds);
-  if (!hasProvenance) {
+  const permanentRevealIds = view.augment.permanentRevealIds;
+  const temporaryRevealIds = view.augment.temporaryRevealIds;
+  if (!Array.isArray(permanentRevealIds) || !Array.isArray(temporaryRevealIds)) {
     // Compatibility for old or hand-authored projections that predate reveal
     // provenance. Their visible identities remain usable as durable knowledge.
     return { permanent: visibleKnownIds, temporary: [] as string[] };
   }
 
-  const permanentIds = new Set(view.augment.permanentRevealIds);
-  const temporaryIds = new Set(view.augment.temporaryRevealIds);
-  const permanent: string[] = [];
-  const temporary: string[] = [];
-  for (const id of visibleKnownIds) {
-    if (temporaryIds.has(id) && !permanentIds.has(id)) temporary.push(id);
-    else permanent.push(id);
-  }
+  const opponentIds = new Set(
+    view.pieces
+      .filter((piece) => piece.side === opponent)
+      .map((piece) => piece.id),
+  );
+  const permanent = permanentRevealIds.filter((id) =>
+    opponentIds.has(id),
+  );
+  const permanentIds = new Set(permanent);
+  const temporary = temporaryRevealIds.filter(
+    (id) => opponentIds.has(id) && !permanentIds.has(id),
+  );
   return { permanent, temporary };
 }
 
@@ -890,6 +1197,15 @@ function sanitizedAugmentRuntime(
     const seen = rounds.flatMap((round) => [...round.players[side].options]);
     return [...new Set(seen)];
   };
+  const syntheticLoadouts = Object.fromEntries(
+    SIDES.map((side) => [
+      side,
+      rounds.flatMap((round) => {
+        const player = round.players[side];
+        return player.locked && player.selectedId ? [player.selectedId] : [];
+      }),
+    ]),
+  ) as Record<Side, AugmentId[]>;
   const viewerKnowledge = projectedRevealKnowledge(view, viewer);
   const opponentKnowledge = syntheticOpponentRevealKnowledge(view, viewer, seed);
   return {
@@ -902,8 +1218,8 @@ function sanitizedAugmentRuntime(
         [opponent]: seenFor(opponent),
       } as Record<Side, AugmentId[]>,
       loadouts: {
-        black: [...view.augment.draft.loadouts.black],
-        white: [...view.augment.draft.loadouts.white],
+        black: syntheticLoadouts.black,
+        white: syntheticLoadouts.white,
       },
     },
     usedBySide: {
@@ -911,8 +1227,18 @@ function sanitizedAugmentRuntime(
       white: [...view.augment.usedBySide.white],
     },
     triggerCounts: {
-      black: { ...view.augment.triggerCounts.black },
-      white: { ...view.augment.triggerCounts.white },
+      black: Object.fromEntries(
+        syntheticLoadouts.black.map((augmentId) => [
+          augmentId,
+          view.augment!.triggerCounts.black[augmentId] ?? 0,
+        ]),
+      ),
+      white: Object.fromEntries(
+        syntheticLoadouts.white.map((augmentId) => [
+          augmentId,
+          view.augment!.triggerCounts.white[augmentId] ?? 0,
+        ]),
+      ),
     },
     permanentReveals: {
       [viewer]: viewerKnowledge.permanent,
@@ -935,7 +1261,7 @@ function sanitizedAugmentRuntime(
       [viewer]: view.augment.extraMove ? { ...view.augment.extraMove } : null,
       [opponent]: null,
     } as AugmentRuntimeState["extraMove"],
-    resumeTurn: null,
+    resumeTurn: view.phase === "augment_draft" ? view.turn : null,
     draftDeadlineAt: view.augment.draftDeadlineAt,
   };
 }
@@ -944,15 +1270,13 @@ function sanitizedV3RuleState(
   view: ProjectedGame,
   pieces: readonly Piece[],
   viewer: Side,
+  sampledBaseTypes: ReadonlyMap<string, PieceType>,
 ): NonNullable<AugmentRuntimeState["ruleState"]> {
-  const projectedById = new Map(view.pieces.map((piece) => [piece.id, piece]));
   const baseTypes = Object.fromEntries(
     pieces.map((piece) => {
-      const projected = projectedById.get(piece.id);
-      return [
-        piece.id,
-        projected ? projectedOriginalType(view, projected) ?? piece.type : piece.type,
-      ];
+      const baseType = sampledBaseTypes.get(piece.id);
+      if (!baseType) throw new Error(`Sampled base identity omitted ${piece.id}.`);
+      return [piece.id, baseType];
     }),
   ) as Record<string, PieceType>;
   const deadOriginal = (side: Side, type: PieceType) =>
@@ -1021,10 +1345,14 @@ function sanitizedV3RuleState(
     ),
     bombSecondFuse,
     casualties,
-    sacrificePromotionSteps: {
-      black: Math.floor(casualties.black / 4),
-      white: Math.floor(casualties.white / 4),
-    },
+    sacrificePromotionSteps: Object.fromEntries(
+      SIDES.map((side) => [
+        side,
+        publicPromotionEffect(view, side, "platoon_loss_threshold")
+          ? Math.floor(casualties[side] / 4)
+          : 0,
+      ]),
+    ) as NonNullable<AugmentRuntimeState["ruleState"]>["sacrificePromotionSteps"],
     lightning,
     multiMove: {
       black: null,
@@ -1050,10 +1378,22 @@ export function determinizeFromProjection(
 ): GameState {
   const view = projectGame(state, viewer, nowMs);
   const random = new SeededRandom(seed);
-  const hiddenAssignments = assignHiddenTypes(view, viewer, random);
+  const sampledHidden = sampleHiddenTypes(view, viewer, random);
+  const hiddenSide = otherSide(viewer);
+  const sampledBaseTypes = new Map<string, PieceType>();
+  for (const piece of view.pieces) {
+    const baseType =
+      piece.side === hiddenSide
+        ? sampledHidden.baseTypes.get(piece.id)
+        : piece.originalType ?? piece.type;
+    if (!baseType) throw new Error(`No public or sampled base identity for ${piece.id}.`);
+    sampledBaseTypes.set(piece.id, baseType);
+  }
   const projectedById = new Map(view.pieces.map((piece) => [piece.id, piece]));
   const sanitizedPieces: Piece[] = view.pieces.map((piece) => {
-    const type = piece.type ?? hiddenAssignments.get(piece.id);
+    const type =
+      piece.type ??
+      (piece.side === hiddenSide ? sampledHidden.currentTypes.get(piece.id) : null);
     if (!type) throw new Error(`No public or sampled identity for ${piece.id}.`);
     return {
       id: piece.id,
@@ -1094,6 +1434,7 @@ export function determinizeFromProjection(
       view,
       sampledState.pieces,
       viewer,
+      sampledBaseTypes,
     );
   }
   if (!view.repetition) {
@@ -1116,11 +1457,45 @@ export function determinizeFromProjection(
   // rebind public occurrence 1/2 to the sampled private position.
   const sampledOccurrences =
     view.repetition.active || view.phase === "finished" ? publicOccurrences : 0;
-  return seedRepetitionTrackerFromCurrentPosition(
+  const determined = seedRepetitionTrackerFromCurrentPosition(
     sampledState,
     sampledOccurrences,
     `balance-sampled:${String(seed)}:public-occurrence`,
   );
+  if (!isValidAugmentRuleStateForState(determined)) {
+    throw new Error("Sampled public world has an invalid v3 rule state.");
+  }
+  const expectedProjection = canonicalProjection({ ...view, clock: null }, viewer);
+  if (
+    expectedProjection.repetition &&
+    !expectedProjection.repetition.active &&
+    view.phase !== "finished"
+  ) {
+    // Continuation states are intentionally uncountable. Their projected
+    // tracker can retain the last settled public count, while a sampled world
+    // must begin with the validated empty synthetic baseline.
+    expectedProjection.repetition = {
+      ...expectedProjection.repetition,
+      currentOccurrences: 0,
+    };
+  }
+  const sampledProjection = canonicalProjection(
+    projectGame(determined, viewer, nowMs),
+    viewer,
+  );
+  const projectionDifference = firstProjectionDifferencePath(
+    expectedProjection,
+    sampledProjection,
+  );
+  if (projectionDifference) {
+    const repetitionDetail = projectionDifference.startsWith("$.repetition")
+      ? ` (expected ${expectedProjection.repetition?.currentOccurrences ?? "none"}/${String(expectedProjection.repetition?.active)}, actual ${sampledProjection.repetition?.currentOccurrences ?? "none"}/${String(sampledProjection.repetition?.active)})`
+      : "";
+    throw new Error(
+      `Sampled public world changed the viewer-visible projection at ${projectionDifference}${repetitionDetail}.`,
+    );
+  }
+  return determined;
 }
 
 function battleExpectation(attacker: PublicPiece, defender: PublicPiece) {
@@ -1451,30 +1826,24 @@ function rankVisibleActionSet(
 }
 
 function posteriorUnknownPieceValue(view: ProjectedGame, side: Side) {
-  const remaining = new Map<PieceType, number>();
-  for (const [type, info] of Object.entries(PIECE_INFO) as Array<
-    [PieceType, (typeof PIECE_INFO)[PieceType]]
-  >) {
-    remaining.set(type, info.count);
-  }
-  for (const piece of view.pieces) {
-    if (piece.side !== side || piece.type === null) continue;
-    const originalType = projectedOriginalType(view, piece);
-    if (!originalType) throw new Error(`Visible ${piece.id} has no inferable original type.`);
-    const count = (remaining.get(originalType) ?? 0) - 1;
-    if (count < 0) throw new Error(`Visible ${side} ${piece.type} inventory is impossible.`);
-    remaining.set(originalType, count);
-  }
-  const unknownCount = view.pieces.filter((piece) => piece.side === side && piece.type === null).length;
-  const remainingCount = [...remaining.values()].reduce((sum, count) => sum + count, 0);
-  if (remainingCount !== unknownCount) {
-    throw new Error(`Visible ${side} posterior inventory does not match its unknown pieces.`);
-  }
-  if (unknownCount === 0) return 0;
-  return [...remaining].reduce(
-    (sum, [type, count]) => sum + knownPieceValue(type) * count,
-    0,
-  ) / unknownCount;
+  const unknown = view.pieces.filter(
+    (piece) => piece.side === side && piece.type === null,
+  );
+  if (!unknown.length) return 0;
+  const viewer = otherSide(side);
+  const publicSeed = stableStringify(
+    canonicalProjection({ ...view, clock: null }, viewer),
+  );
+  const sampled = sampleHiddenTypes(
+    view,
+    viewer,
+    new SeededRandom(`posterior:${side}:${publicSeed}`),
+  );
+  return unknown.reduce((sum, piece) => {
+    const currentType = sampled.currentTypes.get(piece.id);
+    if (!currentType) throw new Error(`Posterior sample omitted ${piece.id}.`);
+    return sum + knownPieceValue(currentType);
+  }, 0) / unknown.length;
 }
 
 function visibleInformationScore(view: ProjectedGame, root: Side) {
