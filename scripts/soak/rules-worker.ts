@@ -1524,7 +1524,7 @@ function verifyRejectedActionDoesNotMutate(state: GameState, nowMs: number) {
   );
 }
 
-export const THREEFOLD_TRACE_SEED = "rules-v14-v3-no-clock-threefold-trace";
+export const THREEFOLD_TRACE_SEED = "rules-v15-v3-no-clock-threefold-trace";
 export const THREEFOLD_TRACE_CARD_PAIR = [
   "club-road-patrol",
   "club-engineer-oath",

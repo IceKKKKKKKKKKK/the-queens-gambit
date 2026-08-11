@@ -434,6 +434,56 @@ function isFrontSetupRow(side: Side, piece: Pick<PublicPiece, "row">) {
   return piece.row === (side === "black" ? 6 : 5);
 }
 
+function isInHomeHalf(side: Side, piece: Pick<PublicPiece, "row">) {
+  return side === "black" ? piece.row >= 6 : piece.row <= 5;
+}
+
+function isInOwnFrontRows(side: Side, piece: Pick<PublicPiece, "row">) {
+  return side === "black"
+    ? piece.row >= 6 && piece.row <= 8
+    : piece.row >= 3 && piece.row <= 5;
+}
+
+function hasUsedRelocationMode(
+  view: ProjectedGame,
+  side: Side,
+  kind: "exchange" | "redeployment",
+  mode: "cross_frontline" | "own_region_permutation",
+) {
+  return (view.augment?.usedBySide[side] ?? []).some((augmentId) => {
+    const effect = getAugmentDefinition(augmentId).effect;
+    return effect.kind === kind && effect.mode === mode;
+  });
+}
+
+function canPubliclyExplainImmobileRelocation(
+  view: ProjectedGame,
+  type: "flag" | "mine",
+  side: Side,
+  piece: PublicPiece,
+) {
+  const opposingSide = otherSide(side);
+  const opposingCrossExchange = hasUsedRelocationMode(
+    view,
+    opposingSide,
+    "exchange",
+    "cross_frontline",
+  );
+  if (type === "flag") {
+    // Cross-front exchange is deliberately non-oracular: an opponent may have
+    // spent it on this hidden flag, and ongoing projections do not retain the
+    // complete replay needed to identify that target later.
+    return opposingCrossExchange && isInOwnFrontRows(opposingSide, piece);
+  }
+  return (
+    (hasUsedRelocationMode(view, side, "redeployment", "own_region_permutation") &&
+      isInHomeHalf(side, piece)) ||
+    ((hasUsedRelocationMode(view, side, "exchange", "cross_frontline") ||
+      opposingCrossExchange) &&
+      isInOwnFrontRows(opposingSide, piece))
+  );
+}
+
 function typeCanOccupyPublicPosition(
   view: ProjectedGame,
   type: PieceType,
@@ -442,8 +492,13 @@ function typeCanOccupyPublicPosition(
 ) {
   const moved = view.movedPieceIds.includes(piece.id);
   if (type === "flag") {
+    if (moved) {
+      return (
+        (piece.alive || view.phase === "finished") &&
+        canPubliclyExplainImmobileRelocation(view, type, side, piece)
+      );
+    }
     return (
-      !moved &&
       (piece.alive || view.phase === "finished") &&
       isAllowedSetupPosition(
         type,
@@ -454,7 +509,7 @@ function typeCanOccupyPublicPosition(
     );
   }
   if (type === "mine") {
-    if (moved) return false;
+    if (moved) return canPubliclyExplainImmobileRelocation(view, type, side, piece);
     return isAllowedSetupPosition(
       type,
       side,
@@ -507,6 +562,7 @@ function assignHiddenTypes(view: ProjectedGame, viewer: Side, random: SeededRand
   let deepMines = known.filter(
     (piece) =>
       projectedOriginalType(view, piece) === "mine" &&
+      !movedIds.has(piece.id) &&
       isThirdSetupRow(hiddenSide, piece),
   ).length;
   let frontBombs = known.filter(
@@ -541,7 +597,11 @@ function assignHiddenTypes(view: ProjectedGame, viewer: Side, random: SeededRand
     const candidates = random.shuffle(
       available.filter((piece) => {
         if (!typeCanOccupyPublicPosition(view, type, hiddenSide, piece)) return false;
-        if (type === "mine" && isThirdSetupRow(hiddenSide, piece)) {
+        if (
+          type === "mine" &&
+          !movedIds.has(piece.id) &&
+          isThirdSetupRow(hiddenSide, piece)
+        ) {
           return deepMines < deepMineAllowance;
         }
         if (
@@ -558,7 +618,10 @@ function assignHiddenTypes(view: ProjectedGame, viewer: Side, random: SeededRand
       const availableIndex = available.findIndex((candidate) => candidate.id === piece.id);
       available.splice(availableIndex, 1);
       assignments.set(piece.id, type);
-      const addedDeepMine = type === "mine" && isThirdSetupRow(hiddenSide, piece);
+      const addedDeepMine =
+        type === "mine" &&
+        !movedIds.has(piece.id) &&
+        isThirdSetupRow(hiddenSide, piece);
       const addedFrontBomb =
         type === "bomb" &&
         !movedIds.has(piece.id) &&

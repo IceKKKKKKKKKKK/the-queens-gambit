@@ -68,7 +68,7 @@ redeploy 策略只能生成少量确定性的完整 placements，避免全排列
 
 - balance/report schema：5；
 - soak schema：2；
-- 算法：`product-stability-v14-v3-no-clock-zero-time-deterministic-ids-slot-stable-drafts`；
+- 算法：`product-stability-v15-v3-no-clock-zero-time-deterministic-ids-slot-stable-drafts-relocation-aware-worlds`；
 - 引擎：`augment-duel-dark-v3:threefold-3:strategic-sha256-v2`。
 
 checkpoint 指纹必须绑定实际零时间配置、搜索深度、eligible/excluded IDs、赛程、目录、算法和引擎。任何旧 schema、旧算法、旧引擎、旧牌池或旧赛程证据都严格拒绝，不能与当前结果合并。
@@ -83,7 +83,7 @@ checkpoint 指纹必须绑定实际零时间配置、搜索深度、eligible/exc
 - 四张新主动牌 opportunity/use；
 - 回放、隐私、API、动画和恢复证据。
 
-截至 2026-08-11 ET，最终代码回归为 244/244：HTML 9 项、TypeScript 232 项、真实集成 3 项；production build、全项目 ESLint、`tsc --noEmit --incremental false` 与 `git diff --check` 均通过。三套真实集成各连续执行 4 轮，共 12/12 通过；每轮端口可重新绑定，结束后孤儿进程为 0。
+截至 2026-08-11 ET，最终代码回归为 247/247：HTML 9 项、TypeScript 235 项、真实集成 3 项；production build、全项目 ESLint、`tsc --noEmit --incremental false` 与 `git diff --check` 均通过。三套真实集成各连续执行 4 轮，共 12/12 通过；每轮端口可重新绑定，结束后孤儿进程为 0。
 
 这组代码回归不替代正式持续测试。正式不少于 4 小时的四 worker soak 与 Sites 部署都必须发生在准确的冻结提交之后；持续测试通过后才能进入公开部署和生产 QA。权威长跑结果写入 `outputs/soak/<run-id>/final.json`，quick 报告写入 `outputs/balance/augment-balance-report.json`。`outputs/` 只保存本机证据，不提交。
 

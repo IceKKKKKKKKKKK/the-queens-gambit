@@ -1832,6 +1832,260 @@ test("public action-piece IDs prevent exchanged or attacking pieces from becomin
   }
 });
 
+test("used redeployment keeps legally relocated hidden mines possible after public reveal", () => {
+  let state = createControlledPairGame(
+    "heart-sacrifice-aura",
+    "heart-shadow-redeploy",
+    "white",
+    "hidden-mine-redeployment",
+  );
+  const whiteMines = state.pieces
+    .filter((piece) => piece.side === "white" && piece.type === "mine")
+    .map((piece) => piece.id);
+  const redeploy = enumerateVisibleActions(projectGame(state, "white", 1_000_000), "white")
+    .find((action) => {
+      if (action.type !== "augment_redeploy") return false;
+      return action.placements.some((placement) => {
+        const piece = state.pieces.find((candidate) => candidate.id === placement.pieceId);
+        return (
+          piece?.type === "mine" &&
+          (piece.row !== placement.row || piece.col !== placement.col)
+        );
+      });
+    });
+  assert.ok(redeploy && redeploy.type === "augment_redeploy");
+  state = applyPlayerAction(state, "white", redeploy, 1_000_001);
+  assert.ok(state.augment?.usedBySide.white.includes("heart-shadow-redeploy"));
+  const movedMineIds = whiteMines.filter((id) => state.movedPieceIds?.includes(id));
+  assert.ok(movedMineIds.length > 0);
+
+  let sampledRelocatedMine = false;
+  for (let seed = 0; seed < 128; seed += 1) {
+    const determined = determinizeFromProjection(
+      state,
+      "black",
+      `hidden-mine-redeployment:${seed}`,
+      1_000_001,
+    );
+    sampledRelocatedMine ||= movedMineIds.some(
+      (id) => determined.pieces.find((piece) => piece.id === id)?.type === "mine",
+    );
+  }
+  assert.equal(sampledRelocatedMine, true);
+
+  const outsideRedeployGeometry = structuredClone(state);
+  const displacedWhite = outsideRedeployGeometry.pieces.find(
+    (piece) =>
+      piece.side === "white" &&
+      piece.alive &&
+      piece.type !== "flag" &&
+      piece.type !== "mine",
+  );
+  const blackFrontStation = outsideRedeployGeometry.pieces.find(
+    (piece) => piece.side === "black" && piece.alive && piece.row === 7,
+  );
+  assert.ok(displacedWhite && blackFrontStation);
+  [displacedWhite.row, blackFrontStation.row] = [blackFrontStation.row, displacedWhite.row];
+  [displacedWhite.col, blackFrontStation.col] = [blackFrontStation.col, displacedWhite.col];
+  outsideRedeployGeometry.movedPieceIds = [
+    ...new Set([
+      ...(outsideRedeployGeometry.movedPieceIds ?? []),
+      displacedWhite.id,
+      blackFrontStation.id,
+    ]),
+  ];
+  for (let seed = 0; seed < 64; seed += 1) {
+    const determined = determinizeFromProjection(
+      outsideRedeployGeometry,
+      "black",
+      `outside-redeploy-geometry:${seed}`,
+      1_000_001,
+    );
+    const sampledType = determined.pieces.find(
+      (piece) => piece.id === displacedWhite.id,
+    )?.type;
+    assert.notEqual(sampledType, "mine");
+    assert.notEqual(sampledType, "flag");
+  }
+
+  const publiclyRevealed = structuredClone(state);
+  publiclyRevealed.augment!.ruleState!.publiclyRevealedPieceIds.push(movedMineIds[0]);
+  assert.equal(
+    projectGame(publiclyRevealed, "black", 1_000_001).pieces.find(
+      (piece) => piece.id === movedMineIds[0],
+    )?.type,
+    "mine",
+  );
+  for (let seed = 0; seed < 32; seed += 1) {
+    const determined = determinizeFromProjection(
+      publiclyRevealed,
+      "black",
+      `public-mine-redeployment:${seed}`,
+      1_000_001,
+    );
+    assert.equal(
+      determined.pieces.find((piece) => piece.id === movedMineIds[0])?.type,
+      "mine",
+    );
+  }
+});
+
+test("used cross-front exchange can explain a moved hidden flag without relaxing remote exchange", () => {
+  let state = createControlledPairGame(
+    "heart-heavenly-exchange",
+    "heart-rail-turn",
+    "black",
+    "hidden-flag-cross-exchange",
+  );
+  const ownFront = state.pieces.find(
+    (piece) =>
+      piece.side === "black" &&
+      piece.alive &&
+      piece.row === 6 &&
+      piece.type !== "flag" &&
+      piece.type !== "mine",
+  );
+  const hiddenFlag = state.pieces.find(
+    (piece) => piece.side === "white" && piece.type === "flag",
+  );
+  const enemyFront = state.pieces.find(
+    (piece) =>
+      piece.side === "white" &&
+      piece.alive &&
+      piece.row === 5 &&
+      piece.type !== "flag",
+  );
+  assert.ok(ownFront && hiddenFlag && enemyFront);
+  [hiddenFlag.row, enemyFront.row] = [enemyFront.row, hiddenFlag.row];
+  [hiddenFlag.col, enemyFront.col] = [enemyFront.col, hiddenFlag.col];
+  state = applyPlayerAction(state, "black", {
+    type: "augment_exchange",
+    augmentId: "heart-heavenly-exchange",
+    from: { row: ownFront.row, col: ownFront.col },
+    to: { row: hiddenFlag.row, col: hiddenFlag.col },
+  }, 1_000_001);
+  assert.ok(state.augment?.usedBySide.black.includes("heart-heavenly-exchange"));
+  assert.ok(state.movedPieceIds?.includes(hiddenFlag.id));
+  assert.equal(
+    projectGame(state, "black", 1_000_001).pieces.find(
+      (piece) => piece.id === hiddenFlag.id,
+    )?.type,
+    null,
+  );
+
+  let sampledMovedFlag = false;
+  for (let seed = 0; seed < 256 && !sampledMovedFlag; seed += 1) {
+    const determined = determinizeFromProjection(
+      state,
+      "black",
+      `hidden-flag-cross-exchange:${seed}`,
+      1_000_001,
+    );
+    sampledMovedFlag =
+      determined.pieces.find((piece) => piece.id === hiddenFlag.id)?.type === "flag";
+  }
+  assert.equal(sampledMovedFlag, true);
+});
+
+test("redeploy followed by cross-front exchange preserves a hidden mine world across the line", () => {
+  let state = createControlledPairGame(
+    "heart-heavenly-exchange",
+    "heart-shadow-redeploy",
+    "white",
+    "hidden-mine-redeploy-cross-chain",
+  );
+  const whiteMine = state.pieces.find(
+    (piece) => piece.side === "white" && piece.type === "mine" && piece.alive,
+  );
+  const whiteFront = state.pieces.find(
+    (piece) =>
+      piece.side === "white" &&
+      piece.row === 3 &&
+      piece.type !== "flag" &&
+      piece.alive,
+  );
+  assert.ok(whiteMine && whiteFront);
+  const placements = state.pieces
+    .filter(
+      (piece) =>
+        piece.side === "white" &&
+        piece.alive &&
+        piece.type !== "flag" &&
+        piece.row <= 5,
+    )
+    .map((piece) => ({
+      pieceId: piece.id,
+      row: piece.id === whiteMine.id
+        ? whiteFront.row
+        : piece.id === whiteFront.id
+          ? whiteMine.row
+          : piece.row,
+      col: piece.id === whiteMine.id
+        ? whiteFront.col
+        : piece.id === whiteFront.id
+          ? whiteMine.col
+          : piece.col,
+    }));
+  state = applyPlayerAction(state, "white", {
+    type: "augment_redeploy",
+    augmentId: "heart-shadow-redeploy",
+    placements,
+  }, 1_000_001);
+  assert.equal(whiteMine.id, state.pieces.find(
+    (piece) => piece.side === "white" && piece.row === 3 && piece.col === whiteFront.col,
+  )?.id);
+
+  const blackFront = state.pieces.find(
+    (piece) =>
+      piece.side === "black" &&
+      piece.alive &&
+      piece.row === 6 &&
+      piece.type !== "flag",
+  );
+  const relocatedMine = state.pieces.find((piece) => piece.id === whiteMine.id)!;
+  assert.ok(blackFront);
+  state = applyPlayerAction(state, "black", {
+    type: "augment_exchange",
+    augmentId: "heart-heavenly-exchange",
+    from: { row: blackFront.row, col: blackFront.col },
+    to: { row: relocatedMine.row, col: relocatedMine.col },
+  }, 1_000_002);
+  assert.ok(state.augment?.usedBySide.white.includes("heart-shadow-redeploy"));
+  assert.ok(state.augment?.usedBySide.black.includes("heart-heavenly-exchange"));
+  assert.equal(
+    projectGame(state, "black", 1_000_002).pieces.find((piece) => piece.id === whiteMine.id)?.type,
+    null,
+  );
+
+  let sampledMovedMine = false;
+  for (let seed = 0; seed < 256 && !sampledMovedMine; seed += 1) {
+    const determined = determinizeFromProjection(
+      state,
+      "black",
+      `hidden-mine-redeploy-cross-chain:${seed}`,
+      1_000_002,
+    );
+    sampledMovedMine =
+      determined.pieces.find((piece) => piece.id === whiteMine.id)?.type === "mine";
+  }
+  assert.equal(sampledMovedMine, true);
+
+  const publiclyRevealed = structuredClone(state);
+  publiclyRevealed.augment!.ruleState!.publiclyRevealedPieceIds.push(whiteMine.id);
+  for (let seed = 0; seed < 32; seed += 1) {
+    const determined = determinizeFromProjection(
+      publiclyRevealed,
+      "black",
+      `public-mine-redeploy-cross-chain:${seed}`,
+      1_000_002,
+    );
+    assert.equal(
+      determined.pieces.find((piece) => piece.id === whiteMine.id)?.type,
+      "mine",
+    );
+  }
+});
+
 test("unmoved front-row bombs still need setup allowance while a publicly moved bomb remains legal", () => {
   const unmoved = createControlledPairGame(
     "club-forced-march",
@@ -3072,7 +3326,7 @@ test("checkpoint validation and remaining schedule make resume idempotent", () =
   assert.equal(restored.algorithmVersion, BALANCE_ALGORITHM_VERSION);
   assert.equal(
     BALANCE_ALGORITHM_VERSION,
-    "product-stability-v14-v3-no-clock-zero-time-deterministic-ids-slot-stable-drafts",
+    "product-stability-v15-v3-no-clock-zero-time-deterministic-ids-slot-stable-drafts-relocation-aware-worlds",
   );
   assert.equal(restored.engineRulesFingerprint, BALANCE_ENGINE_RULES_FINGERPRINT);
   assert.equal(
@@ -3103,6 +3357,11 @@ test("checkpoint validation and remaining schedule make resume idempotent", () =
   const v13 = JSON.parse(JSON.stringify(checkpoint));
   v13.algorithmVersion = "product-stability-v13-v3-no-clock-zero-time-deterministic-ids";
   assert.throws(() => validateCheckpoint(v13, OPTIONS, pairings), /algorithm/i);
+
+  const v14 = JSON.parse(JSON.stringify(checkpoint));
+  v14.algorithmVersion =
+    "product-stability-v14-v3-no-clock-zero-time-deterministic-ids-slot-stable-drafts";
+  assert.throws(() => validateCheckpoint(v14, OPTIONS, pairings), /algorithm/i);
 
   const v6 = JSON.parse(JSON.stringify(checkpoint));
   v6.algorithmVersion = "hidden-info-balance-v6-full-threshold-increment";
@@ -3239,7 +3498,7 @@ test("card aggregation separates opportunity and first-trigger timing from raw n
   );
 });
 
-test("same-tier v14 scores adjudicated threefold draws as 0.5 without hiding action caps", () => {
+test("same-tier v15 scores adjudicated threefold draws as 0.5 without hiding action caps", () => {
   const pairing = buildRoundRobinPairings()[0];
   const group = scheduleGroup(pairing, 0, 0);
   const results = playMirrorGroup(group, OPTIONS).map((result) => ({
@@ -3263,7 +3522,7 @@ test("same-tier v14 scores adjudicated threefold draws as 0.5 without hiding act
   assert.equal(aggregate.cards[group.cardA].threefoldDraws, 4);
 });
 
-test("v14 cross-tier diagnostic schedule balances legal round order and isolates setup cards", () => {
+test("v15 cross-tier diagnostic schedule balances legal round order and isolates setup cards", () => {
   const representatives = selectTierRepresentatives();
   assert.equal(representatives.length, 4);
   assert.equal(buildCrossTierComparisons().length, 6);
@@ -3358,7 +3617,7 @@ test("v14 cross-tier diagnostic schedule balances legal round order and isolates
   assert.ok(setupState.augment?.draft.loadouts[setupSide].includes(setupFocal));
 });
 
-test("v14 second focal is absent at move zero and selected in the formal move-10 draft", () => {
+test("v15 second focal is absent at move zero and selected in the formal move-10 draft", () => {
   const group = buildCrossTierExperimentSchedule(0).find(
     (candidate) =>
       candidate.stratum === "round_order" && candidate.roundOrder === "higher_first",
@@ -3384,7 +3643,7 @@ test("v14 second focal is absent at move zero and selected in the formal move-10
   assert.equal(result.focal.white.selected, true);
 });
 
-test("v14 common random seed excludes card IDs and one four-leg mirror shares it", () => {
+test("v15 common random seed excludes card IDs and one four-leg mirror shares it", () => {
   const group = buildCrossTierExperimentSchedule(0).find(
     (candidate) => candidate.stratum === "round_order",
   );
@@ -3407,7 +3666,7 @@ test("v14 common random seed excludes card IDs and one four-leg mirror shares it
   assert.ok(results.every((result) => result.secondDraftRevealed));
 });
 
-test("v14 leg ledger and report preserve finish, focal trigger, opportunity and stop status", () => {
+test("v15 leg ledger and report preserve finish, focal trigger, opportunity and stop status", () => {
   const group = buildCrossTierExperimentSchedule(0).find(
     (candidate) => candidate.stratum === "round_order",
   );
@@ -3536,7 +3795,7 @@ test("v14 leg ledger and report preserve finish, focal trigger, opportunity and 
   );
 });
 
-test("cross-tier v14 preserves drawReason and scores each product threefold draw as 0.5", () => {
+test("cross-tier v15 preserves drawReason and scores each product threefold draw as 0.5", () => {
   const options = { ...OPTIONS, maxActions: 10 };
   const group = buildCrossTierExperimentSchedule(0).find(
     (candidate) => candidate.stratum === "round_order",
@@ -3567,7 +3826,7 @@ test("cross-tier v14 preserves drawReason and scores each product threefold draw
   assert.equal(row?.higherScore?.estimate, 0.5);
 });
 
-test("v14 setup results remain outside pure round-order tier estimates", () => {
+test("v15 setup results remain outside pure round-order tier estimates", () => {
   const group = buildCrossTierExperimentSchedule(0).find(
     (candidate) => candidate.stratum === "setup",
   );
@@ -3607,7 +3866,7 @@ test("v14 setup results remain outside pure round-order tier estimates", () => {
   assert.equal(card?.setupCompleteMirrorGroups, 1);
 });
 
-test("v14 cross-tier estimates are card-equal and use deterministic mirror-group bootstrap", () => {
+test("v15 cross-tier estimates are card-equal and use deterministic mirror-group bootstrap", () => {
   const samples: CrossTierMirrorSample[] = [
     {
       groupKey: "g0",
@@ -3655,7 +3914,7 @@ test("v14 cross-tier estimates are card-equal and use deterministic mirror-group
   assert.ok(first && first.low >= 0 && first.high <= 1);
 });
 
-test("v14 technical acceptance rejects an incomplete favorable sample without gating on ordering", () => {
+test("v15 technical acceptance rejects an incomplete favorable sample without gating on ordering", () => {
   const tournament = { ...OPTIONS, maxActions: 10 };
   const groups = buildCrossTierComparisons().map((comparison) => {
     const group = buildCrossTierExperimentSchedule(0).find(
@@ -3743,6 +4002,14 @@ test("cross-tier checkpoints bind the balance algorithm and reject legacy eviden
   v13.algorithmVersion = "product-stability-v13-v3-no-clock-zero-time-deterministic-ids";
   assert.throws(
     () => validateCrossTierCheckpoint(v13, OPTIONS),
+    /algorithm/i,
+  );
+
+  const v14 = JSON.parse(JSON.stringify(checkpoint));
+  v14.algorithmVersion =
+    "product-stability-v14-v3-no-clock-zero-time-deterministic-ids-slot-stable-drafts";
+  assert.throws(
+    () => validateCrossTierCheckpoint(v14, OPTIONS),
     /algorithm/i,
   );
 
