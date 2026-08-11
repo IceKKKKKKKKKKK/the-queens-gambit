@@ -479,10 +479,32 @@ function makeOpponentPiecePublic(code, perspective) {
       (candidate) => candidate.alive && candidate.side === opponent && candidate.type !== "flag",
     );
     assert.ok(piece);
+    assert.equal(state.augment.ruleState.baseTypes[piece.id], piece.type);
     state.augment.ruleState.publiclyRevealedPieceIds.push(piece.id);
-    publicPiece = { id: piece.id, type: piece.type };
+    publicPiece = { id: piece.id, setupType: piece.type };
   });
   return publicPiece;
+}
+
+function authoritativePublicPieceState(code, pieceId) {
+  const database = new DatabaseSync(localD1Path(), { readOnly: true });
+  try {
+    const row = database.prepare("SELECT state_json FROM games WHERE code = ?").get(code);
+    assert.ok(row);
+    const state = JSON.parse(row.state_json);
+    assert.equal(state.rulesVersion, "augment-duel-dark-v3");
+    assert.ok(state.augment?.ruleState);
+    const piece = state.pieces.find((candidate) => candidate.id === pieceId);
+    assert.ok(piece);
+    return {
+      type: piece.type,
+      baseType: state.augment.ruleState.baseTypes[pieceId],
+      publiclyRevealed:
+        state.augment.ruleState.publiclyRevealedPieceIds.includes(pieceId),
+    };
+  } finally {
+    database.close();
+  }
 }
 
 function insertCompletedHistoryFixtures(authSubjectA, authSubjectB, prefix, count = 11) {
@@ -1317,11 +1339,17 @@ test("authenticated rooms, identity seats, spectator policy, provisioning, and s
   assert.equal(rankedFriendPlaying.status, 200);
   assert.equal(rankedFriendPlaying.body.snapshot.phase, "playing");
   assert.equal(rankedFriendPlaying.body.snapshot.replay, null);
+  const authoritativePlayingPiece = authoritativePublicPieceState(
+    rankedCode,
+    publiclyRevealedOpponent.id,
+  );
+  assert.equal(authoritativePlayingPiece.baseType, publiclyRevealedOpponent.setupType);
+  assert.equal(authoritativePlayingPiece.publiclyRevealed, true);
   assert.equal(
     rankedFriendPlaying.body.snapshot.pieces.find(
       (piece) => piece.id === publiclyRevealedOpponent.id,
     )?.type,
-    publiclyRevealedOpponent.type,
+    authoritativePlayingPiece.type,
   );
   assert.equal(
     rankedFriendPlaying.body.snapshot.pieces
@@ -1393,11 +1421,17 @@ test("authenticated rooms, identity seats, spectator policy, provisioning, and s
   assert.equal(rankedFriendAfterFinish.body.snapshot.replay, null);
   assertNoRepetitionSecrets(rankedFriendAfterFinish.body.snapshot);
   assert.equal(rankedFriendAfterFinish.body.snapshot.events.length > 0, true);
+  const authoritativeFinishedPiece = authoritativePublicPieceState(
+    rankedCode,
+    publiclyRevealedOpponent.id,
+  );
+  assert.equal(authoritativeFinishedPiece.baseType, publiclyRevealedOpponent.setupType);
+  assert.equal(authoritativeFinishedPiece.publiclyRevealed, true);
   assert.equal(
     rankedFriendAfterFinish.body.snapshot.pieces.find(
       (piece) => piece.id === publiclyRevealedOpponent.id,
     )?.type,
-    publiclyRevealedOpponent.type,
+    authoritativeFinishedPiece.type,
   );
   assert.equal(
     rankedFriendAfterFinish.body.snapshot.pieces
