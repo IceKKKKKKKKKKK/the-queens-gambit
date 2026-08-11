@@ -6,13 +6,12 @@ import { performance } from "node:perf_hooks";
 import {
   assertCatalogReadyForTournament,
   buildBalanceReport,
-  buildRoundRobinPairings,
+  buildProductStabilityPairings,
   createCheckpoint,
   playMirrorGroup,
   recordMirrorGroup,
   scheduleGroup,
   stratifiedPairSample,
-  strengthModelFromAggregate,
   summarizeReport,
   validateCheckpoint,
   type BalanceCheckpoint,
@@ -44,20 +43,18 @@ Usage:
   node --experimental-transform-types scripts/augment-balance-simulation.ts [options]
 
 Modes:
-  --mode=quick                 One complete same-suit round robin (default)
-  --mode=soak                  Repeat the round robin until wall-clock duration
+  --mode=quick                 One complete same-suit stability ring (default)
+  --mode=soak                  Repeat the stability ring until wall-clock duration
   --duration-minutes=240       Soak time for this invocation
   --cycles=1                   Complete cycles in quick mode
   --mirror-groups-per-pair=1   Four mirrored games per group
 
 Search and game:
   --seed=20260809
-  --max-actions=30|180
+  --max-actions=300             Safety cap; threefold repetition normally ends loops first
   --determinizations=1|4
   --branching=3|8
   --rollout-depth=1|3
-  --think-min-ms=2500
-  --think-max-ms=6500
   --refresh-margin=4
 
 Persistence:
@@ -107,31 +104,26 @@ function parseCli(argv: readonly string[]): CliOptions {
     return parsed;
   };
   const soak = mode === "soak";
+  if (values.has("think-min-ms") || values.has("think-max-ms")) {
+    throw new Error("Bot think-time options were removed; simulations always run at 0 ms.");
+  }
   const seed = numberOption("seed", 20260809, { integer: true, minimum: 0 });
-  const maxActions = numberOption("max-actions", soak ? 180 : 30, {
+  const maxActions = numberOption("max-actions", 300, {
     integer: true,
     minimum: 1,
-  });
-  const thinkTimeMinMs = numberOption("think-min-ms", 2_500, {
-    integer: true,
-    minimum: 0,
-  });
-  const thinkTimeMaxMs = numberOption("think-max-ms", 6_500, {
-    integer: true,
-    minimum: thinkTimeMinMs,
   });
   const tournament: TournamentOptions = {
     seed,
     maxActions,
-    thinkTimeMinMs,
-    thinkTimeMaxMs,
+    thinkTimeMinMs: 0,
+    thinkTimeMaxMs: 0,
     search: {
-      determinizations: numberOption("determinizations", soak ? 4 : 1, {
+      determinizations: numberOption("determinizations", 1, {
         integer: true,
         minimum: 1,
       }),
-      branching: numberOption("branching", soak ? 8 : 3, { integer: true, minimum: 1 }),
-      rolloutDepth: numberOption("rollout-depth", soak ? 3 : 1, {
+      branching: numberOption("branching", 3, { integer: true, minimum: 1 }),
+      rolloutDepth: numberOption("rollout-depth", 1, {
         integer: true,
         minimum: 1,
       }),
@@ -191,11 +183,13 @@ function markdownReport(report: BalanceReport) {
   const percent = (value: number | null | undefined) =>
     value === null || value === undefined ? "—" : `${(value * 100).toFixed(1)}%`;
   const lines = [
-    "# 军令隐藏信息平衡对弈报告",
+    "# 军令产品稳定性对弈报告",
     "",
     `生成时间：${report.generatedAt}`,
     "",
-    `目录：${report.catalogSize} 张；镜像组：${report.global.groups}；对局：${report.global.games}；完成：${report.global.finished}；三次重复和棋：${report.global.threefoldDraws}；未完成：${report.global.unfinished}；搜索节点：${report.global.searchNodes}；放弃追加行动：${report.global.passExtraMoves}；engine：${report.engineRulesFingerprint}。`,
+    `产品目录：${report.catalogSize} 张；模拟 eligible：${report.simulationEligibleSize} 张；计时卡排除：${report.excludedClockAugmentIds.length} 张；覆盖：${report.simulationCoverage.covered}/${report.simulationCoverage.total}；镜像组：${report.global.groups}；对局：${report.global.games}；完成：${report.global.finished}；三次重复和棋：${report.global.threefoldDraws}；未完成：${report.global.unfinished}；搜索节点：${report.global.searchNodes}；放弃追加行动：${report.global.passExtraMoves}；engine：${report.engineRulesFingerprint}。`,
+    "",
+    `排除的计时卡：${report.excludedClockAugmentIds.join("、")}。`,
     "",
     `先手胜率：${percent(report.global.firstPlayerWinRate?.estimate)}（95% CI ${percent(report.global.firstPlayerWinRate?.low)}–${percent(report.global.firstPlayerWinRate?.high)}）；黑方胜率：${percent(report.global.blackWinRate?.estimate)}。`,
     "",
@@ -206,14 +200,9 @@ function markdownReport(report: BalanceReport) {
         `| ${card.suit} | ${card.name} | ${card.games} | ${card.threefoldDraws} | ${percent(card.mirrorScore?.estimate)} | ${percent(card.mirrorScore?.low)}–${percent(card.mirrorScore?.high)} | ${percent(card.pickRate)} | ${percent(card.triggerRate)} | ${percent(card.heldWithoutOpportunityRate)} | ${card.passExtraMoves} | ${card.firstTriggerMoveDistribution.median ?? "—"} |`,
     ),
     "",
-    "## 只读调参建议",
+    "## 强度诊断边界",
     "",
-    ...(report.tuningSuggestions.length
-      ? report.tuningSuggestions.map(
-          (suggestion) =>
-            `- ${suggestion.augmentId}: ${suggestion.direction} ${suggestion.field} ${suggestion.currentValue} → ${suggestion.suggestedValue}（${suggestion.confidence}；${suggestion.evidence}）`,
-        )
-      : ["当前样本没有达到自动建议门槛；不会为了凑结论而改数值。"]),
+    "卡牌与档位胜率只作诊断，不参与验收，也不会生成自动调参建议；后续平衡由真人测试数据驱动。",
     "",
     "## 解释边界",
     "",
@@ -242,7 +231,7 @@ function advanceCursor(
 async function run() {
   const cli = parseCli(process.argv.slice(2));
   assertCatalogReadyForTournament();
-  let pairings = buildRoundRobinPairings();
+  let pairings = buildProductStabilityPairings();
   if (cli.pairLimit !== null) pairings = pairings.slice(0, cli.pairLimit);
   if (cli.pairsPerSuit !== null) pairings = stratifiedPairSample(pairings, cli.pairsPerSuit);
   if (!pairings.length) throw new Error("The selected catalog produces no same-suit pairings.");
@@ -272,8 +261,7 @@ async function run() {
       advanceCursor(checkpoint, pairings, cli.mirrorGroupsPerPair);
       continue;
     }
-    const model = strengthModelFromAggregate(checkpoint.aggregate);
-    const results = playMirrorGroup(group, cli.tournament, model);
+    const results = playMirrorGroup(group, cli.tournament);
     recordMirrorGroup(checkpoint.aggregate, group, results);
     checkpoint.completedGroupKeys.push(group.groupKey);
     advanceCursor(checkpoint, pairings, cli.mirrorGroupsPerPair);
@@ -303,7 +291,13 @@ async function run() {
   console.log(`checkpoint=${cli.checkpointPath}`);
   console.log(`json=${cli.outputPath}`);
   console.log(`markdown=${cli.markdownPath}`);
-  if (report.global.exceptions > 0 || report.global.stuck > 0) process.exitCode = 1;
+  if (
+    report.global.exceptions > 0 ||
+    report.global.stuck > 0 ||
+    report.global.capped > 0
+  ) {
+    process.exitCode = 1;
+  }
 }
 
 const entryPath = process.argv[1] ? resolve(process.argv[1]) : "";

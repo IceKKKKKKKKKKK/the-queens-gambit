@@ -9,8 +9,10 @@ import {
   type AugmentId,
 } from "../lib/augments.ts";
 import {
+  LEGACY_AUGMENT_RULES_VERSION,
   PIECE_INFO,
   applyPlayerAction,
+  createInitialGame,
   getLegalTargets,
   isValidRepetitionTrackerForState,
   projectGame,
@@ -45,8 +47,10 @@ import {
 import {
   crossTierMarkdown,
   createCrossTierCheckpoint,
+  parseCli as parseCrossTierCli,
   validateCrossTierCheckpoint,
 } from "../scripts/augment-cross-tier-calibration.ts";
+import { parseCli as parseBalanceCli } from "../scripts/augment-balance-simulation.ts";
 import {
   actionKey,
   chooseDraftCard,
@@ -70,14 +74,18 @@ import {
 
 import {
   buildRoundRobinPairings,
+  buildProductStabilityPairings,
   BALANCE_ALGORITHM_VERSION,
   BALANCE_ENGINE_RULES_FINGERPRINT,
   buildBalanceReport,
   createEmptyAggregate,
   createCheckpoint,
   createControlledPairGame,
+  constrainActiveDraftToSimulationPool,
   meanConfidenceInterval,
   mirrorLegs,
+  pendingPassAugmentId,
+  playLeg,
   playMirrorGroup,
   recordMirrorGroup,
   remainingGroups,
@@ -90,26 +98,40 @@ import {
   type TournamentOptions,
 } from "../scripts/balance/tournament.ts";
 import {
+  EXCLUDED_CLOCK_AUGMENT_IDS,
+  SIMULATION_CATALOG_SIZE,
+  SIMULATION_ELIGIBLE_AUGMENT_IDS,
+  SIMULATION_ELIGIBLE_AUGMENTS,
+  SIMULATION_ELIGIBLE_COUNT,
+} from "../scripts/balance/simulation-pool.ts";
+import {
   FORMAL_SOAK_MINIMUM_ACTIVE_MS,
+  balanceTournamentOptions,
   balanceWorkerStopDecision,
 } from "../scripts/soak/balance-worker.ts";
+import { SOAK_SCHEMA_VERSION } from "../scripts/soak/common.ts";
 import {
   THREEFOLD_TRACE_CARD_PAIR,
   coveragePairs,
+  createClocklessSetupPrivacyState,
   runThreefoldTrace,
+  verifyActionSettlement,
+  verifyProjectedRuleMetadata,
+  verifyProjectionPrivacy,
 } from "../scripts/soak/rules-worker.ts";
+import { hasCappedBalanceGames } from "../scripts/soak/supervisor.ts";
 
 const SEARCH: SearchOptions = { determinizations: 1, branching: 3, rolloutDepth: 1 };
 const OPTIONS: TournamentOptions = {
   seed: 424242,
   maxActions: 4,
-  thinkTimeMinMs: 50,
-  thinkTimeMaxMs: 50,
+  thinkTimeMinMs: 0,
+  thinkTimeMaxMs: 0,
   search: SEARCH,
   refreshMargin: 4,
 };
 
-const REQUIRED_SOAK_ROUND_ROBIN_GROUPS = buildRoundRobinPairings().length;
+const REQUIRED_SOAK_STABILITY_GROUPS = buildProductStabilityPairings().length;
 
 function decideBalanceWorkerStop(
   overrides: Partial<Parameters<typeof balanceWorkerStopDecision>[0]> = {},
@@ -118,19 +140,28 @@ function decideBalanceWorkerStop(
     profile: "soak",
     durationSeconds: FORMAL_SOAK_MINIMUM_ACTIVE_MS / 1_000,
     segmentActiveMs: FORMAL_SOAK_MINIMUM_ACTIVE_MS + 1,
-    segmentCompletedGroups: REQUIRED_SOAK_ROUND_ROBIN_GROUPS,
-    requiredRoundRobinGroups: REQUIRED_SOAK_ROUND_ROBIN_GROUPS,
+    segmentCompletedGroups: REQUIRED_SOAK_STABILITY_GROUPS,
+    requiredScheduleGroups: REQUIRED_SOAK_STABILITY_GROUPS,
     stopRequested: false,
     failed: false,
     ...overrides,
   });
 }
 
-test("formal balance soak requires four continuous hours and a complete current-segment catalog", () => {
-  assert.ok(REQUIRED_SOAK_ROUND_ROBIN_GROUPS > 1);
+test("formal balance soak requires four continuous hours and a complete current-segment stability ring", () => {
+  assert.equal(SOAK_SCHEMA_VERSION, 2);
+  assert.deepEqual(balanceTournamentOptions("soak", 1234), {
+    seed: 1234,
+    maxActions: 300,
+    thinkTimeMinMs: 0,
+    thinkTimeMaxMs: 0,
+    search: { determinizations: 1, branching: 3, rolloutDepth: 1 },
+    refreshMargin: 4,
+  });
+  assert.ok(REQUIRED_SOAK_STABILITY_GROUPS > 1);
   assert.equal(
     decideBalanceWorkerStop({
-      segmentCompletedGroups: REQUIRED_SOAK_ROUND_ROBIN_GROUPS - 1,
+      segmentCompletedGroups: REQUIRED_SOAK_STABILITY_GROUPS - 1,
     }),
     "continue",
   );
@@ -139,6 +170,39 @@ test("formal balance soak requires four continuous hours and a complete current-
     decideBalanceWorkerStop({ segmentActiveMs: FORMAL_SOAK_MINIMUM_ACTIVE_MS - 1 }),
     "continue",
   );
+});
+
+test("every product-stability match entry point defaults to 300 actions and zero-time 1x3x1 search", () => {
+  const expectedSearch = { determinizations: 1, branching: 3, rolloutDepth: 1 };
+  const cliConfigurations = [
+    parseBalanceCli([]).tournament,
+    parseBalanceCli(["--mode=soak"]).tournament,
+    parseCrossTierCli([]).tournament,
+    parseCrossTierCli(["--mode=soak"]).tournament,
+    balanceTournamentOptions("smoke", 1234),
+    balanceTournamentOptions("soak", 1234),
+  ];
+  for (const configuration of cliConfigurations) {
+    assert.equal(configuration.maxActions, 300);
+    assert.equal(configuration.thinkTimeMinMs, 0);
+    assert.equal(configuration.thinkTimeMaxMs, 0);
+    assert.deepEqual(configuration.search, expectedSearch);
+  }
+  assert.throws(
+    () => parseBalanceCli(["--think-min-ms=1"]),
+    /always run at 0 ms/,
+  );
+  assert.throws(
+    () => parseCrossTierCli(["--think-max-ms=1"]),
+    /always run at 0 ms/,
+  );
+});
+
+test("one capped balance game fails both smoke and formal product-stability gates", () => {
+  assert.equal(hasCappedBalanceGames(undefined), false);
+  assert.equal(hasCappedBalanceGames(0), false);
+  assert.equal(hasCappedBalanceGames(1), true);
+  assert.equal(hasCappedBalanceGames(100), true);
 });
 
 test("balance soak stop policy preserves smoke boundaries and immediate stops", () => {
@@ -156,7 +220,7 @@ test("balance soak stop policy preserves smoke boundaries and immediate stops", 
       profile: "smoke",
       durationSeconds: 5,
       segmentActiveMs: 4_999,
-      segmentCompletedGroups: REQUIRED_SOAK_ROUND_ROBIN_GROUPS,
+      segmentCompletedGroups: REQUIRED_SOAK_STABILITY_GROUPS,
     }),
     "continue",
   );
@@ -188,11 +252,29 @@ test("balance soak stop policy preserves smoke boundaries and immediate stops", 
   );
 });
 
-test("rules soak covers all 50 cards and reproduces the bounded v2 threefold trace", () => {
+test("simulation pool is the exact v3 non-clock partition and rules soak covers all 63 eligible cards", () => {
+  assert.equal(SIMULATION_CATALOG_SIZE, 70);
+  assert.equal(AUGMENT_CATALOG.length, 70);
+  assert.equal(SIMULATION_ELIGIBLE_COUNT, 63);
+  assert.deepEqual(EXCLUDED_CLOCK_AUGMENT_IDS, [
+    "club-pocket-time",
+    "club-steady-tempo",
+    "diamond-drill",
+    "diamond-pocket-watch",
+    "diamond-time-cache",
+    "heart-reserve-clock",
+    "spade-strategic-reserve",
+  ]);
+  assert.ok(
+    SIMULATION_ELIGIBLE_AUGMENTS.every(
+      (definition) => definition.effect.kind !== "clock",
+    ),
+  );
   const covered = new Set(coveragePairs().flat());
-  assert.equal(covered.size, AUGMENT_CATALOG.length);
-  assert.equal(covered.size, 50);
-  assert.deepEqual(THREEFOLD_TRACE_CARD_PAIR, ["club-road-patrol", "club-pocket-time"]);
+  assert.deepEqual([...covered].sort(), [...SIMULATION_ELIGIBLE_AUGMENT_IDS].sort());
+  assert.equal(covered.size, 63);
+  assert.ok(EXCLUDED_CLOCK_AUGMENT_IDS.every((id) => !covered.has(id)));
+  assert.deepEqual(THREEFOLD_TRACE_CARD_PAIR, ["club-road-patrol", "club-engineer-oath"]);
   const trace = runThreefoldTrace();
   assert.equal(trace.v2FinishReason, "draw");
   assert.equal(trace.v2DrawReason, "threefold_repetition");
@@ -203,6 +285,815 @@ test("rules soak covers all 50 cards and reproduces the bounded v2 threefold tra
   assert.equal(trace.legacyPhase, "playing");
   assert.equal(trace.classicPhase, "playing");
   assert.equal(trace.cycle.length, 4);
+});
+
+test("rules setup/privacy scenarios constrain both private offers to the non-clock pool", () => {
+  for (let gameIndex = 0; gameIndex < 100; gameIndex += 1) {
+    const state = createClocklessSetupPrivacyState(
+      `20260809:rules:${gameIndex}:setup-privacy`,
+    );
+    const round = state.augment?.draft.rounds[0];
+    assert.ok(round);
+    for (const side of ["black", "white"] as const) {
+      assert.ok(
+        round.players[side].options.every((id) =>
+          SIMULATION_ELIGIBLE_AUGMENT_IDS.includes(id)
+        ),
+        `${side} setup/privacy offer ${gameIndex} contains a clock card`,
+      );
+    }
+  }
+});
+
+test("rules privacy audit recognizes v3 sacrifice, durable-mine, and public-promotion provenance", () => {
+  const placeBySwap = (
+    state: GameState,
+    selected: GameState["pieces"][number],
+    target: { row: number; col: number },
+  ) => {
+    const occupant = state.pieces.find(
+      (piece) =>
+        piece.alive &&
+        piece.id !== selected.id &&
+        piece.row === target.row &&
+        piece.col === target.col,
+    );
+    const origin = { row: selected.row, col: selected.col };
+    selected.row = target.row;
+    selected.col = target.col;
+    if (occupant) {
+      occupant.row = origin.row;
+      occupant.col = origin.col;
+    }
+  };
+
+  let sacrifice = createControlledPairGame(
+    "club-bitter-ruse",
+    "club-road-patrol",
+    "black",
+    "privacy-public-sacrifice",
+  );
+  const sacrificedBomb = sacrifice.pieces.find(
+    (piece) => piece.side === "black" && piece.type === "bomb",
+  );
+  assert.ok(sacrificedBomb);
+  const sacrificeAction = enumerateVisibleActions(
+    projectGame(sacrifice, "black", 1_000_000),
+    "black",
+  ).find(
+    (action) =>
+      action.type === "augment_sacrifice" && action.pieceId === sacrificedBomb.id,
+  );
+  assert.ok(sacrificeAction);
+  sacrifice = applyPlayerAction(sacrifice, "black", sacrificeAction, 1_000_000);
+  assert.doesNotThrow(() => verifyProjectionPrivacy(sacrifice, 1_000_000));
+  assert.ok(
+    sacrifice.augment?.ruleState?.publiclyRevealedPieceIds.includes(sacrificedBomb.id),
+  );
+  const sacrificedForOpponent = projectGame(sacrifice, "white", 1_000_000).pieces.find(
+    (piece) => piece.id === sacrificedBomb.id,
+  );
+  assert.equal(sacrificedForOpponent?.type, "bomb");
+  assert.equal(sacrificedForOpponent?.publiclyRevealed, true);
+  assert.equal(
+    projectGame(sacrifice, "spectator", 1_000_000, { spectatorPolicy: "hidden" })
+      .pieces.find((piece) => piece.id === sacrificedBomb.id)?.type,
+    "bomb",
+  );
+  const privateReconId = sacrifice.augment?.permanentReveals.black[0];
+  assert.ok(privateReconId);
+  assert.notEqual(
+    projectGame(sacrifice, "black", 1_000_000).pieces.find(
+      (piece) => piece.id === privateReconId,
+    )?.type,
+    null,
+  );
+  assert.equal(
+    projectGame(sacrifice, "spectator", 1_000_000, { spectatorPolicy: "hidden" })
+      .pieces.find((piece) => piece.id === privateReconId)?.type,
+    null,
+  );
+
+  let durableMine = createControlledPairGame(
+    "spade-rail-dominion",
+    "spade-volatile-mines",
+    "black",
+    "privacy-durable-mine",
+  );
+  const mine = durableMine.pieces.find(
+    (piece) =>
+      piece.side === "white" &&
+      durableMine.augment?.ruleState?.baseTypes[piece.id] === "mine",
+  );
+  const mineAttacker = durableMine.pieces.find(
+    (piece) =>
+      piece.side === "black" &&
+      durableMine.augment?.ruleState?.baseTypes[piece.id] === "company",
+  );
+  assert.ok(mine && mineAttacker);
+  placeBySwap(durableMine, mineAttacker, { row: 5, col: 0 });
+  placeBySwap(durableMine, mine, { row: 5, col: 1 });
+  durableMine = applyPlayerAction(durableMine, "black", {
+    type: "move",
+    from: { row: 5, col: 0 },
+    to: { row: 5, col: 1 },
+  }, 1_000_000);
+  assert.doesNotThrow(() => verifyProjectionPrivacy(durableMine, 1_000_000));
+  assert.equal(durableMine.augment?.ruleState?.mineHits[mine.id], 1);
+  const revealedMine = projectGame(durableMine, "black", 1_000_000).pieces.find(
+    (piece) => piece.id === mine.id,
+  );
+  assert.equal(revealedMine?.type, "mine");
+  assert.equal(revealedMine?.publiclyRevealed, true);
+  assert.equal(revealedMine?.mineHits, 1);
+
+  let promotion = createControlledPairGame(
+    "heart-battalion-ascent",
+    "heart-rail-turn",
+    "black",
+    "privacy-public-promotion",
+  );
+  const battalion = promotion.pieces.find(
+    (piece) =>
+      piece.side === "black" &&
+      promotion.augment?.ruleState?.baseTypes[piece.id] === "battalion",
+  );
+  const company = promotion.pieces.find(
+    (piece) =>
+      piece.side === "white" &&
+      promotion.augment?.ruleState?.baseTypes[piece.id] === "company",
+  );
+  assert.ok(battalion && company);
+  placeBySwap(promotion, battalion, { row: 5, col: 0 });
+  placeBySwap(promotion, company, { row: 5, col: 1 });
+  promotion = applyPlayerAction(promotion, "black", {
+    type: "move",
+    from: { row: 5, col: 0 },
+    to: { row: 5, col: 1 },
+  }, 1_000_000);
+  assert.doesNotThrow(() => verifyProjectionPrivacy(promotion, 1_000_000));
+  assert.ok(promotion.augment?.ruleState?.promotedPublicIds.includes(battalion.id));
+  const promotedForOpponent = projectGame(promotion, "white", 1_000_000).pieces.find(
+    (piece) => piece.id === battalion.id,
+  );
+  assert.equal(promotedForOpponent?.type, "regiment");
+  assert.equal(promotedForOpponent?.promoted, true);
+});
+
+test("rules privacy audit preserves ordinary hiding, flags, and finished visibility", () => {
+  const baseline = createControlledPairGame(
+    "spade-rail-dominion",
+    "spade-last-headquarters",
+    "black",
+    "privacy-boundaries",
+  );
+  const hiddenBomb = baseline.pieces.find(
+    (piece) => piece.side === "white" && piece.type === "bomb",
+  );
+  assert.ok(hiddenBomb);
+  assert.equal(
+    projectGame(baseline, "black", 1_000_000).pieces.find(
+      (piece) => piece.id === hiddenBomb.id,
+    )?.type,
+    null,
+  );
+  assert.equal(
+    projectGame(baseline, "spectator", 1_000_000, { spectatorPolicy: "hidden" })
+      .pieces.find((piece) => piece.id === hiddenBomb.id)?.type,
+    null,
+  );
+  assert.doesNotThrow(() => verifyProjectionPrivacy(baseline, 1_000_000));
+
+  let protectedFlag = structuredClone(baseline);
+  const flag = protectedFlag.pieces.find(
+    (piece) =>
+      piece.side === "white" &&
+      protectedFlag.augment?.ruleState?.baseTypes[piece.id] === "flag",
+  );
+  const attacker = protectedFlag.pieces.find(
+    (piece) =>
+      piece.side === "black" &&
+      protectedFlag.augment?.ruleState?.baseTypes[piece.id] === "company",
+  );
+  assert.ok(flag && attacker);
+  const occupant = protectedFlag.pieces.find(
+    (piece) =>
+      piece.alive && piece.id !== attacker.id && piece.row === 1 && piece.col === flag.col,
+  );
+  const attackerOrigin = { row: attacker.row, col: attacker.col };
+  attacker.row = 1;
+  attacker.col = flag.col;
+  if (occupant) {
+    occupant.row = attackerOrigin.row;
+    occupant.col = attackerOrigin.col;
+  }
+  protectedFlag = applyPlayerAction(protectedFlag, "black", {
+    type: "move",
+    from: { row: 1, col: flag.col },
+    to: { row: flag.row, col: flag.col },
+  }, 1_000_000);
+  assert.equal(protectedFlag.events.at(-1)?.result, "flag_protected");
+  assert.doesNotThrow(() => verifyProjectionPrivacy(protectedFlag, 1_000_000));
+  assert.equal(
+    projectGame(protectedFlag, "spectator", 1_000_000, { spectatorPolicy: "hidden" })
+      .pieces.find((piece) => piece.id === flag.id)?.type,
+    "flag",
+  );
+
+  const finished = applyPlayerAction(
+    baseline,
+    baseline.turn,
+    { type: "resign" },
+    1_000_000,
+  );
+  assert.equal(finished.phase, "finished");
+  assert.doesNotThrow(() => verifyProjectionPrivacy(finished, 1_000_000));
+  assert.ok(
+    projectGame(finished, "spectator", 1_000_000, { spectatorPolicy: "hidden" })
+      .pieces.every((piece) => piece.type !== null),
+  );
+});
+
+test("rules privacy metadata assertions reject forged v3 markers and default legacy markers to false", () => {
+  const current = createControlledPairGame(
+    "club-road-patrol",
+    "club-engineer-oath",
+    "black",
+    "privacy-metadata-contract",
+  );
+  const projected = projectGame(current, "black", 1_000_000).pieces.find(
+    (piece) => piece.side === "white",
+  );
+  assert.ok(projected);
+  assert.doesNotThrow(() => verifyProjectedRuleMetadata(current, projected, "valid"));
+  assert.throws(
+    () => verifyProjectedRuleMetadata(
+      current,
+      { ...projected, publiclyRevealed: true },
+      "forged-public",
+    ),
+    /inconsistent public-reveal metadata/,
+  );
+  assert.throws(
+    () => verifyProjectedRuleMetadata(
+      current,
+      { ...projected, promoted: true },
+      "forged-promotion",
+    ),
+    /inconsistent promotion metadata/,
+  );
+  assert.throws(
+    () => verifyProjectedRuleMetadata(
+      current,
+      { ...projected, mineHits: 1 },
+      "forged-mine-hit",
+    ),
+    /inconsistent durable-mine hit metadata/,
+  );
+
+  const legacy = structuredClone(current);
+  legacy.rulesVersion = LEGACY_AUGMENT_RULES_VERSION;
+  delete legacy.augment!.ruleState;
+  assert.doesNotThrow(() => verifyProjectionPrivacy(legacy, 1_000_000));
+  const legacyProjected = projectGame(legacy, "black", 1_000_000).pieces.find(
+    (piece) => piece.id === projected.id,
+  );
+  assert.ok(legacyProjected);
+  assert.equal(legacyProjected.publiclyRevealed, undefined);
+  assert.equal(legacyProjected.promoted, undefined);
+  assert.equal(legacyProjected.mineHits, undefined);
+
+  const classic = createInitialGame();
+  classic.phase = "playing";
+  classic.joined = { black: true, white: true };
+  classic.ready = { black: true, white: true };
+  classic.clock = null;
+  assert.doesNotThrow(() => verifyProjectionPrivacy(classic, 1_000_000));
+  const classicOpponent = projectGame(classic, "black", 1_000_000).pieces.find(
+    (piece) => piece.side === "white",
+  );
+  assert.ok(classicOpponent);
+  assert.equal(classicOpponent.publiclyRevealed, undefined);
+  assert.equal(classicOpponent.promoted, undefined);
+  assert.equal(classicOpponent.mineHits, undefined);
+});
+
+test("product-stability ring covers every eligible card without clock cards or Cartesian expansion", () => {
+  const pairings = buildProductStabilityPairings();
+  const represented = new Set(
+    pairings.flatMap((pairing) => [pairing.cardA, pairing.cardB]),
+  );
+  assert.equal(pairings.length, SIMULATION_ELIGIBLE_COUNT);
+  assert.deepEqual(
+    [...represented].sort(),
+    [...SIMULATION_ELIGIBLE_AUGMENT_IDS].sort(),
+  );
+  assert.ok(
+    pairings.every(
+      (pairing) =>
+        getAugmentDefinition(pairing.cardA).suit === pairing.suit &&
+        getAugmentDefinition(pairing.cardB).suit === pairing.suit,
+    ),
+  );
+  assert.ok(
+    EXCLUDED_CLOCK_AUGMENT_IDS.every((id) => !represented.has(id)),
+  );
+  const appearances = Object.fromEntries(
+    SIMULATION_ELIGIBLE_AUGMENT_IDS.map((id) => [
+      id,
+      pairings.filter((pairing) => pairing.cardA === id || pairing.cardB === id)
+        .length,
+    ]),
+  );
+  assert.ok(Object.values(appearances).every((count) => count === 2));
+});
+
+test("authoritative and determinized simulations are clockless and round two rejects clock offers", () => {
+  const initial = createControlledPairGame(
+    "club-road-patrol",
+    "club-engineer-oath",
+    "black",
+    "clockless-authority",
+  );
+  assert.equal(initial.clock, null);
+
+  const clockedInput = structuredClone(initial);
+  clockedInput.clock = {
+    initialMs: 600_000,
+    remainingMs: { black: 600_000, white: 600_000 },
+    turnStartedAt: 1_000_000,
+  };
+  assert.equal(
+    determinizeFromProjection(clockedInput, "black", "clockless-world").clock,
+    null,
+  );
+
+  const draft = beginSecondAugmentDraft(initial.augment!.draft, {
+    suit: "hearts",
+    random: () => 0,
+  });
+  const round = draft.rounds.find((candidate) => candidate.number === 2)!;
+  for (const side of ["black", "white"] as const) {
+    round.players[side].options = [
+      "heart-reserve-clock",
+      "heart-rail-turn",
+      "heart-initiative",
+    ];
+    draft.seenBySide[side].push(...round.players[side].options);
+  }
+  const drafting = structuredClone(initial);
+  drafting.phase = "augment_draft";
+  drafting.moveNumber = 9;
+  drafting.augment!.draft = draft;
+  drafting.augment!.resumeTurn = drafting.turn;
+  const constrained = constrainActiveDraftToSimulationPool(
+    drafting,
+    "second-round-no-clock",
+  );
+  assert.ok(
+    constrained.augment!.draft.rounds
+      .find((candidate) => candidate.number === 2)!
+      .players.black.options.every((id) =>
+        SIMULATION_ELIGIBLE_AUGMENT_IDS.includes(id)
+      ),
+  );
+  assert.ok(
+    constrained.augment!.draft.rounds
+      .find((candidate) => candidate.number === 2)!
+      .players.white.options.every((id) =>
+        SIMULATION_ELIGIBLE_AUGMENT_IDS.includes(id)
+      ),
+  );
+  assert.ok(
+    round.players.black.options.includes("heart-reserve-clock"),
+    "the simulation constraint must not mutate its input",
+  );
+});
+
+test("visible product policy reaches and executes every new active action schema", () => {
+  const cases = [
+    {
+      id: "heart-heavenly-exchange" as const,
+      opponent: "heart-rail-turn" as const,
+      actionType: "augment_exchange" as const,
+    },
+    {
+      id: "heart-shadow-redeploy" as const,
+      opponent: "heart-rail-turn" as const,
+      actionType: "augment_redeploy" as const,
+    },
+    {
+      id: "club-surprise-double-move" as const,
+      opponent: "club-road-patrol" as const,
+      actionType: "augment_begin_multi_move" as const,
+    },
+    {
+      id: "club-bitter-ruse" as const,
+      opponent: "club-road-patrol" as const,
+      actionType: "augment_sacrifice" as const,
+    },
+  ];
+
+  for (const scenario of cases) {
+    const state = createControlledPairGame(
+      scenario.id,
+      scenario.opponent,
+      "black",
+      `active-schema:${scenario.id}`,
+    );
+    const view = projectGame(state, "black", 1_000_000);
+    const actions = enumerateVisibleActions(view, "black");
+    const action = actions.find(
+      (candidate) =>
+        candidate.type === scenario.actionType &&
+        "augmentId" in candidate &&
+        candidate.augmentId === scenario.id,
+    );
+    assert.ok(action, `${scenario.id} has no visible ${scenario.actionType} candidate`);
+    const decision = chooseVisibleAction(
+      state,
+      "black",
+      `active-decision:${scenario.id}`,
+      SEARCH,
+    );
+    assert.ok(decision.opportunityAugmentIds.includes(scenario.id));
+    const next = applyPlayerAction(state, "black", action, 1_000_000);
+
+    if (scenario.id === "club-surprise-double-move") {
+      const continuation = enumerateVisibleActions(
+        projectGame(next, "black", 1_000_000),
+        "black",
+      )
+        .filter((candidate) => candidate.type === "move")
+        .map((candidate) => ({
+          candidate,
+          after: applyPlayerAction(next, "black", candidate, 1_000_000),
+        }))
+        .find(
+          ({ after }) =>
+            pendingPassAugmentId(after, "black") === "club-surprise-double-move",
+        );
+      assert.ok(continuation, "double-move must expose a legal second-step/pass state");
+      const afterFirst = continuation.after;
+      assert.equal(
+        pendingPassAugmentId(afterFirst, "black"),
+        "club-surprise-double-move",
+      );
+      assert.ok(
+        enumerateVisibleActions(
+          projectGame(afterFirst, "black", 1_000_000),
+          "black",
+        ).some((candidate) => candidate.type === "pass_extra_move"),
+      );
+      const afterPass = applyPlayerAction(
+        afterFirst,
+        "black",
+        { type: "pass_extra_move" },
+        1_000_000,
+      );
+      assert.equal(pendingPassAugmentId(afterPass, "black"), null);
+      assert.ok((afterPass.augment?.triggerCounts.black[scenario.id] ?? 0) > 0);
+    } else {
+      assert.ok((next.augment?.triggerCounts.black[scenario.id] ?? 0) > 0);
+    }
+  }
+});
+
+test("pass attribution supports passive multi-move and legacy extra-turn grants", () => {
+  let steady = createControlledPairGame(
+    "heart-steady-advance",
+    "heart-rail-turn",
+    "black",
+    "steady-pass-attribution",
+  );
+  const move = enumerateVisibleActions(
+    projectGame(steady, "black", 1_000_000),
+    "black",
+  ).find((action) => action.type === "move");
+  assert.ok(move);
+  steady = applyPlayerAction(steady, "black", move, 1_000_000);
+  assert.equal(pendingPassAugmentId(steady, "black"), "heart-steady-advance");
+  assert.ok(
+    enumerateVisibleActions(
+      projectGame(steady, "black", 1_000_000),
+      "black",
+    ).some((action) => action.type === "pass_extra_move"),
+  );
+
+  const legacyExtra = createControlledPairGame(
+    "spade-relentless-assault",
+    "spade-grand-maneuver",
+    "black",
+    "legacy-pass-attribution",
+  );
+  legacyExtra.augment!.extraMove.black = {
+    augmentId: "spade-relentless-assault",
+    excludedPieceId: null,
+  };
+  assert.equal(
+    pendingPassAugmentId(legacyExtra, "black"),
+    "spade-relentless-assault",
+  );
+});
+
+test("rules settlement audit separates steady passive pulses from charged events", () => {
+  const before = createControlledPairGame(
+    "heart-steady-advance",
+    "heart-rail-turn",
+    "black",
+    "steady-settlement-audit",
+  );
+  const firstAction = enumerateVisibleActions(
+    projectGame(before, "black", 1_000_000),
+    "black",
+  ).find((action) => action.type === "move");
+  assert.ok(firstAction);
+  const afterFirst = applyPlayerAction(before, "black", firstAction, 1_000_000);
+  assert.doesNotThrow(() => verifyActionSettlement(before, afterFirst, firstAction));
+  assert.deepEqual(afterFirst.replay?.moves.at(-1)?.augmentIds, ["heart-steady-advance"]);
+  assert.deepEqual(afterFirst.events.at(-1)?.augmentIds, ["heart-steady-advance"]);
+  assert.equal(
+    afterFirst.events.some(
+      (event) =>
+        event.result === "augment_used" && event.augmentId === "heart-steady-advance",
+    ),
+    false,
+  );
+
+  const missingCount = structuredClone(afterFirst);
+  missingCount.augment!.triggerCounts.black["heart-steady-advance"] = 0;
+  assert.throws(
+    () => verifyActionSettlement(before, missingCount, firstAction),
+    /passive trigger delta 0 did not match semantic evidence 1/,
+  );
+  for (const forgedCount of [2, 3]) {
+    const forged = structuredClone(afterFirst);
+    forged.augment!.triggerCounts.black["heart-steady-advance"] = forgedCount;
+    assert.throws(
+      () => verifyActionSettlement(before, forged, firstAction),
+      /passive trigger delta .* did not match semantic evidence 1/,
+    );
+  }
+
+  const missingContinuation = structuredClone(afterFirst);
+  missingContinuation.augment!.ruleState!.multiMove.black = null;
+  assert.throws(
+    () => verifyActionSettlement(before, missingContinuation, firstAction),
+    /passive trigger delta 1 did not match semantic evidence 0/,
+  );
+
+  const missingAttribution = structuredClone(afterFirst);
+  delete missingAttribution.replay!.moves.at(-1)!.augmentId;
+  delete missingAttribution.replay!.moves.at(-1)!.augmentIds;
+  delete missingAttribution.events.at(-1)!.augmentId;
+  delete missingAttribution.events.at(-1)!.augmentIds;
+  assert.throws(
+    () => verifyActionSettlement(before, missingAttribution, firstAction),
+    /opened without movement event\/replay attribution/,
+  );
+
+  const secondAction = enumerateVisibleActions(
+    projectGame(afterFirst, "black", 1_000_000),
+    "black",
+  ).find((action) => action.type === "move");
+  assert.ok(secondAction);
+  const afterSecond = applyPlayerAction(afterFirst, "black", secondAction, 1_000_000);
+  assert.doesNotThrow(() => verifyActionSettlement(afterFirst, afterSecond, secondAction));
+
+  const afterPass = applyPlayerAction(
+    afterFirst,
+    "black",
+    { type: "pass_extra_move" },
+    1_000_000,
+  );
+  assert.doesNotThrow(() =>
+    verifyActionSettlement(afterFirst, afterPass, { type: "pass_extra_move" })
+  );
+  const missingPass = structuredClone(afterPass);
+  missingPass.events = missingPass.events.filter(
+    (event) => event.result !== "extra_move_passed",
+  );
+  assert.throws(
+    () => verifyActionSettlement(afterFirst, missingPass, { type: "pass_extra_move" }),
+    /continuation pass lacked one authoritative settlement/,
+  );
+});
+
+test("rules settlement audit permits begin-multi without replay and audits its continuation", () => {
+  const before = createControlledPairGame(
+    "club-surprise-double-move",
+    "club-road-patrol",
+    "black",
+    "active-multi-settlement-audit",
+  );
+  const begin = enumerateVisibleActions(
+    projectGame(before, "black", 1_000_000),
+    "black",
+  ).find((action) => action.type === "augment_begin_multi_move");
+  assert.ok(begin);
+  const begun = applyPlayerAction(before, "black", begin, 1_000_000);
+  assert.equal(begun.replay?.moves.length, before.replay?.moves.length);
+  assert.doesNotThrow(() => verifyActionSettlement(before, begun, begin));
+
+  const missingEvent = structuredClone(begun);
+  missingEvent.events = missingEvent.events.filter(
+    (event) => event.result !== "augment_used",
+  );
+  assert.throws(
+    () => verifyActionSettlement(before, missingEvent, begin),
+    /Charged trigger deltas and augment_used events diverged/,
+  );
+  const duplicateEvent = structuredClone(begun);
+  const used = duplicateEvent.events.find((event) => event.result === "augment_used")!;
+  duplicateEvent.events.push({ ...used, id: duplicateEvent.events.at(-1)!.id + 1 });
+  assert.throws(
+    () => verifyActionSettlement(before, duplicateEvent, begin),
+    /Charged trigger deltas and augment_used events diverged/,
+  );
+
+  const move = enumerateVisibleActions(
+    projectGame(begun, "black", 1_000_000),
+    "black",
+  ).find((action) => action.type === "move");
+  assert.ok(move);
+  const afterMove = applyPlayerAction(begun, "black", move, 1_000_000);
+  assert.doesNotThrow(() => verifyActionSettlement(begun, afterMove, move));
+});
+
+test("rules settlement audit permits dual fuse attribution twice and rejects a third copy", () => {
+  const before = createControlledPairGame(
+    "club-bombardier",
+    "club-bombardier",
+    "black",
+    "dual-fuse-settlement-audit",
+  );
+  const blackBomb = before.pieces.find(
+    (piece) =>
+      piece.side === "black" && before.augment!.ruleState!.baseTypes[piece.id] === "bomb",
+  )!;
+  const whiteBomb = before.pieces.find(
+    (piece) =>
+      piece.side === "white" && before.augment!.ruleState!.baseTypes[piece.id] === "bomb",
+  )!;
+  const place = (piece: typeof blackBomb, row: number, col: number) => {
+    const occupant = before.pieces.find(
+      (candidate) => candidate.alive && candidate.row === row && candidate.col === col,
+    );
+    if (occupant && occupant.id !== piece.id) {
+      [piece.row, occupant.row] = [occupant.row, piece.row];
+      [piece.col, occupant.col] = [occupant.col, piece.col];
+    } else {
+      piece.row = row;
+      piece.col = col;
+    }
+  };
+  place(blackBomb, 5, 0);
+  place(whiteBomb, 5, 1);
+  const action = {
+    type: "move" as const,
+    from: { row: 5, col: 0 },
+    to: { row: 5, col: 1 },
+  };
+  const after = applyPlayerAction(before, "black", action, 1_000_000);
+  assert.deepEqual(after.replay?.moves.at(-1)?.augmentIds, [
+    "club-bombardier",
+    "club-bombardier",
+  ]);
+  assert.doesNotThrow(() => verifyActionSettlement(before, after, action));
+
+  const thirdCopy = structuredClone(after);
+  thirdCopy.replay!.moves.at(-1)!.augmentIds!.push("club-bombardier");
+  thirdCopy.events.at(-1)!.augmentIds!.push("club-bombardier");
+  assert.throws(
+    () => verifyActionSettlement(before, thirdCopy, action),
+    /unsupported or duplicate augment attribution/,
+  );
+});
+
+test("rules settlement audit accepts a two-step cherry and sacrifice-aura cascade", () => {
+  let before = createControlledPairGame(
+    "spade-cherry-bomb",
+    "spade-grand-maneuver",
+    "white",
+    "passive-delta-two-audit",
+  );
+  let secondDraft: ReturnType<typeof beginSecondAugmentDraft> | undefined;
+  for (let attempt = 0; attempt < 2_000 && !secondDraft; attempt += 1) {
+    const random = new SeededRandom(`passive-delta-two-draft:${attempt}`);
+    const candidate = beginSecondAugmentDraft(before.augment!.draft, {
+      suit: "hearts",
+      random: () => random.next(),
+    });
+    const round = candidate.rounds.find((entry) => entry.number === 2)!;
+    if (
+      round.players.black.options.includes("heart-sacrifice-aura") &&
+      round.players.white.options.includes("heart-rail-turn")
+    ) {
+      secondDraft = candidate;
+    }
+  }
+  assert.ok(secondDraft, "failed to find deterministic heart offers for the cascade fixture");
+  before.augment!.draft = secondDraft;
+  before.augment!.resumeTurn = "white";
+  before.augment!.draftDeadlineAt = 1_030_000;
+  before.phase = "augment_draft";
+  before = applyPlayerAction(
+    before,
+    "black",
+    { type: "augment_select", augmentId: "heart-sacrifice-aura" },
+    1_000_000,
+  );
+  before = applyPlayerAction(before, "black", { type: "augment_lock" }, 1_000_000);
+  before = applyPlayerAction(
+    before,
+    "white",
+    { type: "augment_select", augmentId: "heart-rail-turn" },
+    1_000_000,
+  );
+  before = applyPlayerAction(before, "white", { type: "augment_lock" }, 1_000_000);
+  assert.equal(before.phase, "playing");
+
+  const originalType = (piece: GameState["pieces"][number]) =>
+    before.augment!.ruleState!.baseTypes[piece.id];
+  const blackBombs = before.pieces.filter(
+    (piece) => piece.side === "black" && originalType(piece) === "bomb",
+  );
+  const blackVictims = before.pieces.filter(
+    (piece) =>
+      piece.side === "black" &&
+      originalType(piece) !== "bomb" &&
+      originalType(piece) !== "flag",
+  ).slice(0, 6);
+  const whiteActors = before.pieces.filter(
+    (piece) =>
+      piece.side === "white" &&
+      originalType(piece) !== "bomb" &&
+      originalType(piece) !== "mine" &&
+      originalType(piece) !== "flag",
+  ).slice(0, 4);
+  assert.equal(blackBombs.length, 2);
+  assert.equal(blackVictims.length, 6);
+  assert.equal(whiteActors.length, 4);
+  const assignments: Array<[
+    GameState["pieces"][number],
+    { row: number; col: number },
+  ]> = [
+    [blackBombs[0], { row: 5, col: 2 }],
+    [blackBombs[1], { row: 4, col: 1 }],
+    ...blackVictims.map((piece, index) => [
+      piece,
+      [
+        { row: 3, col: 0 },
+        { row: 3, col: 1 },
+        { row: 3, col: 2 },
+        { row: 4, col: 0 },
+        { row: 4, col: 3 },
+        { row: 5, col: 0 },
+      ][index],
+    ] as [GameState["pieces"][number], { row: number; col: number }]),
+    [whiteActors[0], { row: 4, col: 2 }],
+    [whiteActors[1], { row: 5, col: 1 }],
+    [whiteActors[2], { row: 5, col: 3 }],
+    [whiteActors[3], { row: 6, col: 2 }],
+  ];
+  for (const [piece, target] of assignments) {
+    const occupant = before.pieces.find(
+      (candidate) =>
+        candidate.alive && candidate.row === target.row && candidate.col === target.col,
+    );
+    if (occupant && occupant.id !== piece.id) {
+      [piece.row, occupant.row] = [occupant.row, piece.row];
+      [piece.col, occupant.col] = [occupant.col, piece.col];
+    } else {
+      piece.row = target.row;
+      piece.col = target.col;
+    }
+  }
+  for (const [piece, target] of assignments) {
+    assert.deepEqual({ row: piece.row, col: piece.col }, target);
+  }
+  before.turn = "white";
+  const action = {
+    type: "move" as const,
+    from: { row: 4, col: 2 },
+    to: { row: 5, col: 2 },
+  };
+  const after = applyPlayerAction(before, "white", action, 1_000_000);
+  assert.equal(after.augment?.triggerCounts.black["spade-cherry-bomb"], 2);
+  assert.equal(after.augment?.triggerCounts.black["heart-sacrifice-aura"], 2);
+  assert.doesNotThrow(() => verifyActionSettlement(before, after, action));
+
+  for (const [id, count] of [
+    ["spade-cherry-bomb", 3],
+    ["heart-sacrifice-aura", 4],
+  ] as const) {
+    const forged = structuredClone(after);
+    forged.augment!.triggerCounts.black[id] = count;
+    assert.throws(
+      () => verifyActionSettlement(before, forged, action),
+      /passive trigger delta .* did not match semantic evidence 2/,
+    );
+  }
 });
 
 test("search pruning deduplicates move geometry and prefers the charge-free normal move", () => {
@@ -280,7 +1171,7 @@ test("search pruning keeps same-geometry actions from distinct augments when no 
   assert.deepEqual(selectSearchCandidates(ranked, 2), ranked);
 });
 
-test("eight-slot search reserves four highest-ranked normal moves", () => {
+test("active-aware search still reserves the highest-ranked normal move", () => {
   const ranked: ScoredAction[] = [
     ...Array.from({ length: 8 }, (_, index) => ({
       action: {
@@ -302,8 +1193,8 @@ test("eight-slot search reserves four highest-ranked normal moves", () => {
   const candidates = selectSearchCandidates(ranked, 8);
   const normalMoves = candidates.filter(({ action }) => action.type === "move");
   assert.equal(candidates.length, 8);
-  assert.equal(normalMoves.length, 4);
-  assert.deepEqual(normalMoves, ranked.slice(8, 12));
+  assert.equal(normalMoves.length, 1);
+  assert.deepEqual(normalMoves, ranked.slice(8, 9));
 });
 
 test("search pruning always reserves one optional extra-move pass candidate", () => {
@@ -1136,7 +2027,7 @@ test("visible policy consumes the server-authoritative legacy reconnaissance tar
   assert.deepEqual(enumerateVisibleActions(fullyKnownView, "black"), []);
 });
 
-test("common-random streams exclude cards, clocks, reveals, events, and action identity", () => {
+test("common-random streams exclude cards, reveals, events, and action identity", () => {
   const state = createControlledPairGame(
     "club-forced-march",
     "club-line-hop",
@@ -1152,11 +2043,6 @@ test("common-random streams exclude cards, clocks, reveals, events, and action i
     "common-random-controls",
   );
   variants.push(differentCard);
-
-  const differentClock = structuredClone(state);
-  assert.ok(differentClock.clock);
-  differentClock.clock.remainingMs.black -= 1_234;
-  variants.push(differentClock);
 
   const differentTriggerCount = structuredClone(state);
   differentTriggerCount.augment!.triggerCounts.black["club-forced-march"] = 1;
@@ -1183,7 +2069,7 @@ test("common-random streams exclude cards, clocks, reveals, events, and action i
   for (const variant of variants) {
     assert.equal(pairedSearchStateKey(variant, "black"), geometryKey);
   }
-  for (const variant of variants.slice(0, 4)) {
+  for (const variant of variants.slice(0, 3)) {
     assert.notEqual(
       visibleStateFingerprint(variant, "black"),
       visibleStateFingerprint(state, "black"),
@@ -1380,6 +2266,103 @@ test("same seed and settings reproduce a complete four-leg mirror group", () => 
   assert.ok(first.every((result) => result.searchNodes > 0));
 });
 
+test("v3 stability UUIDs and the aura/redeploy refresh path are deterministic and finish all four legs", () => {
+  const firstSetup = createControlledPairGame(
+    "heart-sacrifice-aura",
+    "heart-shadow-redeploy",
+    "black",
+    "deterministic-v3-piece-ids",
+  );
+  const secondSetup = createControlledPairGame(
+    "heart-sacrifice-aura",
+    "heart-shadow-redeploy",
+    "black",
+    "deterministic-v3-piece-ids",
+  );
+  assert.deepEqual(
+    firstSetup.pieces.map(({ id, side, type, row, col }) => ({ id, side, type, row, col })),
+    secondSetup.pieces.map(({ id, side, type, row, col }) => ({ id, side, type, row, col })),
+  );
+
+  const pairing = buildProductStabilityPairings().find(
+    (candidate) =>
+      candidate.cardA === "heart-sacrifice-aura" &&
+      candidate.cardB === "heart-shadow-redeploy",
+  );
+  assert.ok(pairing);
+  const fullGameOptions: TournamentOptions = {
+    seed: 20260809,
+    maxActions: 300,
+    thinkTimeMinMs: 0,
+    thinkTimeMaxMs: 0,
+    search: { determinizations: 1, branching: 3, rolloutDepth: 1 },
+    refreshMargin: 4,
+  };
+  for (const cycle of [0, 2]) {
+    const results = playMirrorGroup(
+      scheduleGroup(pairing, cycle, 0),
+      fullGameOptions,
+    );
+    assert.equal(results.length, 4);
+    assert.ok(
+      results.every(
+        (result) =>
+          result.finished &&
+          !result.capped &&
+          !result.stuck &&
+          result.exception === null &&
+          result.moves > 9,
+      ),
+      `cycle ${cycle} failed: ${JSON.stringify(
+        results.map(({ moves, capped, stuck, exception }) => ({
+          moves,
+          capped,
+          stuck,
+          exception,
+        })),
+      )}`,
+    );
+  }
+});
+
+test("a mid-game simulation exception preserves its real diagnostic ledger", () => {
+  const pairing = buildProductStabilityPairings().find(
+    (candidate) =>
+      candidate.cardA === "heart-sacrifice-aura" &&
+      candidate.cardB === "heart-shadow-redeploy",
+  );
+  assert.ok(pairing);
+  const result = playLeg(
+    scheduleGroup(pairing, 0, 0),
+    mirrorLegs(pairing.cardA, pairing.cardB)[0],
+    {
+      seed: 20260809,
+      maxActions: 300,
+      thinkTimeMinMs: 0,
+      thinkTimeMaxMs: 0,
+      search: { determinizations: 1, branching: 3, rolloutDepth: 1 },
+      refreshMargin: 4,
+    },
+    {
+      ratings: new Proxy({}, {
+        get() {
+          throw new Error("diagnostic-ledger-probe");
+        },
+      }),
+    },
+  );
+  assert.equal(result.exception, "diagnostic-ledger-probe");
+  assert.equal(result.moves, 9);
+  assert.ok(result.searchNodes > 0);
+  assert.deepEqual(result.loadouts, {
+    black: ["heart-sacrifice-aura"],
+    white: ["heart-shadow-redeploy"],
+  });
+  assert.equal(result.finished, false);
+  assert.equal(result.capped, false);
+  assert.equal(result.stuck, false);
+});
+
 test("mirror schedule swaps both color and first player exactly once per assignment", () => {
   const cardA = "heart-rail-turn" as AugmentId;
   const cardB = "heart-initiative" as AugmentId;
@@ -1428,14 +2411,19 @@ test("checkpoint validation and remaining schedule make resume idempotent", () =
   checkpoint.completedGroupKeys.push(schedule[0].groupKey);
   const restored = JSON.parse(JSON.stringify(checkpoint));
   validateCheckpoint(restored, OPTIONS, pairings);
+  assert.equal(restored.schemaVersion, 5);
   assert.deepEqual(remainingGroups(schedule, restored.completedGroupKeys), [schedule[1]]);
   assert.equal(restored.configFingerprint, tournamentConfigFingerprint(OPTIONS));
   assert.equal(restored.algorithmVersion, BALANCE_ALGORITHM_VERSION);
   assert.equal(
     BALANCE_ALGORITHM_VERSION,
-    "hidden-info-balance-v11-threefold-public-occurrence",
+    "product-stability-v13-v3-no-clock-zero-time-deterministic-ids",
   );
   assert.equal(restored.engineRulesFingerprint, BALANCE_ENGINE_RULES_FINGERPRINT);
+  assert.equal(
+    BALANCE_ENGINE_RULES_FINGERPRINT,
+    "augment-duel-dark-v3:threefold-3:strategic-sha256-v2",
+  );
   assert.notEqual(
     tournamentConfigFingerprint(OPTIONS),
     tournamentConfigFingerprint(OPTIONS, "future-balance-algorithm"),
@@ -1448,6 +2436,14 @@ test("checkpoint validation and remaining schedule make resume idempotent", () =
   const legacy = JSON.parse(JSON.stringify(checkpoint));
   delete legacy.algorithmVersion;
   assert.throws(() => validateCheckpoint(legacy, OPTIONS, pairings), /algorithm/i);
+
+  const oldSchema = JSON.parse(JSON.stringify(checkpoint));
+  oldSchema.schemaVersion = 4;
+  assert.throws(() => validateCheckpoint(oldSchema, OPTIONS, pairings), /schema/i);
+
+  const earlyV12 = JSON.parse(JSON.stringify(checkpoint));
+  earlyV12.algorithmVersion = "product-stability-v12-v3-no-clock-zero-time";
+  assert.throws(() => validateCheckpoint(earlyV12, OPTIONS, pairings), /algorithm/i);
 
   const v6 = JSON.parse(JSON.stringify(checkpoint));
   v6.algorithmVersion = "hidden-info-balance-v6-full-threshold-increment";
@@ -1566,6 +2562,17 @@ test("card aggregation separates opportunity and first-trigger timing from raw n
   const checkpoint = createCheckpoint(OPTIONS, new Date("2026-08-09T12:00:00.000Z"), [pairing]);
   checkpoint.aggregate = aggregate;
   const report = buildBalanceReport(checkpoint);
+  assert.equal(report.purpose, "product_stability");
+  assert.equal(report.catalogSize, 70);
+  assert.equal(report.simulationEligibleSize, 63);
+  assert.deepEqual(report.excludedClockAugmentIds, EXCLUDED_CLOCK_AUGMENT_IDS);
+  assert.equal(report.simulationCoverage.total, 63);
+  assert.deepEqual(report.tuningSuggestions, []);
+  assert.ok(
+    report.cards.every((card) =>
+      SIMULATION_ELIGIBLE_AUGMENT_IDS.includes(card.id)
+    ),
+  );
   assert.equal(report.global.passExtraMoves, 4);
   assert.equal(
     report.cards.find((card) => card.id === "club-forced-march")?.passExtraMoves,
@@ -1573,7 +2580,7 @@ test("card aggregation separates opportunity and first-trigger timing from raw n
   );
 });
 
-test("same-tier v11 scores adjudicated threefold draws as 0.5 without hiding action caps", () => {
+test("same-tier v13 scores adjudicated threefold draws as 0.5 without hiding action caps", () => {
   const pairing = buildRoundRobinPairings()[0];
   const group = scheduleGroup(pairing, 0, 0);
   const results = playMirrorGroup(group, OPTIONS).map((result) => ({
@@ -1597,13 +2604,23 @@ test("same-tier v11 scores adjudicated threefold draws as 0.5 without hiding act
   assert.equal(aggregate.cards[group.cardA].threefoldDraws, 4);
 });
 
-test("v11 cross-tier schedule balances legal round order and isolates setup cards", () => {
+test("v13 cross-tier diagnostic schedule balances legal round order and isolates setup cards", () => {
   const representatives = selectTierRepresentatives();
   assert.equal(representatives.length, 4);
   assert.equal(buildCrossTierComparisons().length, 6);
   const pairs = buildCrossTierCardSchedule(0);
-  assert.equal(pairs.length, 77);
-  assert.equal(new Set(pairs.flatMap((pair) => [pair.higherCard, pair.lowerCard])).size, 50);
+  assert.equal(pairs.length, 100);
+  assert.equal(
+    new Set(pairs.flatMap((pair) => [pair.higherCard, pair.lowerCard])).size,
+    SIMULATION_ELIGIBLE_COUNT,
+  );
+  assert.ok(
+    pairs.every(
+      (pair) =>
+        !EXCLUDED_CLOCK_AUGMENT_IDS.includes(pair.higherCard) &&
+        !EXCLUDED_CLOCK_AUGMENT_IDS.includes(pair.lowerCard),
+    ),
+  );
 
   const schedule = buildCrossTierExperimentSchedule(0);
   assert.ok(schedule.length > pairs.length);
@@ -1636,10 +2653,14 @@ test("v11 cross-tier schedule balances legal round order and isolates setup card
           getAugmentDefinition(group.lowerCard).activation !== "setup",
       ),
   );
-  const nonSetupCards = AUGMENT_CATALOG.filter((card) => card.activation !== "setup");
-  const setupCards = AUGMENT_CATALOG.filter((card) => card.activation === "setup");
-  assert.equal(nonSetupCards.length, 46);
-  assert.equal(setupCards.length, 4);
+  const nonSetupCards = SIMULATION_ELIGIBLE_AUGMENTS.filter(
+    (card) => card.activation !== "setup",
+  );
+  const setupCards = SIMULATION_ELIGIBLE_AUGMENTS.filter(
+    (card) => card.activation === "setup",
+  );
+  assert.equal(nonSetupCards.length, 57);
+  assert.equal(setupCards.length, 6);
   for (const card of nonSetupCards) {
     const cardGroups = schedule.filter(
       (group) => group.higherCard === card.id || group.lowerCard === card.id,
@@ -1678,7 +2699,7 @@ test("v11 cross-tier schedule balances legal round order and isolates setup card
   assert.ok(setupState.augment?.draft.loadouts[setupSide].includes(setupFocal));
 });
 
-test("v11 second focal is absent at move zero and selected in the formal move-10 draft", () => {
+test("v13 second focal is absent at move zero and selected in the formal move-10 draft", () => {
   const group = buildCrossTierExperimentSchedule(0).find(
     (candidate) =>
       candidate.stratum === "round_order" && candidate.roundOrder === "higher_first",
@@ -1704,7 +2725,7 @@ test("v11 second focal is absent at move zero and selected in the formal move-10
   assert.equal(result.focal.white.selected, true);
 });
 
-test("v11 common random seed excludes card IDs and one four-leg mirror shares it", () => {
+test("v13 common random seed excludes card IDs and one four-leg mirror shares it", () => {
   const group = buildCrossTierExperimentSchedule(0).find(
     (candidate) => candidate.stratum === "round_order",
   );
@@ -1727,7 +2748,7 @@ test("v11 common random seed excludes card IDs and one four-leg mirror shares it
   assert.ok(results.every((result) => result.secondDraftRevealed));
 });
 
-test("v11 leg ledger and report preserve finish, clock, focal trigger, opportunity and stop status", () => {
+test("v13 leg ledger and report preserve finish, focal trigger, opportunity and stop status", () => {
   const group = buildCrossTierExperimentSchedule(0).find(
     (candidate) => candidate.stratum === "round_order",
   );
@@ -1739,8 +2760,8 @@ test("v11 leg ledger and report preserve finish, clock, focal trigger, opportuni
     winner: index % 2 === 0 ? ("black" as const) : ("white" as const),
     winningProfile:
       index % 2 === 0 ? result.leg.blackProfile : result.leg.whiteProfile,
-    finishReason: index < 2 ? ("flag" as const) : ("timeout" as const),
-    finalClockMs: { black: 400_000 + index, white: 300_000 + index },
+    finishReason: index < 2 ? ("flag" as const) : ("no_moves" as const),
+    finalClockMs: null,
     capped: false,
     stuck: false,
     exception: null,
@@ -1765,6 +2786,11 @@ test("v11 leg ledger and report preserve finish, clock, focal trigger, opportuni
   recordCrossTierScheduledMirrorGroup(aggregate, group, results, { ...OPTIONS, maxActions: 10 });
   const reportOptions = { ...OPTIONS, maxActions: 10 };
   const report = buildCrossTierReport(aggregate, reportOptions);
+  assert.equal(report.purpose, "diagnostic_only");
+  assert.equal(report.catalogSize, 70);
+  assert.equal(report.simulationEligibleSize, 63);
+  assert.deepEqual(report.excludedClockAugmentIds, EXCLUDED_CLOCK_AUGMENT_IDS);
+  assert.equal(report.coverage.eligibleCards, 63);
   const row = report.comparisons.find(
     (candidate) => candidate.higher === group.higher && candidate.lower === group.lower,
   );
@@ -1777,8 +2803,8 @@ test("v11 leg ledger and report preserve finish, clock, focal trigger, opportuni
   assert.deepEqual(report.options, reportOptions);
   assert.equal(report.legs.length, 4);
   assert.ok(report.legs.every((legResult) => legResult.roundOrder === group.roundOrder));
-  assert.ok(report.legs.every((legResult) => legResult.finalClockMs !== null));
-  assert.deepEqual(row.finishReasons, { flag: 2, timeout: 2 });
+  assert.ok(report.legs.every((legResult) => legResult.finalClockMs === null));
+  assert.deepEqual(row.finishReasons, { flag: 2, no_moves: 2 });
   assert.equal(row.exceptions, 0);
   assert.equal(row.stuck, 0);
   assert.equal(row.capped, 0);
@@ -1788,8 +2814,8 @@ test("v11 leg ledger and report preserve finish, clock, focal trigger, opportuni
   assert.equal(row.focal.lower.selectedGames, 4);
   assert.ok(row.focal.higher.triggers > 0);
   assert.ok(row.focal.lower.opportunities > 0);
-  assert.ok(row.averageFinalClockMs.higher !== null);
-  assert.ok(row.averageFinalClockMs.lower !== null);
+  assert.equal(row.averageFinalClockMs.higher, null);
+  assert.equal(row.averageFinalClockMs.lower, null);
   const rendered = crossTierMarkdown(report);
   assert.match(rendered, /证据配置：seed 424242；maxActions 10/);
   assert.match(rendered, /已执行镜像组 1；完整镜像组 1/);
@@ -1851,7 +2877,7 @@ test("v11 leg ledger and report preserve finish, clock, focal trigger, opportuni
   );
 });
 
-test("cross-tier v11 preserves drawReason and scores each product threefold draw as 0.5", () => {
+test("cross-tier v13 preserves drawReason and scores each product threefold draw as 0.5", () => {
   const options = { ...OPTIONS, maxActions: 10 };
   const group = buildCrossTierExperimentSchedule(0).find(
     (candidate) => candidate.stratum === "round_order",
@@ -1882,7 +2908,7 @@ test("cross-tier v11 preserves drawReason and scores each product threefold draw
   assert.equal(row?.higherScore?.estimate, 0.5);
 });
 
-test("v11 setup results remain outside pure round-order tier estimates", () => {
+test("v13 setup results remain outside pure round-order tier estimates", () => {
   const group = buildCrossTierExperimentSchedule(0).find(
     (candidate) => candidate.stratum === "setup",
   );
@@ -1922,7 +2948,7 @@ test("v11 setup results remain outside pure round-order tier estimates", () => {
   assert.equal(card?.setupCompleteMirrorGroups, 1);
 });
 
-test("v11 cross-tier estimates are card-equal and use deterministic mirror-group bootstrap", () => {
+test("v13 cross-tier estimates are card-equal and use deterministic mirror-group bootstrap", () => {
   const samples: CrossTierMirrorSample[] = [
     {
       groupKey: "g0",
@@ -1970,7 +2996,7 @@ test("v11 cross-tier estimates are card-equal and use deterministic mirror-group
   assert.ok(first && first.low >= 0 && first.high <= 1);
 });
 
-test("v11 formal acceptance rejects a short favorable sample", () => {
+test("v13 technical acceptance rejects an incomplete favorable sample without gating on ordering", () => {
   const tournament = { ...OPTIONS, maxActions: 10 };
   const groups = buildCrossTierComparisons().map((comparison) => {
     const group = buildCrossTierExperimentSchedule(0).find(
@@ -2004,18 +3030,32 @@ test("v11 formal acceptance rejects a short favorable sample", () => {
   assert.equal(report.ordering.tierPointEstimatePass, true);
   assert.equal(report.ordering.sampleSufficient, false);
   assert.equal(report.acceptancePass, false);
-  assert.match(crossTierMarkdown(report), /方法学验收：不通过/);
-  assert.match(crossTierMarkdown(report), /点估计仅作描述，不作为方法学验收门槛/);
+  assert.match(crossTierMarkdown(report), /技术完整性门槛：不通过/);
+  assert.match(crossTierMarkdown(report), /永不作为 gate/);
 });
 
 test("cross-tier checkpoints bind the balance algorithm and reject legacy evidence", () => {
   const checkpoint = createCrossTierCheckpoint(OPTIONS);
   assert.doesNotThrow(() => validateCrossTierCheckpoint(checkpoint, OPTIONS));
-  assert.equal(checkpoint.schemaVersion, 4);
+  assert.equal(checkpoint.schemaVersion, 5);
   assert.deepEqual(checkpoint.cursor, { cycle: 0, groupIndex: 0 });
   assert.deepEqual(checkpoint.options, OPTIONS);
   assert.equal(checkpoint.algorithmVersion, BALANCE_ALGORITHM_VERSION);
   assert.equal(checkpoint.engineRulesFingerprint, BALANCE_ENGINE_RULES_FINGERPRINT);
+  const normalizedClockless = createCrossTierCheckpoint({
+    ...OPTIONS,
+    thinkTimeMinMs: 123,
+    thinkTimeMaxMs: 456,
+  });
+  assert.equal(normalizedClockless.options.thinkTimeMinMs, 0);
+  assert.equal(normalizedClockless.options.thinkTimeMaxMs, 0);
+  assert.doesNotThrow(() =>
+    validateCrossTierCheckpoint(normalizedClockless, {
+      ...OPTIONS,
+      thinkTimeMinMs: 123,
+      thinkTimeMaxMs: 456,
+    })
+  );
   assert.notEqual(
     crossTierConfigFingerprint(OPTIONS),
     crossTierConfigFingerprint(OPTIONS, "future-balance-algorithm"),
@@ -2028,6 +3068,17 @@ test("cross-tier checkpoints bind the balance algorithm and reject legacy eviden
   const legacy = JSON.parse(JSON.stringify(checkpoint));
   delete legacy.algorithmVersion;
   assert.throws(() => validateCrossTierCheckpoint(legacy, OPTIONS), /algorithm/i);
+
+  const oldSchema = JSON.parse(JSON.stringify(checkpoint));
+  oldSchema.schemaVersion = 4;
+  assert.throws(() => validateCrossTierCheckpoint(oldSchema, OPTIONS), /schema/i);
+
+  const earlyV12 = JSON.parse(JSON.stringify(checkpoint));
+  earlyV12.algorithmVersion = "product-stability-v12-v3-no-clock-zero-time";
+  assert.throws(
+    () => validateCrossTierCheckpoint(earlyV12, OPTIONS),
+    /algorithm/i,
+  );
 
   const v6 = JSON.parse(JSON.stringify(checkpoint));
   v6.algorithmVersion = "hidden-info-balance-v6-full-threshold-increment";
@@ -2161,9 +3212,12 @@ test("cross-tier checkpoints bind the balance algorithm and reject legacy eviden
     assert.throws(() => validateCrossTierCheckpoint(forgedFocal, OPTIONS), /scheduled treatment/i);
   }
 
-  const nonFiniteRaw = structuredClone(restored);
-  nonFiniteRaw.aggregate.legResults[0].finalClockMs!.black = Number.NaN;
-  assert.throws(() => validateCrossTierCheckpoint(nonFiniteRaw, OPTIONS), /final clock is invalid/i);
+  const clockedLegacyRaw = structuredClone(restored);
+  clockedLegacyRaw.aggregate.legResults[0].finalClockMs = { black: 1, white: 1 };
+  assert.throws(
+    () => validateCrossTierCheckpoint(clockedLegacyRaw, OPTIONS),
+    /must not retain a simulation clock/i,
+  );
 
   const forgedCheckpointSeed = structuredClone(restored);
   forgedCheckpointSeed.seed += 1;

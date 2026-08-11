@@ -1,9 +1,13 @@
 import {
   AUGMENT_CATALOG,
   AUGMENT_IDS,
+  FIFTY_CARD_AUGMENT_CATALOG_VERSION,
+  FIFTY_CARD_AUGMENT_IDS,
+  LEGACY_AUGMENT_IDS,
   LEGACY_AUGMENT_CATALOG_VERSION,
   getAugmentDefinition,
   type AugmentDefinition,
+  type AugmentCatalogVersion,
   type AugmentId,
   type AugmentOptions,
   type AugmentSuit,
@@ -14,11 +18,13 @@ import {
   applyPlayerAction,
   getProjectedAugmentExchangeViolation,
   getProjectedAugmentLegalTargets,
+  getProjectedAugmentMultiMoveViolation,
   getProjectedAugmentReconTargets,
+  getProjectedAugmentRedeployViolation,
+  getProjectedAugmentSacrificeViolation,
   getProjectedLegalTargets,
   isCamp,
   isAllowedSetupPosition,
-  isHeadquarters,
   otherSide,
   projectGame,
   seedRepetitionTrackerFromCurrentPosition,
@@ -34,6 +40,7 @@ import {
   type PublicPiece,
   type Side,
 } from "../../lib/game.ts";
+import { SIMULATION_ELIGIBLE_AUGMENTS } from "./simulation-pool.ts";
 
 /**
  * A policy in this file may inspect a GameState only through projectGame().
@@ -64,6 +71,7 @@ export interface PolicyDecision {
 
 const SIDES = ["black", "white"] as const;
 const TERMINAL_SCORE = 1_000_000;
+const PRODUCT_STABILITY_ACTIVE_EXERCISE_BONUS = 150;
 
 export class SeededRandom {
   private value: number;
@@ -142,6 +150,16 @@ export function actionKey(action: PlayerAction) {
   if (action.type === "augment_recon") {
     return `${action.type}:${action.augmentId}:${action.target.row},${action.target.col}`;
   }
+  if (action.type === "augment_begin_multi_move" || action.type === "augment_sacrifice") {
+    return `${action.type}:${action.augmentId}:${action.pieceId}`;
+  }
+  if (action.type === "augment_redeploy") {
+    const placements = [...action.placements]
+      .sort((first, second) => first.pieceId.localeCompare(second.pieceId))
+      .map(({ pieceId, row, col }) => `${pieceId}@${row},${col}`)
+      .join(";");
+    return `${action.type}:${action.augmentId}:${placements}`;
+  }
   if (action.type === "augment_select") return `${action.type}:${action.augmentId}`;
   if (action.type === "augment_refresh") return `${action.type}:${action.slot}`;
   return action.type;
@@ -161,6 +179,14 @@ export function pairedActionKey(action: PlayerAction) {
   }
   if (action.type === "augment_recon") {
     return `recon:${action.target.row},${action.target.col}`;
+  }
+  if (action.type === "augment_begin_multi_move") return `multi:${action.pieceId}`;
+  if (action.type === "augment_sacrifice") return `sacrifice:${action.pieceId}`;
+  if (action.type === "augment_redeploy") {
+    return `redeploy:${[...action.placements]
+      .sort((first, second) => first.pieceId.localeCompare(second.pieceId))
+      .map(({ pieceId, row, col }) => `${pieceId}@${row},${col}`)
+      .join(";")}`;
   }
   if (action.type === "augment_select") return "augment_select";
   if (action.type === "augment_refresh") return `augment_refresh:${action.slot}`;
@@ -272,6 +298,8 @@ function canonicalProjection(view: ProjectedGame, side: Side) {
       view.augment?.temporaryRevealIds,
     ),
     pendingRecon: view.augment?.pendingRecon ?? null,
+    multiMove: view.augment?.multiMove ?? null,
+    ruleState: view.augment?.ruleState ?? null,
     extraMove: view.augment?.extraMove
       ? {
           augmentId: view.augment.extraMove.augmentId,
@@ -349,6 +377,24 @@ export function pairedSearchStateKey(state: GameState, side: Side, nowMs = 1_000
   );
 }
 
+function projectedOriginalType(
+  view: ProjectedGame,
+  piece: PublicPiece,
+): PieceType | null {
+  if (piece.originalType) return piece.originalType;
+  if (!piece.promoted) return piece.type;
+  const promotionSources = (view.augment?.draft.loadouts[piece.side] ?? [])
+    .map((id) => getAugmentDefinition(id).effect)
+    .filter((effect) => effect.kind === "promotion");
+  const sourceTypes = [
+    ...new Set(promotionSources.map((effect) => effect.pieceType)),
+  ];
+  if (sourceTypes.length !== 1) {
+    throw new Error(`Cannot infer the original rank of promoted piece ${piece.id}.`);
+  }
+  return sourceTypes[0];
+}
+
 function inferredTypePool(view: ProjectedGame, hiddenSide: Side) {
   const counts = new Map<PieceType, number>();
   for (const [type, info] of Object.entries(PIECE_INFO) as Array<
@@ -358,11 +404,13 @@ function inferredTypePool(view: ProjectedGame, hiddenSide: Side) {
   }
   for (const piece of view.pieces) {
     if (piece.side !== hiddenSide || piece.type === null) continue;
-    const remaining = (counts.get(piece.type) ?? 0) - 1;
+    const originalType = projectedOriginalType(view, piece);
+    if (!originalType) throw new Error(`Known ${piece.id} has no inferable original type.`);
+    const remaining = (counts.get(originalType) ?? 0) - 1;
     if (remaining < 0) {
-      throw new Error(`Projection contains too many known ${hiddenSide} ${piece.type} pieces.`);
+      throw new Error(`Projection contains too many known ${hiddenSide} ${originalType} pieces.`);
     }
-    counts.set(piece.type, remaining);
+    counts.set(originalType, remaining);
   }
   return [...counts].flatMap(([type, count]) => Array.from({ length: count }, () => type));
 }
@@ -370,7 +418,7 @@ function inferredTypePool(view: ProjectedGame, hiddenSide: Side) {
 function setupAllowance(
   view: ProjectedGame,
   side: Side,
-  mode: "forward_bomb" | "deep_mine",
+  mode: "forward_bomb" | "deep_mine" | "rear_three_row_mines",
 ) {
   return (view.augment?.draft.loadouts[side] ?? []).reduce((total, augmentId) => {
     const effect = getAugmentDefinition(augmentId).effect;
@@ -397,8 +445,12 @@ function typeCanOccupyPublicPosition(
     return (
       !moved &&
       (piece.alive || view.phase === "finished") &&
-      isHeadquarters(piece) &&
-      piece.row === (side === "black" ? 11 : 0)
+      isAllowedSetupPosition(
+        type,
+        side,
+        piece,
+        view.augment?.draft.loadouts[side] ?? [],
+      )
     );
   }
   if (type === "mine") {
@@ -448,20 +500,25 @@ function assignHiddenTypes(view: ProjectedGame, viewer: Side, random: SeededRand
   const assignments = new Map<string, PieceType>();
   const movedIds = new Set(view.movedPieceIds);
   const known = view.pieces.filter((piece) => piece.side === hiddenSide && piece.type !== null);
-  const deepMineAllowance = setupAllowance(view, hiddenSide, "deep_mine");
+  const deepMineAllowance =
+    setupAllowance(view, hiddenSide, "deep_mine") +
+    setupAllowance(view, hiddenSide, "rear_three_row_mines");
   const forwardBombAllowance = setupAllowance(view, hiddenSide, "forward_bomb");
   let deepMines = known.filter(
-    (piece) => piece.type === "mine" && isThirdSetupRow(hiddenSide, piece),
+    (piece) =>
+      projectedOriginalType(view, piece) === "mine" &&
+      isThirdSetupRow(hiddenSide, piece),
   ).length;
   let frontBombs = known.filter(
     (piece) =>
-      piece.type === "bomb" &&
+      projectedOriginalType(view, piece) === "bomb" &&
       !movedIds.has(piece.id) &&
       isFrontSetupRow(hiddenSide, piece),
   ).length;
 
   for (const piece of known) {
-    if (!typeCanOccupyPublicPosition(view, piece.type!, hiddenSide, piece)) {
+    const originalType = projectedOriginalType(view, piece);
+    if (!originalType || !typeCanOccupyPublicPosition(view, originalType, hiddenSide, piece)) {
       throw new Error(`Known ${hiddenSide} ${piece.type} occupies an impossible public position.`);
     }
   }
@@ -531,7 +588,7 @@ function assignHiddenTypes(view: ProjectedGame, viewer: Side, random: SeededRand
 
   const completeCounts = new Map<PieceType, number>();
   for (const piece of view.pieces.filter((candidate) => candidate.side === hiddenSide)) {
-    const type = piece.type ?? assignments.get(piece.id);
+    const type = projectedOriginalType(view, piece) ?? assignments.get(piece.id);
     if (!type) throw new Error(`Hidden assignment omitted ${piece.id}.`);
     completeCounts.set(type, (completeCounts.get(type) ?? 0) + 1);
   }
@@ -550,9 +607,20 @@ function syntheticRoundOptions(
   roundNumber: number,
   selectedId: AugmentId | null,
   seed: number | string,
+  catalogVersion: AugmentCatalogVersion,
 ) {
-  const eligible = AUGMENT_CATALOG.filter(
-    (card) => card.suit === suit && (roundNumber === 1 || card.activation !== "setup"),
+  const versionIds = new Set<AugmentId>(
+    catalogVersion === LEGACY_AUGMENT_CATALOG_VERSION
+      ? LEGACY_AUGMENT_IDS
+      : catalogVersion === FIFTY_CARD_AUGMENT_CATALOG_VERSION
+        ? FIFTY_CARD_AUGMENT_IDS
+        : AUGMENT_IDS,
+  );
+  const eligible = SIMULATION_ELIGIBLE_AUGMENTS.filter(
+    (card) =>
+      versionIds.has(card.id) &&
+      card.suit === suit &&
+      (roundNumber === 1 || card.activation !== "setup"),
   )
     .map((card) => card.id)
     .filter((id) => id !== selectedId);
@@ -729,6 +797,7 @@ function sanitizedAugmentRuntime(
             round.number,
             projected.selectedId,
             `${seed}:private-offer:${round.number}:${side}`,
+            view.augment!.draft.catalogVersion,
           );
         const selectedId =
           projected.selectedId ?? (projected.locked ? synthetic[0] : null);
@@ -808,6 +877,108 @@ function sanitizedAugmentRuntime(
   };
 }
 
+function sanitizedV3RuleState(
+  view: ProjectedGame,
+  pieces: readonly Piece[],
+  viewer: Side,
+): NonNullable<AugmentRuntimeState["ruleState"]> {
+  const projectedById = new Map(view.pieces.map((piece) => [piece.id, piece]));
+  const baseTypes = Object.fromEntries(
+    pieces.map((piece) => {
+      const projected = projectedById.get(piece.id);
+      return [
+        piece.id,
+        projected ? projectedOriginalType(view, projected) ?? piece.type : piece.type,
+      ];
+    }),
+  ) as Record<string, PieceType>;
+  const deadOriginal = (side: Side, type: PieceType) =>
+    pieces.some(
+      (piece) => piece.side === side && !piece.alive && baseTypes[piece.id] === type,
+    );
+  const casualties = Object.fromEntries(
+    SIDES.map((side) => [
+      side,
+      pieces.filter((piece) => piece.side === side && !piece.alive).length,
+    ]),
+  ) as Record<Side, number>;
+  const bombSecondFuse = Object.fromEntries(
+    SIDES.map((side) => {
+      const projected = view.augment?.ruleState?.bombSecondFuse[side];
+      const boundPiece = projected?.bound
+        ? pieces
+            .filter((piece) => piece.side === side && baseTypes[piece.id] === "bomb")
+            .sort((first, second) => first.id.localeCompare(second.id))[0]
+        : null;
+      return [
+        side,
+        {
+          pieceId: boundPiece?.id ?? null,
+          survivalUsed: projected?.survivalUsed ?? false,
+        },
+      ];
+    }),
+  ) as NonNullable<AugmentRuntimeState["ruleState"]>["bombSecondFuse"];
+  const lightning = Object.fromEntries(
+    SIDES.map((side) => {
+      const publicLightning = view.augment?.ruleState?.lightning[side];
+      const augmentId = view.augment?.draft.loadouts[side].find(
+        (id) => getAugmentDefinition(id).effect.kind === "doctrine",
+      );
+      return [
+        side,
+        publicLightning && augmentId
+          ? { augmentId, remainingOwnTurns: publicLightning.remainingOwnTurns }
+          : null,
+      ];
+    }),
+  ) as NonNullable<AugmentRuntimeState["ruleState"]>["lightning"];
+  return {
+    baseTypes,
+    publiclyRevealedPieceIds: view.pieces
+      .filter((piece) => piece.publiclyRevealed)
+      .map((piece) => piece.id),
+    promotedPublicIds: [...(view.augment?.ruleState?.promotedPublicIds ?? [])],
+    headquartersUnlocked: {
+      black: view.augment?.ruleState?.headquartersUnlocked.black ?? false,
+      white: view.augment?.ruleState?.headquartersUnlocked.white ?? false,
+    },
+    commanderFallen: {
+      black: deadOriginal("black", "commander"),
+      white: deadOriginal("white", "commander"),
+    },
+    generalFallen: {
+      black: deadOriginal("black", "general"),
+      white: deadOriginal("white", "general"),
+    },
+    mineHits: Object.fromEntries(
+      view.pieces
+        .filter((piece) => piece.mineHits === 1)
+        .map((piece) => [piece.id, 1 as const]),
+    ),
+    bombSecondFuse,
+    casualties,
+    sacrificePromotionSteps: {
+      black: Math.floor(casualties.black / 4),
+      white: Math.floor(casualties.white / 4),
+    },
+    lightning,
+    multiMove: {
+      black: null,
+      white: null,
+      [viewer]: view.augment?.multiMove
+        ? {
+            augmentId: view.augment.multiMove.augmentId,
+            pieceId: view.augment.multiMove.pieceId,
+            movesRemaining: view.augment.multiMove.movesRemaining,
+            movesCompleted: view.augment.multiMove.canPass ? 1 : 0,
+            mayUseDifferentPieces: view.augment.multiMove.mayUseDifferentPieces,
+          }
+        : null,
+    },
+  };
+}
+
 export function determinizeFromProjection(
   state: GameState,
   viewer: Side,
@@ -851,25 +1022,17 @@ export function determinizeFromProjection(
     moveNumber: view.moveNumber,
     replay: null,
     movedPieceIds: [...view.movedPieceIds],
-    clock: view.clock
-      ? {
-          initialMs: view.clock.initialMs,
-          remainingMs: { ...view.clock.remainingMs },
-          turnStartedAt: view.clock.running === null ? null : nowMs,
-          ...(view.clock.incrementMs === undefined
-            ? {}
-            : { incrementMs: view.clock.incrementMs }),
-          ...(view.clock.incrementThresholdMs === undefined
-            ? {}
-            : { incrementThresholdMs: view.clock.incrementThresholdMs }),
-          ...(view.clock.incrementCapMs === undefined
-            ? {}
-            : { incrementCapMs: view.clock.incrementCapMs }),
-        }
-      : null,
+    clock: null,
     augment: sanitizedAugmentRuntime(view, viewer, seed),
   } satisfies GameState;
   if (view.rulesVersion !== AUGMENT_RULES_VERSION) return sampledState;
+  if (sampledState.augment) {
+    sampledState.augment.ruleState = sanitizedV3RuleState(
+      view,
+      sampledState.pieces,
+      viewer,
+    );
+  }
   if (!view.repetition) {
     throw new Error("Augment v2 projection is missing public repetition status.");
   }
@@ -929,7 +1092,43 @@ function scoreVisibleAction(view: ProjectedGame, side: Side, action: PlayerActio
     const after =
       firstValue * -distanceToEnemyHeadquarters(side, second) +
       secondValue * -distanceToEnemyHeadquarters(side, first);
-    return 15 + (after - before) * 0.08;
+    const crossFrontline =
+      getAugmentDefinition(action.augmentId).effect.kind === "exchange" &&
+      getAugmentDefinition(action.augmentId).effect.mode === "cross_frontline";
+    return (crossFrontline ? 90 : 15) + (after - before) * 0.08;
+  }
+  if (action.type === "augment_begin_multi_move") {
+    const piece = view.pieces.find((candidate) => candidate.id === action.pieceId);
+    if (!piece) return -1_000;
+    const from = { row: piece.row, col: piece.col };
+    const bestProgress = getProjectedLegalTargets(view, side, from).reduce(
+      (best, to) =>
+        Math.max(
+          best,
+          distanceToEnemyHeadquarters(side, from) -
+            distanceToEnemyHeadquarters(side, to),
+        ),
+      0,
+    );
+    return 95 + bestProgress * 5;
+  }
+  if (action.type === "augment_sacrifice") {
+    const piece = view.pieces.find((candidate) => candidate.id === action.pieceId);
+    const cost = piece?.type ? knownPieceValue(piece.type) : UNKNOWN_PIECE_VALUE;
+    return 100 - cost * 0.7;
+  }
+  if (action.type === "augment_redeploy") {
+    const beforeById = new Map(view.pieces.map((piece) => [piece.id, piece]));
+    const positionalGain = action.placements.reduce((total, placement) => {
+      const piece = beforeById.get(placement.pieceId);
+      if (!piece) return total;
+      const value = piece.type ? knownPieceValue(piece.type) : UNKNOWN_PIECE_VALUE;
+      const progress =
+        distanceToEnemyHeadquarters(side, piece) -
+        distanceToEnemyHeadquarters(side, placement);
+      return total + progress * Math.max(1, value) * 0.03;
+    }, 0);
+    return 90 + positionalGain;
   }
   if (action.type !== "move" && action.type !== "augment_move") return -10_000;
   const attacker = publicPieceAt(view, action.from);
@@ -954,6 +1153,84 @@ function scoreVisibleAction(view: ProjectedGame, side: Side, action: PlayerActio
   return score;
 }
 
+const MAX_REDEPLOY_CANDIDATES = 8;
+
+function redeployCandidates(
+  view: ProjectedGame,
+  side: Side,
+  augmentId: AugmentId,
+) {
+  const eligible = view.pieces
+    .filter(
+      (piece) =>
+        piece.alive &&
+        piece.side === side &&
+        (piece.originalType ?? piece.type) !== "flag" &&
+        (side === "black" ? piece.row >= 6 : piece.row <= 5),
+    )
+    .sort((first, second) => {
+      const firstValue = first.type ? knownPieceValue(first.type) : UNKNOWN_PIECE_VALUE;
+      const secondValue = second.type ? knownPieceValue(second.type) : UNKNOWN_PIECE_VALUE;
+      return (
+        firstValue - secondValue ||
+        distanceToEnemyHeadquarters(side, first) -
+          distanceToEnemyHeadquarters(side, second) ||
+        first.id.localeCompare(second.id)
+      );
+    });
+  if (eligible.length < 2) return [] as PlayerAction[];
+  const candidates: PlayerAction[] = [];
+  const seen = new Set<string>();
+  const addPermutation = (orderedIds: readonly string[]) => {
+    const destinationById = new Map(
+      eligible.map((piece, index) => [
+        orderedIds[index],
+        { row: piece.row, col: piece.col },
+      ]),
+    );
+    const placements = eligible.map((piece) => ({
+      pieceId: piece.id,
+      ...(destinationById.get(piece.id) ?? { row: piece.row, col: piece.col }),
+    }));
+    if (
+      getProjectedAugmentRedeployViolation(
+        view,
+        side,
+        augmentId,
+        placements,
+      ) !== null
+    ) {
+      return;
+    }
+    const key = stableStringify(placements);
+    if (seen.has(key)) return;
+    seen.add(key);
+    candidates.push({ type: "augment_redeploy", augmentId, placements });
+  };
+  const ids = eligible.map((piece) => piece.id);
+  for (
+    let index = 0;
+    index + 1 < eligible.length && candidates.length < MAX_REDEPLOY_CANDIDATES - 2;
+    index += 1
+  ) {
+    const swapped = [...ids];
+    [swapped[index], swapped[index + 1]] = [swapped[index + 1], swapped[index]];
+    addPermutation(swapped);
+  }
+  if (candidates.length < MAX_REDEPLOY_CANDIDATES) {
+    const extremes = [...ids];
+    [extremes[0], extremes[extremes.length - 1]] = [
+      extremes[extremes.length - 1],
+      extremes[0],
+    ];
+    addPermutation(extremes);
+  }
+  if (eligible.length >= 3 && candidates.length < MAX_REDEPLOY_CANDIDATES) {
+    addPermutation([ids[1], ids[2], ids[0], ...ids.slice(3)]);
+  }
+  return candidates.slice(0, MAX_REDEPLOY_CANDIDATES);
+}
+
 export function enumerateVisibleActions(view: ProjectedGame, side: Side) {
   if (view.phase !== "playing" || view.turn !== side) return [];
   const pending = view.augment?.pendingRecon;
@@ -967,7 +1244,9 @@ export function enumerateVisibleActions(view: ProjectedGame, side: Side) {
   }
 
   const actions: PlayerAction[] = [];
-  if (view.augment?.extraMove) actions.push({ type: "pass_extra_move" });
+  if (view.augment?.extraMove || view.augment?.multiMove?.canPass) {
+    actions.push({ type: "pass_extra_move" });
+  }
   const ownPieces = view.pieces.filter((piece) => piece.alive && piece.side === side);
   for (const piece of ownPieces) {
     const from = { row: piece.row, col: piece.col };
@@ -978,6 +1257,7 @@ export function enumerateVisibleActions(view: ProjectedGame, side: Side) {
   for (const augmentId of view.augment?.draft.loadouts[side] ?? []) {
     if (publicAugmentRemaining(view, side, augmentId) <= 0) continue;
     const definition = getAugmentDefinition(augmentId);
+    if (definition.activation !== "active") continue;
     if (definition.effect.kind === "movement") {
       for (const piece of ownPieces) {
         const from = { row: piece.row, col: piece.col };
@@ -986,15 +1266,55 @@ export function enumerateVisibleActions(view: ProjectedGame, side: Side) {
         }
       }
     } else if (definition.effect.kind === "exchange") {
+      const secondPieces =
+        definition.effect.mode === "cross_frontline"
+          ? view.pieces.filter((piece) => piece.alive && piece.side !== side)
+          : ownPieces;
       for (let first = 0; first < ownPieces.length; first += 1) {
-        for (let second = first + 1; second < ownPieces.length; second += 1) {
+        const secondStart = secondPieces === ownPieces ? first + 1 : 0;
+        for (let second = secondStart; second < secondPieces.length; second += 1) {
           const from = { row: ownPieces[first].row, col: ownPieces[first].col };
-          const to = { row: ownPieces[second].row, col: ownPieces[second].col };
+          const to = { row: secondPieces[second].row, col: secondPieces[second].col };
           if (getProjectedAugmentExchangeViolation(view, side, augmentId, from, to) === null) {
             actions.push({ type: "augment_exchange", augmentId, from, to });
           }
         }
       }
+    } else if (
+      definition.effect.kind === "multi_move" &&
+      definition.effect.mode === "same_piece_twice"
+    ) {
+      for (const piece of ownPieces) {
+        if (
+          getProjectedAugmentMultiMoveViolation(
+            view,
+            side,
+            augmentId,
+            piece.id,
+          ) === null
+        ) {
+          actions.push({
+            type: "augment_begin_multi_move",
+            augmentId,
+            pieceId: piece.id,
+          });
+        }
+      }
+    } else if (definition.effect.kind === "sacrifice_reconnaissance") {
+      for (const piece of ownPieces) {
+        if (
+          getProjectedAugmentSacrificeViolation(
+            view,
+            side,
+            augmentId,
+            piece.id,
+          ) === null
+        ) {
+          actions.push({ type: "augment_sacrifice", augmentId, pieceId: piece.id });
+        }
+      }
+    } else if (definition.effect.kind === "redeployment") {
+      actions.push(...redeployCandidates(view, side, augmentId));
     }
   }
   return actions;
@@ -1022,14 +1342,22 @@ export function selectSearchCandidates(
   const limit = Math.min(branching, deduplicated.length);
   const reserved = new Set<ScoredAction>();
   const normalMoves = deduplicated.filter(({ action }) => action.type === "move");
-  const hasOtherActions = deduplicated.some(({ action }) => action.type !== "move");
-  if (branching >= 3 && normalMoves.length > 0 && hasOtherActions) {
-    const normalMoveSlots = Math.max(1, Math.floor(branching / 2));
-    for (const candidate of normalMoves.slice(0, normalMoveSlots)) reserved.add(candidate);
+  const representedAugments = new Set<AugmentId>();
+  for (const candidate of deduplicated) {
+    const augmentId = actionAugmentId(candidate.action);
+    if (
+      augmentId &&
+      !representedAugments.has(augmentId) &&
+      reserved.size < limit
+    ) {
+      representedAugments.add(augmentId);
+      reserved.add(candidate);
+    }
   }
 
   const pass = deduplicated.find(({ action }) => action.type === "pass_extra_move");
-  if (pass) reserved.add(pass);
+  if (pass && reserved.size < limit) reserved.add(pass);
+  if (normalMoves[0] && reserved.size < limit) reserved.add(normalMoves[0]);
 
   const selected = new Set<ScoredAction>(reserved);
   for (const candidate of deduplicated) {
@@ -1068,9 +1396,11 @@ function posteriorUnknownPieceValue(view: ProjectedGame, side: Side) {
   }
   for (const piece of view.pieces) {
     if (piece.side !== side || piece.type === null) continue;
-    const count = (remaining.get(piece.type) ?? 0) - 1;
+    const originalType = projectedOriginalType(view, piece);
+    if (!originalType) throw new Error(`Visible ${piece.id} has no inferable original type.`);
+    const count = (remaining.get(originalType) ?? 0) - 1;
     if (count < 0) throw new Error(`Visible ${side} ${piece.type} inventory is impossible.`);
-    remaining.set(piece.type, count);
+    remaining.set(originalType, count);
   }
   const unknownCount = view.pieces.filter((piece) => piece.side === side && piece.type === null).length;
   const remainingCount = [...remaining.values()].reduce((sum, count) => sum + count, 0);
@@ -1166,11 +1496,10 @@ function applyVisibleRollout(
   nowMs: number,
 ): { score: number; nodes: number } {
   let state = initial;
-  let clock = nowMs;
   let nodes = 0;
   for (let ply = 0; ply < depth && state.phase === "playing"; ply += 1) {
     const side = state.turn;
-    const view = projectGame(state, side, clock);
+    const view = projectGame(state, side, nowMs);
     const [candidate] = rankVisibleActionSet(
       view,
       side,
@@ -1179,21 +1508,23 @@ function applyVisibleRollout(
     );
     if (!candidate) break;
     try {
-      clock += 50;
-      state = applyPlayerAction(state, side, candidate.action, clock);
+      state = applyPlayerAction(state, side, candidate.action, nowMs);
       nodes += 1;
     } catch {
       break;
     }
     if (state.phase === "augment_draft") break;
   }
-  return { score: evaluateDeterminedState(state, root, clock), nodes };
+  return { score: evaluateDeterminedState(state, root, nowMs), nodes };
 }
 
 function actionAugmentId(action: PlayerAction): AugmentId | null {
   return action.type === "augment_move" ||
     action.type === "augment_exchange" ||
-    action.type === "augment_recon"
+    action.type === "augment_recon" ||
+    action.type === "augment_begin_multi_move" ||
+    action.type === "augment_redeploy" ||
+    action.type === "augment_sacrifice"
     ? action.augmentId
     : null;
 }
@@ -1241,7 +1572,7 @@ export function chooseVisibleAction(
         let determined = determinizeFromProjection(state, side, worldSeed, nowMs);
         nodesEvaluated += 1;
         try {
-          determined = applyPlayerAction(determined, side, candidate.action, nowMs + 50);
+          determined = applyPlayerAction(determined, side, candidate.action, nowMs);
         } catch {
           return -TERMINAL_SCORE;
         }
@@ -1249,7 +1580,7 @@ export function chooseVisibleAction(
           determined,
           side,
           Math.max(0, options.rolloutDepth - 1),
-          nowMs + 50,
+          nowMs,
         );
         nodesEvaluated += rollout.nodes;
         return rollout.score;
@@ -1258,7 +1589,15 @@ export function chooseVisibleAction(
       samples += 1;
     }
     const expected = samples ? total / samples : -TERMINAL_SCORE;
-    const scored = { action: candidate.action, score: expected + candidate.score * 0.02 };
+    const scored = {
+      action: candidate.action,
+      score:
+        expected +
+        candidate.score * 0.02 +
+        (actionAugmentId(candidate.action)
+          ? PRODUCT_STABILITY_ACTIVE_EXERCISE_BONUS
+          : 0),
+    };
     if (
       !best ||
       scored.score > best.score ||
@@ -1306,6 +1645,9 @@ export function staticAugmentPrior(id: AugmentId) {
     case "reconnaissance":
       score += effect.count * (effect.reveal === "permanent" ? 23 : 12);
       break;
+    case "sacrifice_reconnaissance":
+      score += effect.enemyCount * 18;
+      break;
     case "clock":
       score += "bonusMs" in effect ? effect.bonusMs / 3_000 : 10;
       break;
@@ -1314,6 +1656,21 @@ export function staticAugmentPrior(id: AugmentId) {
       break;
     case "setup":
       score += 18 * effect.allowance;
+      break;
+    case "objective":
+      score += 30;
+      break;
+    case "doctrine":
+      score += effect.rankSteps * 45;
+      break;
+    case "promotion":
+      score += 32;
+      break;
+    case "multi_move":
+      score += 40;
+      break;
+    case "redeployment":
+      score += 28;
       break;
   }
   return score;
@@ -1361,12 +1718,21 @@ export function cardsBySuit(catalog: readonly AugmentDefinition[] = AUGMENT_CATA
   ) as Record<AugmentSuit, AugmentId[]>;
 }
 
-export function unknownActiveEffectKinds(catalog: readonly AugmentDefinition[] = AUGMENT_CATALOG) {
+export function unknownActiveEffectKinds(
+  catalog: readonly AugmentDefinition[] = SIMULATION_ELIGIBLE_AUGMENTS,
+) {
   return catalog
     .filter(
       (card) =>
         card.activation === "active" &&
-        !["movement", "exchange", "reconnaissance"].includes(card.effect.kind),
+        ![
+          "movement",
+          "exchange",
+          "reconnaissance",
+          "multi_move",
+          "redeployment",
+          "sacrifice_reconnaissance",
+        ].includes(card.effect.kind),
     )
     .map((card) => ({ id: card.id, effectKind: card.effect.kind }));
 }

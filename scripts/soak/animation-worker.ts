@@ -1,7 +1,8 @@
 import { fileURLToPath } from "node:url";
 import { resolve } from "node:path";
 
-import { AUGMENT_IDS, getAugmentDefinition } from "../../lib/augments.ts";
+import { getAugmentDefinition } from "../../lib/augments.ts";
+import { SIMULATION_ELIGIBLE_AUGMENT_IDS } from "../balance/simulation-pool.ts";
 import {
   AUGMENT_DRAFT_MOTION_MS,
   augmentDraftPhaseDuration,
@@ -147,12 +148,12 @@ function verifyDurationsAndCards() {
       invariant(reduced === null || reduced === 0, `Reduced motion retained a delay in ${phase}.`);
     }
   }
-  invariant(shouldAnimateAugmentBurn(1, 0, 1), "One-charge exhaustion did not burn.");
-  invariant(!shouldAnimateAugmentBurn(1, 1, 1), "Stable exhausted state replayed burn.");
-  invariant(!shouldAnimateAugmentBurn(2, 0, 1), "Multi-charge card burned early.");
-  invariant(!shouldAnimateAugmentBurn(1, undefined, 1), "Reconnect state replayed burn.");
+  invariant(shouldAnimateAugmentBurn("active", 1, 0, 1), "One-charge exhaustion did not burn.");
+  invariant(!shouldAnimateAugmentBurn("active", 1, 1, 1), "Stable exhausted state replayed burn.");
+  invariant(!shouldAnimateAugmentBurn("active", 2, 0, 1), "Multi-charge card burned early.");
+  invariant(!shouldAnimateAugmentBurn("active", 1, undefined, 1), "Reconnect state replayed burn.");
 
-  for (const id of AUGMENT_IDS) {
+  for (const id of SIMULATION_ELIGIBLE_AUGMENT_IDS) {
     const definition = getAugmentDefinition(id);
     const ownTurn = canInteractWithAugment(definition, {
       enabled: true,
@@ -173,8 +174,14 @@ function verifyDurationsAndCards() {
     invariant(!offTurnWithoutRecon, `${id} remained interactive without turn or recon ownership.`);
     if (definition.activation !== "active") {
       invariant(!ownTurn, `${id} exposed an automatic/setup button.`);
-    } else if (definition.effect.kind === "movement" || definition.effect.kind === "exchange") {
-      invariant(ownTurn, `${id} active movement control was unavailable on its owner's turn.`);
+    } else if (
+      definition.effect.kind === "movement" ||
+      definition.effect.kind === "exchange" ||
+      definition.effect.kind === "multi_move" ||
+      definition.effect.kind === "redeployment" ||
+      definition.effect.kind === "sacrifice_reconnaissance"
+    ) {
+      invariant(ownTurn, `${id} active control was unavailable on its owner's turn.`);
     } else if (
       definition.effect.kind === "reconnaissance" &&
       definition.effect.mode === "choose_enemy"
@@ -289,7 +296,7 @@ async function run() {
       const delta = emptyCounters();
       delta.loops = 1;
       delta.assertions = assertionCount - assertionsBefore;
-      for (const id of AUGMENT_IDS) delta.cardCoverage[id] += 1;
+      for (const id of SIMULATION_ELIGIBLE_AUGMENT_IDS) delta.cardCoverage[id] += 1;
       journal.addCounters(delta);
     } catch (error) {
       journal.fail("invariantFailures", error, { batch: journal.state.batch });

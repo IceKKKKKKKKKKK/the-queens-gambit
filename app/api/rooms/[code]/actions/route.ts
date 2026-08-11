@@ -36,18 +36,37 @@ const responseHeaders = {
 function isPosition(value: unknown): value is Position {
   if (!value || typeof value !== "object") return false;
   const position = value as Record<string, unknown>;
-  return Number.isInteger(position.row) && Number.isInteger(position.col);
+  return (
+    hasOnlyKeys(position, ["row", "col"]) &&
+    Number.isInteger(position.row) &&
+    Number.isInteger(position.col)
+  );
 }
 
 function isSetupPlacement(value: unknown): value is SetupPlacement {
-  if (!isPosition(value)) return false;
-  const pieceId = (value as Position & { pieceId?: unknown }).pieceId;
+  if (!value || typeof value !== "object") return false;
+  const placement = value as Record<string, unknown>;
   return (
-    typeof pieceId === "string" &&
-    pieceId.length >= 1 &&
-    pieceId.length <= 96 &&
-    /^[A-Za-z0-9_-]+$/.test(pieceId)
+    hasOnlyKeys(placement, ["pieceId", "row", "col"]) &&
+    isPieceId(placement.pieceId) &&
+    Number.isInteger(placement.row) &&
+    Number.isInteger(placement.col)
   );
+}
+
+function isPieceId(value: unknown): value is string {
+  return (
+    typeof value === "string" &&
+    value.length >= 1 &&
+    value.length <= 96 &&
+    /^[A-Za-z0-9_-]+$/.test(value)
+  );
+}
+
+function hasOnlyKeys(value: Record<string, unknown>, keys: readonly string[]) {
+  const allowed = new Set(keys);
+  const actual = Object.keys(value);
+  return actual.length === keys.length && actual.every((key) => allowed.has(key));
 }
 
 function parseAction(value: unknown): PlayerAction | null {
@@ -58,7 +77,7 @@ function parseAction(value: unknown): PlayerAction | null {
     action.type === "pass_extra_move" ||
     action.type === "resign"
   ) {
-    return { type: action.type };
+    return hasOnlyKeys(action, ["type"]) ? { type: action.type } : null;
   }
   if (action.type === "set_time_control" && Number.isInteger(action.minutes)) {
     return { type: "set_time_control", minutes: action.minutes as number };
@@ -84,6 +103,7 @@ function parseAction(value: unknown): PlayerAction | null {
   if (action.type === "augment_lock") return { type: "augment_lock" };
   if (
     (action.type === "augment_move" || action.type === "augment_exchange") &&
+    hasOnlyKeys(action, ["type", "augmentId", "from", "to"]) &&
     isAugmentId(action.augmentId) &&
     isPosition(action.from) &&
     isPosition(action.to)
@@ -97,10 +117,55 @@ function parseAction(value: unknown): PlayerAction | null {
   }
   if (
     action.type === "augment_recon" &&
+    hasOnlyKeys(action, ["type", "augmentId", "target"]) &&
     isAugmentId(action.augmentId) &&
     isPosition(action.target)
   ) {
     return { type: "augment_recon", augmentId: action.augmentId, target: action.target };
+  }
+  if (
+    action.type === "augment_begin_multi_move" &&
+    hasOnlyKeys(action, ["type", "augmentId", "pieceId"]) &&
+    isAugmentId(action.augmentId) &&
+    isPieceId(action.pieceId)
+  ) {
+    return {
+      type: "augment_begin_multi_move",
+      augmentId: action.augmentId,
+      pieceId: action.pieceId,
+    };
+  }
+  if (
+    action.type === "augment_redeploy" &&
+    hasOnlyKeys(action, ["type", "augmentId", "placements"]) &&
+    isAugmentId(action.augmentId) &&
+    Array.isArray(action.placements) &&
+    action.placements.length >= 2 &&
+    action.placements.length <= 25 &&
+    action.placements.every(isSetupPlacement)
+  ) {
+    const pieceIds = action.placements.map((placement) => placement.pieceId);
+    const positions = action.placements.map((placement) => `${placement.row}:${placement.col}`);
+    if (new Set(pieceIds).size !== pieceIds.length || new Set(positions).size !== positions.length) {
+      return null;
+    }
+    return {
+      type: "augment_redeploy",
+      augmentId: action.augmentId,
+      placements: action.placements,
+    };
+  }
+  if (
+    action.type === "augment_sacrifice" &&
+    hasOnlyKeys(action, ["type", "augmentId", "pieceId"]) &&
+    isAugmentId(action.augmentId) &&
+    isPieceId(action.pieceId)
+  ) {
+    return {
+      type: "augment_sacrifice",
+      augmentId: action.augmentId,
+      pieceId: action.pieceId,
+    };
   }
   return null;
 }

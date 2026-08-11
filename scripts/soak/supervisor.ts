@@ -8,7 +8,19 @@ import { performance } from "node:perf_hooks";
 import { finished } from "node:stream/promises";
 
 import { AUGMENT_IDS, type AugmentId } from "../../lib/augments.ts";
-import { buildRoundRobinPairings } from "../balance/tournament.ts";
+import {
+  BALANCE_ALGORITHM_VERSION,
+  BALANCE_ENGINE_RULES_FINGERPRINT,
+  buildProductStabilityPairings,
+  type TournamentAggregate,
+} from "../balance/tournament.ts";
+import {
+  EXCLUDED_CLOCK_AUGMENT_IDS,
+  SIMULATION_CATALOG_SIZE,
+  SIMULATION_ELIGIBLE_AUGMENT_IDS,
+  SIMULATION_ELIGIBLE_AUGMENTS,
+  SIMULATION_ELIGIBLE_COUNT,
+} from "../balance/simulation-pool.ts";
 import { balanceTournamentOptions } from "./balance-worker.ts";
 import {
   SOAK_SCHEMA_VERSION,
@@ -49,7 +61,18 @@ const AUGMENT_MOTION_PHASES = [
 ] as const;
 const SUPERVISOR_HEARTBEAT_GAP_LIMIT_MS = 30_000;
 const SOURCE_FINGERPRINT_INTERVAL_MS = 5_000;
-const BALANCE_ROUND_ROBIN_GROUPS = buildRoundRobinPairings().length;
+const BALANCE_STABILITY_SCHEDULE_GROUPS = buildProductStabilityPairings().length;
+const REQUIRED_V3_ACTIVE_SIMULATION_IDS = [
+  "heart-heavenly-exchange",
+  "heart-shadow-redeploy",
+  "club-surprise-double-move",
+  "club-bitter-ruse",
+] as const satisfies readonly AugmentId[];
+
+export function hasCappedBalanceGames(cappedGames: number | undefined) {
+  return (cappedGames ?? 0) > 0;
+}
+
 type StopReason =
   | "operator_requested"
   | "worker_failed"
@@ -82,6 +105,8 @@ interface SegmentEvidence {
 
 interface SoakManifest {
   schemaVersion: typeof SOAK_SCHEMA_VERSION;
+  algorithmVersion: typeof BALANCE_ALGORITHM_VERSION;
+  engineRulesFingerprint: typeof BALANCE_ENGINE_RULES_FINGERPRINT;
   runId: string;
   createdAt: TimeEvidence;
   repositoryRoot: string;
@@ -93,7 +118,7 @@ interface SoakManifest {
   sourceFingerprintIntervalMs: number;
   seed: number;
   balanceTournament: ReturnType<typeof balanceTournamentOptions>;
-  balanceRoundRobinGroups: number;
+  balanceStabilityScheduleGroups: number;
   source: WorkspaceFingerprint;
   workers: readonly SoakWorkerName[];
   segments: SegmentEvidence[];
@@ -403,6 +428,12 @@ async function loadOrCreateManifest(options: SupervisorOptions) {
     const manifestPath = resolve(options.resumeRunDir, "manifest.json");
     const manifest = await readJson<SoakManifest>(manifestPath);
     if (manifest.schemaVersion !== SOAK_SCHEMA_VERSION) throw new Error("Unsupported soak manifest.");
+    if (manifest.algorithmVersion !== BALANCE_ALGORITHM_VERSION) {
+      throw new Error("Resume balance algorithm differs from the product-stability worker.");
+    }
+    if (manifest.engineRulesFingerprint !== BALANCE_ENGINE_RULES_FINGERPRINT) {
+      throw new Error("Resume engine rules fingerprint is not supported.");
+    }
     if (manifest.profile !== options.profile) throw new Error("Resume profile differs from manifest.");
     if (manifest.requiredContinuousSeconds !== options.durationSeconds) {
       throw new Error("Resume duration differs from manifest; a continuous gate cannot change mid-run.");
@@ -426,7 +457,10 @@ async function loadOrCreateManifest(options: SupervisorOptions) {
     ) {
       throw new Error("Resume balance workload differs from manifest.");
     }
-    if (manifest.balanceRoundRobinGroups !== BALANCE_ROUND_ROBIN_GROUPS) {
+    if (
+      manifest.balanceStabilityScheduleGroups !==
+      BALANCE_STABILITY_SCHEDULE_GROUPS
+    ) {
       throw new Error("Resume balance catalog schedule differs from manifest.");
     }
     if (!sameFingerprint(manifest.source, source)) {
@@ -480,6 +514,8 @@ async function loadOrCreateManifest(options: SupervisorOptions) {
   const runDir = resolve(options.outputRoot, id);
   const manifest: SoakManifest = {
     schemaVersion: SOAK_SCHEMA_VERSION,
+    algorithmVersion: BALANCE_ALGORITHM_VERSION,
+    engineRulesFingerprint: BALANCE_ENGINE_RULES_FINGERPRINT,
     runId: id,
     createdAt: timeEvidence(),
     repositoryRoot: REPOSITORY_ROOT,
@@ -491,7 +527,7 @@ async function loadOrCreateManifest(options: SupervisorOptions) {
     sourceFingerprintIntervalMs: SOURCE_FINGERPRINT_INTERVAL_MS,
     seed: options.seed,
     balanceTournament: balanceTournamentOptions(options.profile, options.seed),
-    balanceRoundRobinGroups: BALANCE_ROUND_ROBIN_GROUPS,
+    balanceStabilityScheduleGroups: BALANCE_STABILITY_SCHEDULE_GROUPS,
     source,
     workers: SOAK_WORKERS,
     segments: [],
@@ -1026,6 +1062,36 @@ async function run() {
         (worker) => !allCardsCovered(currentCoverage[worker]),
       )
     : [];
+  const balanceAggregate = (
+    workerSummaries.balance.state as { aggregate?: TournamentAggregate } | null
+  )?.aggregate;
+  const balanceCardActivity = Object.fromEntries(
+    SIMULATION_ELIGIBLE_AUGMENT_IDS.map((id) => {
+      const stats = balanceAggregate?.cards[id];
+      return [
+        id,
+        {
+          games: stats?.games ?? 0,
+          opportunityGames: stats?.opportunityGames ?? 0,
+          triggerGames: stats?.triggerGames ?? 0,
+          triggers: stats?.triggers ?? 0,
+        },
+      ];
+    }),
+  ) as Record<
+    AugmentId,
+    { games: number; opportunityGames: number; triggerGames: number; triggers: number }
+  >;
+  const requiredActiveOpportunityMissing = strictFourHourRun
+    ? REQUIRED_V3_ACTIVE_SIMULATION_IDS.filter(
+        (id) => balanceCardActivity[id].opportunityGames <= 0,
+      )
+    : [];
+  const requiredActiveUseMissing = strictFourHourRun
+    ? REQUIRED_V3_ACTIVE_SIMULATION_IDS.filter(
+        (id) => balanceCardActivity[id].triggers <= 0,
+      )
+    : [];
   const animationState = workerSummaries.animation.state as {
     segmentCanonicalFlowChecks?: number;
     segmentPhaseVisits?: Record<string, number>;
@@ -1037,15 +1103,15 @@ async function run() {
     : [];
   const animationFlowMissing = strictFourHourRun &&
     (animationState?.segmentCanonicalFlowChecks ?? 0) <= 0;
-  const balanceRoundRobinIncomplete = strictFourHourRun &&
-    (workerSummaries.balance.segment?.loops ?? 0) < BALANCE_ROUND_ROBIN_GROUPS;
+  const balanceStabilityScheduleIncomplete = strictFourHourRun &&
+    (workerSummaries.balance.segment?.loops ?? 0) <
+      BALANCE_STABILITY_SCHEDULE_GROUPS;
   const balanceGameAccountingInvalid = strictFourHourRun &&
     (workerSummaries.balance.segment?.games ?? 0) !==
       (workerSummaries.balance.segment?.loops ?? 0) * 4;
-  const balanceAllGamesCapped = strictFourHourRun &&
-    (workerSummaries.balance.segment?.games ?? 0) > 0 &&
-    (workerSummaries.balance.segment?.cappedGames ?? 0) >=
-      (workerSummaries.balance.segment?.games ?? 0);
+  const balanceCappedGames = hasCappedBalanceGames(
+    workerSummaries.balance.segment?.cappedGames,
+  );
   const noRecordedFailures = totalFailures(aggregate) === 0;
   const technicalIntegrity =
     !failureStop &&
@@ -1063,11 +1129,13 @@ async function run() {
   const runSucceeded =
     technicalSuccess &&
     strictCoverageFailures.length === 0 &&
+    requiredActiveOpportunityMissing.length === 0 &&
+    requiredActiveUseMissing.length === 0 &&
     animationPhaseCoverageMissing.length === 0 &&
     !animationFlowMissing &&
-    !balanceRoundRobinIncomplete &&
+    !balanceStabilityScheduleIncomplete &&
     !balanceGameAccountingInvalid &&
-    !balanceAllGamesCapped;
+    !balanceCappedGames;
   const continuousGatePassed = strictFourHourRun && runSucceeded;
   const finalStatus = !technicalIntegrity
     ? "failed"
@@ -1083,7 +1151,10 @@ async function run() {
   segment.workerExitCodes = exitCodes;
   const segmentFinalPath = resolve(runDir, "segments", segmentId, "final.json");
   const finalEvidence = {
+    purpose: "product_stability" as const,
     schemaVersion: SOAK_SCHEMA_VERSION,
+    algorithmVersion: BALANCE_ALGORITHM_VERSION,
+    engineRulesFingerprint: BALANCE_ENGINE_RULES_FINGERPRINT,
     runId: manifest.runId,
     segmentId,
     status: finalStatus,
@@ -1099,7 +1170,7 @@ async function run() {
       sourceFingerprintIntervalMs: SOURCE_FINGERPRINT_INTERVAL_MS,
       seed: options.seed,
       balanceTournament: manifest.balanceTournament,
-      balanceRoundRobinGroups: BALANCE_ROUND_ROBIN_GROUPS,
+      balanceStabilityScheduleGroups: BALANCE_STABILITY_SCHEDULE_GROUPS,
     },
     source: {
       start: source,
@@ -1118,7 +1189,10 @@ async function run() {
     workers: workerSummaries,
     aggregate,
     coverage: {
-      catalogSize: AUGMENT_IDS.length,
+      catalogSize: SIMULATION_CATALOG_SIZE,
+      simulationEligibleSize: SIMULATION_ELIGIBLE_COUNT,
+      excludedClockCount: EXCLUDED_CLOCK_AUGMENT_IDS.length,
+      excludedClockAugmentIds: [...EXCLUDED_CLOCK_AUGMENT_IDS],
       byWorker: currentCoverage,
       overallAllCards: allCardsCovered(aggregate.cardCoverage),
       missingOverall: uncoveredCards(aggregate.cardCoverage),
@@ -1128,6 +1202,15 @@ async function run() {
           uncoveredCards(currentCoverage[worker]),
         ]),
       ),
+    },
+    simulationActivity: {
+      activeEligibleAugmentIds: SIMULATION_ELIGIBLE_AUGMENTS.filter(
+        (definition) => definition.activation === "active",
+      ).map((definition) => definition.id),
+      requiredV3ActiveAugmentIds: [...REQUIRED_V3_ACTIVE_SIMULATION_IDS],
+      requiredActiveOpportunityMissing,
+      requiredActiveUseMissing,
+      byEligibleAugment: balanceCardActivity,
     },
     acceptance: {
       strictFourHourRun,
@@ -1148,11 +1231,13 @@ async function run() {
         hardWorkerFailures,
         durationFailures,
         strictCoverageFailures,
+        requiredActiveOpportunityMissing,
+        requiredActiveUseMissing,
         animationPhaseCoverageMissing,
         animationFlowMissing,
-        balanceRoundRobinIncomplete,
+        balanceStabilityScheduleIncomplete,
         balanceGameAccountingInvalid,
-        balanceAllGamesCapped,
+        balanceCappedGames,
         watchdogFailures,
         recordedFailureCount: totalFailures(aggregate),
         historicalRecordedFailureCount,

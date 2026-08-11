@@ -24,8 +24,11 @@ import {
   getProjectedLegalTargets,
   getProjectedAugmentExchangeViolation,
   getProjectedAugmentLegalTargets,
+  getProjectedAugmentMultiMoveViolation,
   getProjectedAugmentMoveViolation,
   getProjectedAugmentReconTargets,
+  getProjectedAugmentRedeployViolation,
+  getProjectedAugmentSacrificeViolation,
   getProjectedMoveViolation,
   getSetupDraftPlacementViolation,
   isCamp,
@@ -69,6 +72,20 @@ import {
   wasAugmentLockConfirmedAfterConflict,
 } from "./components/augmentMotion";
 import {
+  AUGMENT_EFFECT_ANIMATION_MS,
+  animatedAugmentPieceIds,
+  augmentBoardEffectsForReplayTransition,
+  augmentBoardEffectsForTransition,
+  createRedeployDraft,
+  redeployChangedCount,
+  redeployPlacements,
+  redeployTargetPositions,
+  renderRedeployPieces,
+  swapRedeployPieces,
+  type AugmentBoardEffectAnimation,
+  type RedeployDraft,
+} from "./components/augmentBoardUi";
+import {
   INVITE_RETRY_PARAM,
   clearPendingRoomInvite,
   isValidRoomInviteToken,
@@ -103,21 +120,58 @@ function hasProjectedAugmentTarget(game: ProjectedGame, side: Side, augmentId: A
     );
   }
   if (effect.kind === "exchange") {
-    const pieces = game.pieces.filter(
+    const friendlyPieces = game.pieces.filter(
       (piece) => piece.alive && piece.side === side && isInsideBoard(piece),
     );
-    for (let first = 0; first < pieces.length; first += 1) {
-      for (let second = first + 1; second < pieces.length; second += 1) {
+    const secondPieces = effect.mode === "cross_frontline"
+      ? game.pieces.filter(
+          (piece) => piece.alive && piece.side !== side && isInsideBoard(piece),
+        )
+      : friendlyPieces;
+    for (let first = 0; first < friendlyPieces.length; first += 1) {
+      const start = effect.mode === "cross_frontline" ? 0 : first + 1;
+      for (let second = start; second < secondPieces.length; second += 1) {
         if (!getProjectedAugmentExchangeViolation(
           game,
           side,
           augmentId,
-          pieces[first],
-          pieces[second],
+          friendlyPieces[first],
+          secondPieces[second],
         )) return true;
       }
     }
     return false;
+  }
+  if (effect.kind === "multi_move") {
+    return game.pieces.some(
+      (piece) =>
+        piece.alive &&
+        piece.side === side &&
+        !getProjectedAugmentMultiMoveViolation(game, side, augmentId, piece.id),
+    );
+  }
+  if (effect.kind === "redeployment") {
+    const draft = createRedeployDraft("projection", game, side, augmentId);
+    if (!draft) return false;
+    const pieceIds = Object.keys(draft.locations);
+    const swapped = swapRedeployPieces(draft, pieceIds[0], draft.locations[pieceIds[1]]);
+    return Boolean(
+      swapped &&
+      !getProjectedAugmentRedeployViolation(
+        game,
+        side,
+        augmentId,
+        redeployPlacements(swapped),
+      ),
+    );
+  }
+  if (effect.kind === "sacrifice_reconnaissance") {
+    return game.pieces.some(
+      (piece) =>
+        piece.alive &&
+        piece.side === side &&
+        !getProjectedAugmentSacrificeViolation(game, side, augmentId, piece.id),
+    );
   }
   if (effect.kind === "reconnaissance" && effect.mode === "choose_enemy") {
     return getProjectedAugmentReconTargets(game, side, augmentId).length > 0;
@@ -234,8 +288,8 @@ const ERROR_TEXT: Record<string, string> = {
   PIECE_NOT_AVAILABLE: "这枚棋子当前不可用，请重新选择。",
   SAME_POSITION: "起点和终点相同，没有发生移动。",
   NO_STATE_CHANGE: "当前已经是这个状态，无需重复操作。",
-  FLAG_MUST_BE_HEADQUARTERS: "军旗只能放在本方两个大本营之一。",
-  MINE_BACK_TWO_ROWS: "地雷只能放在本方最后两排。",
+  FLAG_MUST_BE_HEADQUARTERS: "军旗只能放在当前军令允许的底线布阵位置。",
+  MINE_BACK_TWO_ROWS: "地雷只能放在当前军令允许的后方布阵位置。",
   BOMB_NOT_FRONT_ROW: "炸弹不能放在本方第一排。",
   CAMP_MUST_BE_EMPTY: "行营不能布子，布阵时必须保持为空。",
   LAYOUT_LOCKED: "阵型已经锁定；请先撤销确认再调整。",
@@ -285,6 +339,18 @@ const ERROR_TEXT: Record<string, string> = {
   EXTRA_MOVE_DIFFERENT_PIECE: "追加行动必须使用另一枚棋子。",
   EXTRA_MOVE_NORMAL_ONLY: "追加行动只能进行普通移动。",
   EXTRA_MOVE_NOT_PENDING: "当前没有可以放弃的追加行动。",
+  PENDING_ACTION_REQUIRED: "请先完成或放弃当前追加行动。",
+  MULTI_MOVE_SAME_PIECE_REQUIRED: "本次连续移动必须继续使用同一枚棋子。",
+  MULTI_MOVE_NORMAL_ONLY: "连续移动期间只能进行普通移动。",
+  MULTI_MOVE_FIRST_MOVE_REQUIRED: "发动后至少需要完成一次合法移动。",
+  NO_LEGAL_MULTI_MOVE: "这枚棋子当前没有可用的连续移动。",
+  AUGMENT_REQUIRES_ENEMY_TARGET: "第二个目标必须选择敌方棋子。",
+  INVALID_REDEPLOYMENT: "换阵内容不完整，请取消后重新编辑。",
+  INCOMPLETE_REDEPLOYMENT: "换阵必须包含当前己方半场内的全部存活非军旗棋子。",
+  REDEPLOYMENT_DESTINATIONS_MUST_MATCH: "换阵只能使用这些棋子原先占据的站点。",
+  REDEPLOYMENT_REQUIRES_CHANGE: "至少交换两枚棋子后才能确认换阵。",
+  FLAG_HEADQUARTERS_LOCKED: "军旗受保护：本次进攻被阻止；先占领另一座大本营后才能夺旗。",
+  SCREENED_ATTACK_REQUIRED: "这枚师长进攻时必须与目标之间正好隔一枚棋子。",
   RANKED_TIME_CONTROL_LOCKED: "排位用时固定为 10 分钟，不能修改。",
   RANKED_SETUP_EXPIRED: "布阵时间已到，本局已作废且不计分。你可以立即重新匹配。",
   RANKED_SETUP_CANCELLED: "本次排位已在开局前取消，不计分。",
@@ -491,6 +557,33 @@ function eventText(event: PublicEvent) {
   if (event.result === "augment_used") {
     return `${actor}发动「${event.augmentId ? getAugmentDefinition(event.augmentId).name : "军令"}」`;
   }
+  if (event.kind === "redeploy") {
+    return `${actor}完成暗中换阵 · ${event.relocations?.length ?? event.pieceIds?.length ?? 0} 枚棋子换位${eventAugmentText(event)}`;
+  }
+  if (event.kind === "sacrifice") {
+    return `${actor}弃掉一枚己子并完成侦察${eventAugmentText(event)}`;
+  }
+  if (event.result === "pieces_redeployed") {
+    return `${actor}完成暗中换阵 · ${event.relocations?.length ?? event.pieceIds?.length ?? 0} 枚棋子换位${eventAugmentText(event)}`;
+  }
+  if (event.result === "piece_sacrificed") {
+    return `${actor}弃掉一枚己子并完成侦察${eventAugmentText(event)}`;
+  }
+  if (event.result === "chain_explosion") {
+    return `连锁爆炸 · ${event.pieceIds?.length ?? event.positions?.length ?? 0} 枚相邻棋子退场${eventAugmentText(event)}`;
+  }
+  if (event.result === "piece_promoted") {
+    return `${actor}有棋子晋升${eventAugmentText(event)}`;
+  }
+  if (event.result === "mine_hit") {
+    return `一枚地雷承受首次攻击并公开${eventAugmentText(event)}`;
+  }
+  if (event.result === "headquarters_unlocked") {
+    return `${sideName(otherSide(event.actor))}的大本营门禁已经解除${eventAugmentText(event)}`;
+  }
+  if (event.result === "flag_destroyed") {
+    return `${actor}的军旗因军令时限被消灭${eventAugmentText(event)}`;
+  }
   const path = event.from && event.to ? `${boardCoordinate(event.from)} → ${boardCoordinate(event.to)}` : "";
   const augmentText = eventAugmentText(event);
   if (event.kind === "exchange" && event.from && event.to) {
@@ -503,6 +596,9 @@ function eventText(event: PublicEvent) {
   if (event.result === "attacker_survives") return `${actor}进攻成功 · ${path}${augmentText}`;
   if (event.result === "defender_survives") return `${actor}进攻失利 · ${path}${augmentText}`;
   if (event.result === "both_removed") return `双方同归于尽 · ${path}${augmentText}`;
+  if (event.result === "flag_protected") {
+    return `军旗受保护 · ${actor}本次进攻被阻止${path ? ` · ${path}` : ""}${augmentText}`;
+  }
   return `${actor}夺得军旗${path ? ` · ${path}` : ""}${augmentText}`;
 }
 
@@ -628,7 +724,7 @@ function BattlePieceVisual({
   position: Position;
   viewer: Viewer;
   campMotion?: "enter" | "leave" | null;
-  motionClass?: "battle-animation-visual" | "battle-defender-ghost";
+  motionClass?: string;
   className?: string;
   style?: BattleAnimationStyle;
   ariaHidden?: boolean;
@@ -744,6 +840,78 @@ function ExchangeAnimationOverlay({
   );
 }
 
+function AugmentEffectAnimationOverlay({
+  animations,
+  viewer,
+}: {
+  animations: readonly AugmentBoardEffectAnimation[];
+  viewer: Viewer;
+}) {
+  return (
+    <>
+      {animations.flatMap((animation) => {
+        if (animation.kind === "relocations") {
+          return animation.relocations.flatMap((relocation) => {
+            const piece = animation.pieces.find(
+              (candidate) => candidate.id === relocation.pieceId,
+            );
+            if (!piece) return [];
+            return [
+              <span
+                className="battle-animation-cell augment-relocation-cell"
+                key={`${animation.eventId}:${relocation.pieceId}`}
+                style={battleMotionStyle(relocation.from, relocation.to)}
+                data-effect-animation="redeploy"
+                aria-hidden="true"
+              >
+                <BattlePieceVisual
+                  piece={piece}
+                  position={relocation.to}
+                  viewer={viewer}
+                  motionClass="battle-animation-visual augment-relocation-visual"
+                />
+              </span>,
+            ];
+          });
+        }
+        if (animation.kind === "removals") {
+          return animation.entries.map(({ piece, position }, index) => (
+            <span
+              className="augment-effect-cell is-removal"
+              key={`${animation.eventId}:removed:${piece?.id ?? index}`}
+              style={battleTargetStyle(position)}
+              data-effect-animation={animation.event.result}
+              aria-hidden="true"
+            >
+              {piece ? (
+                <BattlePieceVisual
+                  piece={piece}
+                  position={position}
+                  viewer={viewer}
+                  motionClass="augment-effect-piece"
+                  ariaHidden
+                />
+              ) : null}
+              <span className="augment-effect-ring" />
+            </span>
+          ));
+        }
+        return animation.positions.map((position, index) => (
+          <span
+            className="augment-effect-cell is-pulse"
+            key={`${animation.eventId}:pulse:${index}`}
+            style={battleTargetStyle(position)}
+            data-effect-animation={animation.event.result}
+            aria-hidden="true"
+          >
+            <span className="augment-effect-ring" />
+          </span>
+        ));
+      })}
+    </>
+  );
+}
+
 function animatedPieceIds(animation: MovementAnimationTransition | null | undefined) {
   if (!animation) return [] as string[];
   return animation.kind === "exchange"
@@ -762,6 +930,9 @@ interface BoardProps {
   readOnly?: boolean;
   movementHighlight?: PublicEvent;
   movementAnimation?: MovementAnimationTransition | null;
+  augmentEffectAnimations?: readonly AugmentBoardEffectAnimation[];
+  interactionLabel?: string | null;
+  nonCombatTargets?: boolean;
   onCell: (position: Position) => void;
   onPieceDragStart: (pieceId: string, position: Position) => boolean;
   onPieceDrop: (pieceId: string, position: Position) => void;
@@ -779,6 +950,9 @@ function Board({
   readOnly = false,
   movementHighlight,
   movementAnimation,
+  augmentEffectAnimations = [],
+  interactionLabel = null,
+  nonCombatTargets = false,
   onCell,
   onPieceDragStart,
   onPieceDrop,
@@ -792,7 +966,10 @@ function Board({
   const recentMovement = movementAnimation?.kind === "movement"
     ? movementAnimation.event
     : undefined;
-  const motionPieceIds = new Set(animatedPieceIds(movementAnimation));
+  const motionPieceIds = new Set([
+    ...animatedPieceIds(movementAnimation),
+    ...animatedAugmentPieceIds(augmentEffectAnimations),
+  ]);
   const columnLabels = Array.from({ length: 5 }, (_, index) =>
     String.fromCharCode(65 + (flipped ? 4 - index : index)),
   );
@@ -828,7 +1005,9 @@ function Board({
         const piece = alivePieces.find((candidate) => samePosition(candidate, position));
         const selectedHere = Boolean(selected && samePosition(selected, position));
         const targetHere = targets.has(positionKey(position));
-        const targetAttack = Boolean(targetHere && piece && piece.side !== viewer);
+        const targetAttack = Boolean(
+          targetHere && piece && piece.side !== viewer && !nonCombatTargets,
+        );
         const lastMoveFrom = Boolean(
           movementHighlight?.from && samePosition(movementHighlight.from, position),
         );
@@ -838,6 +1017,13 @@ function Board({
         const camp = CAMPS.some((candidate) => samePosition(candidate, position));
         const headquarters = HEADQUARTERS.some((candidate) => samePosition(candidate, position));
         const headquartersSide: Side | null = headquarters ? (row < 6 ? "white" : "black") : null;
+        const headquartersHasGate = Boolean(
+          headquartersSide &&
+          game.augment?.draft.loadouts[headquartersSide]?.includes("spade-last-headquarters"),
+        );
+        const headquartersGateUnlocked = Boolean(
+          headquartersSide && game.augment?.ruleState?.headquartersUnlocked[headquartersSide],
+        );
         const headquartersRelation = headquartersSide
           ? viewer === "spectator"
             ? sideName(headquartersSide)
@@ -863,6 +1049,11 @@ function Board({
             motionPieceIds.has(piece.id),
         );
         const pieceLabel = visiblePieceLabel ?? (piece ? "身份隐藏" : "空位");
+        const headquartersGateLabel = headquartersHasGate
+          ? headquartersGateUnlocked
+            ? "，军旗门禁已解除"
+            : "，军旗门禁未解除"
+          : "";
         const stationLabel = camp
           ? "行营"
           : headquarters
@@ -876,9 +1067,11 @@ function Board({
             ? piece
               ? "，可交换"
               : "，可放置"
-            : piece
-              ? "，可攻击"
-              : "，可移动"
+            : interactionLabel
+              ? `，${interactionLabel}`
+              : piece
+                ? "，可攻击"
+                : "，可移动"
           : "";
         const draggable = Boolean(
           piece &&
@@ -908,7 +1101,7 @@ function Board({
               <span className="road road-diagonal down-left" />
             ) : null}
             <button
-              className={`station-hit ${selectedHere ? "is-selected" : ""} ${targetHere ? "is-target" : ""} ${targetAttack ? "is-attack" : ""} ${lastMoveFrom ? "is-last-move-from" : ""} ${lastMoveTo ? "is-last-move-to" : ""} ${visiblePieceLabel ? "has-piece-label" : ""} ${headquarters ? "is-headquarters" : ""} ${headquartersOwnershipClass}`}
+              className={`station-hit ${selectedHere ? "is-selected" : ""} ${targetHere ? "is-target" : ""} ${targetAttack ? "is-attack" : ""} ${lastMoveFrom ? "is-last-move-from" : ""} ${lastMoveTo ? "is-last-move-to" : ""} ${visiblePieceLabel ? "has-piece-label" : ""} ${headquarters ? "is-headquarters" : ""} ${headquartersHasGate ? headquartersGateUnlocked ? "is-gate-unlocked" : "is-gate-locked" : ""} ${headquartersOwnershipClass}`}
               type="button"
               onClick={() => onCell(position)}
               draggable={draggable}
@@ -940,7 +1133,7 @@ function Board({
               onDragEnd={onPieceDragEnd}
               disabled={readOnly || viewer === "spectator" || busy}
               aria-pressed={piece?.side === viewer ? selectedHere : undefined}
-              aria-label={`${boardCoordinate(position)}，${stationLabel}，${pieceLabel}${coverLabel}${targetLabel}`}
+              aria-label={`${boardCoordinate(position)}，${stationLabel}${headquartersGateLabel}，${pieceLabel}${coverLabel}${targetLabel}`}
             >
               <span
                 className={`station ${camp ? "camp" : headquarters ? "headquarters" : "post"} ${campMotion.station ? `camp-motion-${campMotion.station}` : ""}`}
@@ -950,6 +1143,11 @@ function Board({
               </span>
               {headquartersRelation ? (
                 <span className="headquarters-badge" aria-hidden="true">{headquartersRelation}</span>
+              ) : null}
+              {headquartersHasGate ? (
+                <span className="headquarters-gate-badge" aria-hidden="true">
+                  {headquartersGateUnlocked ? "已开" : "门禁"}
+                </span>
               ) : null}
               {targetHere && !piece ? <span className="target-dot" /> : null}
               {lastMoveFrom ? <span className="last-move-marker is-from" aria-hidden="true">起</span> : null}
@@ -969,6 +1167,12 @@ function Board({
                     >
                       {visiblePieceLabel}
                     </span>
+                  ) : null}
+                  {piece.promoted ? (
+                    <span className="augment-piece-badge is-promoted" aria-label="已晋升">升</span>
+                  ) : null}
+                  {piece.mineHits === 1 ? (
+                    <span className="augment-piece-badge is-damaged-mine" aria-label="地雷已受一次攻击">1/2</span>
                   ) : null}
                 </>
               ) : null}
@@ -991,6 +1195,12 @@ function Board({
             viewer={viewer}
           />
         )
+      ) : null}
+      {augmentEffectAnimations.length ? (
+        <AugmentEffectAnimationOverlay
+          animations={augmentEffectAnimations}
+          viewer={viewer}
+        />
       ) : null}
       </div>
     </div>
@@ -1088,6 +1298,76 @@ function CapturedPieceBox({ pieces }: { pieces: PublicPiece[] }) {
       ) : (
         <p className="captured-piece-empty">暂无</p>
       )}
+    </section>
+  );
+}
+
+function AugmentRuleStatusPanel({
+  game,
+  side,
+  ownerLabel,
+}: {
+  game: ProjectedGame;
+  side: Side;
+  ownerLabel: string;
+}) {
+  const augment = game.augment;
+  if (!augment) return null;
+  const loadout = augment.draft.loadouts[side] ?? [];
+  const items: Array<{ label: string; value: string }> = [];
+  const lightning = augment.ruleState?.lightning[side] ?? null;
+  if (lightning) {
+    items.push({ label: "兵贵神速", value: `军旗倒计时 ${lightning.remainingOwnTurns} 回合` });
+  }
+  if (loadout.includes("spade-last-headquarters")) {
+    items.push({
+      label: "濒死悟道",
+      value: augment.ruleState?.headquartersUnlocked[side]
+        ? "另一大本营已失守 · 军旗可被夺取"
+        : "另一大本营尚未失守 · 军旗受保护，进攻会被阻止并公开",
+    });
+  }
+  if (loadout.includes("club-bombardier")) {
+    const secondFuse = augment.ruleState?.bombSecondFuse?.[side];
+    const used = secondFuse?.survivalUsed ||
+      (augment.triggerCounts[side]["club-bombardier"] ?? 0) > 0;
+    items.push({
+      label: "英勇投弹手",
+      value: used
+        ? "第二引信已使用"
+        : secondFuse?.bound
+          ? "第二引信已绑定 · 尚未使用"
+          : "第二引信待命",
+    });
+  }
+  const damagedMines = game.pieces.filter(
+    (piece) => piece.side === side && piece.mineHits === 1,
+  ).length;
+  if (damagedMines > 0) {
+    items.push({ label: "地雷战况", value: `${damagedMines} 枚受损地雷已公开 · 再受一击退场` });
+  }
+  const promotedPublicIds = new Set(augment.ruleState?.promotedPublicIds ?? []);
+  const promoted = game.pieces.filter(
+    (piece) =>
+      piece.alive &&
+      piece.side === side &&
+      (piece.promoted || promotedPublicIds.has(piece.id)),
+  ).length;
+  if (promoted > 0) {
+    items.push({ label: "晋升", value: `${promoted} 枚存活棋子已晋升` });
+  }
+  if (!items.length) return null;
+  return (
+    <section className="augment-rule-status" aria-label={`${ownerLabel}军令状态`}>
+      <div className="panel-title-row"><strong>{ownerLabel}军令状态</strong><span>当前状态</span></div>
+      <dl>
+        {items.map((item) => (
+          <div key={item.label}>
+            <dt>{item.label}</dt>
+            <dd>{item.value}</dd>
+          </div>
+        ))}
+      </dl>
     </section>
   );
 }
@@ -1229,7 +1509,7 @@ function Landing({
               <strong>经典暗军棋</strong><small>原版规则，完全不变</small>
             </button>
             <button className={mode === "augment" ? "is-selected" : ""} type="button" role="radio" aria-checked={mode === "augment"} onClick={() => setMode("augment")}>
-              <strong>军令强化</strong><small>两轮强化，50 张牌池</small>
+              <strong>军令强化</strong><small>两轮强化，扩展牌池</small>
             </button>
           </div>
           <label className="spectator-setting">
@@ -1348,6 +1628,13 @@ export default function GameApp({
   const [replayIndex, setReplayIndex] = useState<number | null>(null);
   const [movementAnimation, setMovementAnimation] =
     useState<MovementAnimationTransition | null>(null);
+  const [augmentEffectAnimations, setAugmentEffectAnimations] =
+    useState<AugmentBoardEffectAnimation[]>([]);
+  const [reducedMotion, setReducedMotion] = useState(false);
+  const [replayMovementAnimationIndex, setReplayMovementAnimationIndex] =
+    useState<number | null>(null);
+  const [replayEffectAnimationIndex, setReplayEffectAnimationIndex] =
+    useState<number | null>(null);
   const [clockTick, setClockTick] = useState(0);
   const [clockAnchor, setClockAnchor] = useState(0);
   const [connection, setConnection] = useState<"live" | "syncing" | "offline">("live");
@@ -1357,6 +1644,8 @@ export default function GameApp({
   const [matchmaking, setMatchmaking] = useState<MatchmakingEnvelope>({ state: "idle" });
   const [watchingMatchId, setWatchingMatchId] = useState<string | null>(null);
   const [activeAugmentId, setActiveAugmentId] = useState<AugmentId | null>(null);
+  const [redeployDraft, setRedeployDraft] = useState<RedeployDraft | null>(null);
+  const [sacrificeCandidateId, setSacrificeCandidateId] = useState<string | null>(null);
   const [augmentDraftVisualHold, setAugmentDraftVisualHold] =
     useState<AugmentDraftVisualHold | null>(null);
   const roomRef = useRef<RoomEnvelope | null>(null);
@@ -1393,7 +1682,11 @@ export default function GameApp({
     const media = window.matchMedia("(prefers-reduced-motion: reduce)");
     const syncPreference = () => {
       reduceMotionRef.current = media.matches;
-      if (media.matches) setMovementAnimation(null);
+      setReducedMotion(media.matches);
+      if (media.matches) {
+        setMovementAnimation(null);
+        setAugmentEffectAnimations([]);
+      }
     };
     syncPreference();
     media.addEventListener("change", syncPreference);
@@ -1415,8 +1708,20 @@ export default function GameApp({
   }, [movementAnimation]);
 
   useEffect(() => {
+    if (!augmentEffectAnimations.length) return;
+    const timer = window.setTimeout(
+      () => setAugmentEffectAnimations([]),
+      AUGMENT_EFFECT_ANIMATION_MS,
+    );
+    return () => window.clearTimeout(timer);
+  }, [augmentEffectAnimations]);
+
+  useEffect(() => {
     const stopHiddenAnimation = () => {
-      if (document.hidden) setMovementAnimation(null);
+      if (document.hidden) {
+        setMovementAnimation(null);
+        setAugmentEffectAnimations([]);
+      }
     };
     document.addEventListener("visibilitychange", stopHiddenAnimation);
     return () => document.removeEventListener("visibilitychange", stopHiddenAnimation);
@@ -1448,6 +1753,8 @@ export default function GameApp({
       if (event.key === "Escape" && !rulesDialogRef.current?.open) {
         setSelectedPieceId(null);
         setActiveAugmentId(null);
+        setRedeployDraft(null);
+        setSacrificeCandidateId(null);
       }
     };
     window.addEventListener("keydown", cancelSelection);
@@ -1574,15 +1881,26 @@ export default function GameApp({
     );
     if (!preservesInteractionContext) {
       setMovementAnimation(null);
+      setAugmentEffectAnimations([]);
       setAugmentDraftVisualHold(null);
+      setRedeployDraft(null);
+      setSacrificeCandidateId(null);
     } else if (current && next.version > current.version) {
-      const animation =
+      const animationEnabled =
         replayIndexRef.current === null &&
         !reduceMotionRef.current &&
-        !document.hidden
-          ? movementAnimationForTransition(current.snapshot, next.snapshot)
-          : null;
+        !document.hidden;
+      const animation = animationEnabled
+        ? movementAnimationForTransition(current.snapshot, next.snapshot)
+        : null;
       setMovementAnimation(animation);
+      setAugmentEffectAnimations(
+        animationEnabled
+          ? augmentBoardEffectsForTransition(current.snapshot, next.snapshot)
+          : [],
+      );
+      setRedeployDraft(null);
+      setSacrificeCandidateId(null);
     }
     if (
       !current ||
@@ -1634,6 +1952,10 @@ export default function GameApp({
     } else {
       setSetupDraftState(null);
     }
+    if (next.snapshot.phase !== "playing") {
+      setRedeployDraft(null);
+      setSacrificeCandidateId(null);
+    }
     const receivedAt = performance.now();
     setClockAnchor(receivedAt);
     setClockTick(receivedAt);
@@ -1641,7 +1963,7 @@ export default function GameApp({
     setRoom(next);
     setActiveAugmentId((active) =>
       reconcileActiveAugmentAfterProjection(
-        preservesInteractionContext ? active : null,
+        preservesInteractionContext && current?.version === next.version ? active : null,
         isPlayer(next.viewer) ? next.snapshot.augment?.pendingRecon : null,
       ),
     );
@@ -1654,16 +1976,26 @@ export default function GameApp({
     setBusy(false);
     setSelectedPieceId(null);
     setActiveAugmentId(null);
+    setRedeployDraft(null);
+    setSacrificeCandidateId(null);
     setAugmentDraftVisualHold(null);
     setSetupDraftState(null);
     setRulesOpen(false);
     replayIndexRef.current = null;
     setReplayIndex(null);
     setMovementAnimation(null);
+    setAugmentEffectAnimations([]);
     setClockAnchor(0);
     setClockTick(0);
     roomRef.current = null;
     setRoom(null);
+  }
+
+  function clearBoardInteractionState() {
+    setSelectedPieceId(null);
+    setActiveAugmentId(null);
+    setRedeployDraft(null);
+    setSacrificeCandidateId(null);
   }
 
   async function loadInitialRoom(code: string, activeToken: string | null, session: number) {
@@ -2026,7 +2358,14 @@ export default function GameApp({
       if (session !== roomSessionRef.current || roomRef.current?.code !== current.code) return false;
       acceptRoom(next);
       setConnection("live");
-      setSelectedPieceId(null);
+      const forcedMultiMovePieceId = next.snapshot.augment?.multiMove?.pieceId ?? null;
+      setSelectedPieceId(
+        action.type === "augment_begin_multi_move"
+          ? action.pieceId
+          : action.type === "move" && forcedMultiMovePieceId
+            ? forcedMultiMovePieceId
+            : null,
+      );
       if (action.type === "augment_recon") {
         if (!shouldKeepActiveReconSelection(
           action.augmentId,
@@ -2037,15 +2376,22 @@ export default function GameApp({
       } else if (
         action.type === "augment_move" ||
         action.type === "augment_exchange" ||
+        action.type === "augment_begin_multi_move" ||
+        action.type === "augment_redeploy" ||
+        action.type === "augment_sacrifice" ||
         action.type === "pass_extra_move"
       ) {
         setActiveAugmentId(null);
       }
+      if (action.type === "augment_redeploy") setRedeployDraft(null);
+      if (action.type === "augment_sacrifice") setSacrificeCandidateId(null);
       return true;
     } catch (error) {
       if (session !== roomSessionRef.current || roomRef.current?.code !== current.code) return false;
+      // A rejected action can make every client-side board choice stale. Return to
+      // the neutral board before showing the authoritative server explanation.
+      clearBoardInteractionState();
       if (error instanceof RequestError && error.status === 409) {
-        setSelectedPieceId(null);
         showToast(ERROR_TEXT.VERSION_CONFLICT);
         try {
           const latest = await fetchRoom(current.code, token);
@@ -2078,7 +2424,6 @@ export default function GameApp({
         setFatalError(ERROR_TEXT[error.code] ?? "这个房间已经不可用。");
         removeLocalValue(roomTokenKey(current.code));
         setToken(null);
-        setSelectedPieceId(null);
         clearRoom();
       } else {
         const errorCode = error instanceof RequestError ? error.code : "ACTION_FAILED";
@@ -2110,19 +2455,64 @@ export default function GameApp({
     [selectedOpeningAugment],
   );
   const renderPieces = useMemo(() => {
-    if (!room || !setupSide || room.snapshot.phase !== "setup" || !activeSetupDraft) {
-      return room?.snapshot.pieces ?? [];
+    if (!room) return [];
+    if (
+      room.snapshot.phase === "playing" &&
+      redeployDraft?.roomCode === room.code &&
+      redeployDraft.side === room.viewer
+    ) {
+      return renderRedeployPieces(room.snapshot.pieces, redeployDraft);
+    }
+    if (!setupSide || room.snapshot.phase !== "setup" || !activeSetupDraft) {
+      return room.snapshot.pieces;
     }
     return room.snapshot.pieces.flatMap((piece) => {
       if (piece.side !== setupSide) return [piece];
       const position = activeSetupDraft[piece.id];
       return position ? [{ ...piece, ...position }] : [];
     });
-  }, [activeSetupDraft, room, setupSide]);
+  }, [activeSetupDraft, redeployDraft, room, setupSide]);
   const replayFrames = useMemo(
     () => buildReplayFrames(room?.snapshot.replay ?? null),
     [room?.snapshot.replay],
   );
+  const replayAnimationMove = replayIndex === null
+    ? null
+    : replayFrames[Math.min(replayIndex, replayFrames.length - 1)]?.move ?? null;
+  const replayAnimationKey = replayAnimationMove
+    ? `${replayIndex}:${replayAnimationMove.moveNumber}`
+    : null;
+  const replayMovementDuration =
+    replayAnimationMove?.kind === "exchange" || replayAnimationMove?.result === "move"
+      ? MOVEMENT_ANIMATION_MS
+      : BATTLE_ANIMATION_MS;
+
+  useEffect(() => {
+    let movementTimer: number | null = null;
+    let effectTimer: number | null = null;
+    const startTimer = window.setTimeout(() => {
+      if (replayIndex === null || !replayAnimationKey || reducedMotion) {
+        setReplayMovementAnimationIndex(null);
+        setReplayEffectAnimationIndex(null);
+        return;
+      }
+      setReplayMovementAnimationIndex(replayIndex);
+      setReplayEffectAnimationIndex(replayIndex);
+      movementTimer = window.setTimeout(
+        () => setReplayMovementAnimationIndex((current) => current === replayIndex ? null : current),
+        replayMovementDuration,
+      );
+      effectTimer = window.setTimeout(
+        () => setReplayEffectAnimationIndex((current) => current === replayIndex ? null : current),
+        AUGMENT_EFFECT_ANIMATION_MS,
+      );
+    }, 0);
+    return () => {
+      window.clearTimeout(startTimer);
+      if (movementTimer !== null) window.clearTimeout(movementTimer);
+      if (effectTimer !== null) window.clearTimeout(effectTimer);
+    };
+  }, [reducedMotion, replayAnimationKey, replayIndex, replayMovementDuration]);
   const trayPieces = useMemo(
     () =>
       activeSetupDraft
@@ -2141,6 +2531,9 @@ export default function GameApp({
     if (room.snapshot.phase === "setup" && activeSetupDraft) {
       return activeSetupDraft[selectedPiece.id] ?? null;
     }
+    if (room.snapshot.phase === "playing" && redeployDraft?.locations[selectedPiece.id]) {
+      return redeployDraft.locations[selectedPiece.id];
+    }
     return isInsideBoard(selectedPiece) ? { row: selectedPiece.row, col: selectedPiece.col } : null;
   })();
 
@@ -2155,6 +2548,68 @@ export default function GameApp({
           activeAugmentId,
         );
       }
+      if (effect.kind === "multi_move" && !selectedPieceId) {
+        return room.snapshot.pieces
+          .filter(
+            (piece) =>
+              piece.alive &&
+              piece.side === room.viewer &&
+              !getProjectedAugmentMultiMoveViolation(
+                room.snapshot,
+                room.viewer,
+                activeAugmentId,
+                piece.id,
+              ),
+          )
+          .map((piece) => ({ row: piece.row, col: piece.col }));
+      }
+      if (effect.kind === "sacrifice_reconnaissance" && !selectedPieceId) {
+        return room.snapshot.pieces
+          .filter(
+            (piece) =>
+              piece.alive &&
+              piece.side === room.viewer &&
+              !getProjectedAugmentSacrificeViolation(
+                room.snapshot,
+                room.viewer,
+                activeAugmentId,
+                piece.id,
+              ),
+          )
+          .map((piece) => ({ row: piece.row, col: piece.col }));
+      }
+      if (effect.kind === "redeployment" && redeployDraft) {
+        return selectedPieceId
+          ? redeployTargetPositions(redeployDraft, selectedPieceId)
+          : Object.values(redeployDraft.locations);
+      }
+      if (effect.kind === "exchange" && !selectedPieceId) {
+        const targets = effect.mode === "cross_frontline"
+          ? room.snapshot.pieces.filter(
+              (piece) => piece.alive && piece.side !== room.viewer,
+            )
+          : room.snapshot.pieces.filter(
+              (piece) => piece.alive && piece.side === room.viewer,
+            );
+        return room.snapshot.pieces
+          .filter(
+            (piece) =>
+              piece.alive &&
+              piece.side === room.viewer &&
+              targets.some(
+                (target) =>
+                  target.id !== piece.id &&
+                  !getProjectedAugmentExchangeViolation(
+                    room.snapshot,
+                    room.viewer as Side,
+                    activeAugmentId,
+                    piece,
+                    target,
+                  ),
+              ),
+          )
+          .map((piece) => ({ row: piece.row, col: piece.col }));
+      }
       if (!selectedPieceId || !selectedPosition) return [] as Position[];
       if (effect.kind === "movement") {
         return getProjectedAugmentLegalTargets(
@@ -2165,8 +2620,11 @@ export default function GameApp({
         );
       }
       if (effect.kind === "exchange") {
+        const targetSide = effect.mode === "cross_frontline"
+          ? otherSide(room.viewer)
+          : room.viewer;
         return room.snapshot.pieces
-          .filter((piece) => piece.alive && piece.side === room.viewer && piece.id !== selectedPieceId)
+          .filter((piece) => piece.alive && piece.side === targetSide && piece.id !== selectedPieceId)
           .filter((piece) => !getProjectedAugmentExchangeViolation(
             room.snapshot,
             room.viewer as Side,
@@ -2195,7 +2653,7 @@ export default function GameApp({
       );
     }
     return [] as Position[];
-  }, [activeAugmentId, activeSetupDraft, room, selectedPieceId, selectedPosition, setupAugmentIds]);
+  }, [activeAugmentId, activeSetupDraft, redeployDraft, room, selectedPieceId, selectedPosition, setupAugmentIds]);
 
   const targetKeys = useMemo(() => new Set(legalTargets.map(positionKey)), [legalTargets]);
 
@@ -2233,6 +2691,15 @@ export default function GameApp({
     if (!room || !isPlayer(room.viewer) || room.snapshot.phase !== "playing") return;
     if (room.snapshot.turn !== room.viewer) {
       showToast(ERROR_TEXT.NOT_YOUR_TURN);
+      return;
+    }
+    if (redeployDraft?.roomCode === room.code && redeployDraft.side === room.viewer) {
+      const nextDraft = swapRedeployPieces(redeployDraft, pieceId, position);
+      if (!nextDraft) showToast("暗度陈仓只能交换编辑范围内的两枚己子。");
+      else {
+        setRedeployDraft(nextDraft);
+        setSelectedPieceId(null);
+      }
       return;
     }
     const piece = room.snapshot.pieces.find(
@@ -2276,6 +2743,11 @@ export default function GameApp({
       showToast(ERROR_TEXT.NOT_YOUR_PIECE);
       return false;
     }
+    const requiredPieceId = room.snapshot.augment?.multiMove?.pieceId ?? null;
+    if (requiredPieceId && requiredPieceId !== piece.id) {
+      showToast("本次追加行动必须继续使用刚才那枚棋子。");
+      return false;
+    }
     if (piece.type === "flag") {
       showToast(ERROR_TEXT.FLAG_CANNOT_MOVE);
       return false;
@@ -2309,10 +2781,23 @@ export default function GameApp({
 
   function beginBoardPieceDrag(pieceId: string, position: Position) {
     dragDroppedRef.current = false;
-    if (!room || !isPlayer(room.viewer) || movementAnimation) return false;
+    if (!room || !isPlayer(room.viewer) || movementAnimation || augmentEffectAnimations.length) return false;
     if (activeAugmentId) {
       const effect = getAugmentDefinition(activeAugmentId).effect;
-      if (effect.kind === "exchange" || effect.kind === "reconnaissance") return false;
+      if (effect.kind === "redeployment" && redeployDraft) {
+        if (!redeployDraft.locations[pieceId]) {
+          showToast("只能调整己方半场内的存活非军旗棋子。");
+          return false;
+        }
+        setSelectedPieceId(pieceId);
+        return true;
+      }
+      if (
+        effect.kind === "exchange" ||
+        effect.kind === "reconnaissance" ||
+        effect.kind === "sacrifice_reconnaissance" ||
+        effect.kind === "multi_move"
+      ) return false;
     }
     if (room.snapshot.phase === "setup") {
       if (room.snapshot.ready[room.viewer]) {
@@ -2332,7 +2817,7 @@ export default function GameApp({
 
   function handleCell(position: Position) {
     if (Date.now() < suppressClickUntilRef.current) return;
-    if (!room || busy || movementAnimation || !isPlayer(room.viewer)) return;
+    if (!room || busy || movementAnimation || augmentEffectAnimations.length || !isPlayer(room.viewer)) return;
     const piece = renderPieces.find((candidate) => candidate.alive && samePosition(candidate, position));
     if (room.snapshot.phase === "setup") {
       if (room.snapshot.ready[room.viewer]) {
@@ -2375,34 +2860,148 @@ export default function GameApp({
       showToast(ERROR_TEXT.NOT_YOUR_TURN);
       return;
     }
-    if (piece?.side === room.viewer) {
-      if (
-        activeAugmentId &&
-        selectedPieceId &&
-        piece.id !== selectedPieceId &&
-        getAugmentDefinition(activeAugmentId).effect.kind === "exchange"
-      ) {
-        const fromPiece = room.snapshot.pieces.find((candidate) => candidate.id === selectedPieceId);
-        if (!fromPiece) {
-          setSelectedPieceId(piece.id);
-          return;
-        }
-        const violation = getProjectedAugmentExchangeViolation(
-          room.snapshot,
-          room.viewer,
-          activeAugmentId,
-          fromPiece,
-          position,
-        );
-        if (violation) showToast(ERROR_TEXT[violation] ?? "这两枚棋子不能执行换防。");
-        else void performAction({
-          type: "augment_exchange",
-          augmentId: activeAugmentId,
-          from: { row: fromPiece.row, col: fromPiece.col },
-          to: position,
-        });
+    const activeEffect = activeAugmentId
+      ? getAugmentDefinition(activeAugmentId).effect
+      : null;
+    if (activeAugmentId && activeEffect?.kind === "redeployment") {
+      if (!redeployDraft) {
+        showToast("换阵编辑已经失效，请重新发动军令。");
+        setActiveAugmentId(null);
         return;
       }
+      if (!piece || piece.side !== room.viewer || !redeployDraft.locations[piece.id]) {
+        showToast("只能调整己方半场内的存活非军旗棋子。");
+        return;
+      }
+      if (!selectedPieceId) {
+        setSelectedPieceId(piece.id);
+        return;
+      }
+      if (piece.id === selectedPieceId) {
+        setSelectedPieceId(null);
+        return;
+      }
+      const nextDraft = swapRedeployPieces(redeployDraft, selectedPieceId, position);
+      if (!nextDraft) showToast("请选择换阵范围内的另一枚己子。");
+      else {
+        setRedeployDraft(nextDraft);
+        setSelectedPieceId(null);
+      }
+      return;
+    }
+    if (activeAugmentId && activeEffect?.kind === "sacrifice_reconnaissance") {
+      if (!piece || piece.side !== room.viewer) {
+        showToast("请选择一枚己方非军旗棋子作为祭品。");
+        return;
+      }
+      const violation = getProjectedAugmentSacrificeViolation(
+        room.snapshot,
+        room.viewer,
+        activeAugmentId,
+        piece.id,
+      );
+      if (violation) showToast(ERROR_TEXT[violation] ?? "这枚棋子不能作为祭品。");
+      else {
+        setSacrificeCandidateId(piece.id);
+        setSelectedPieceId(piece.id);
+      }
+      return;
+    }
+    if (activeAugmentId && activeEffect?.kind === "multi_move") {
+      if (!piece || piece.side !== room.viewer) {
+        showToast("请选择一枚可移动的己方非工兵棋子。");
+        return;
+      }
+      const violation = getProjectedAugmentMultiMoveViolation(
+        room.snapshot,
+        room.viewer,
+        activeAugmentId,
+        piece.id,
+      );
+      if (violation) showToast(ERROR_TEXT[violation] ?? "这枚棋子不能发动出其不意。");
+      else void performAction({
+        type: "augment_begin_multi_move",
+        augmentId: activeAugmentId,
+        pieceId: piece.id,
+      });
+      return;
+    }
+    if (activeAugmentId && activeEffect?.kind === "exchange") {
+      const crossFrontline = activeEffect.mode === "cross_frontline";
+      const fromPiece = selectedPieceId
+        ? room.snapshot.pieces.find((candidate) => candidate.id === selectedPieceId)
+        : null;
+      if (!fromPiece) {
+        if (!piece || piece.side !== room.viewer) {
+          showToast(crossFrontline
+            ? "先选择己方前三排的一枚非军旗棋子。"
+            : "先选择一枚可换防的己方棋子。");
+          return;
+        }
+        const possibleTargets = room.snapshot.pieces.filter(
+          (candidate) =>
+            candidate.alive &&
+            candidate.id !== piece.id &&
+            candidate.side === (crossFrontline ? otherSide(room.viewer as Side) : room.viewer),
+        );
+        const hasPair = possibleTargets.some(
+          (candidate) => !getProjectedAugmentExchangeViolation(
+            room.snapshot,
+            room.viewer as Side,
+            activeAugmentId,
+            piece,
+            candidate,
+          ),
+        );
+        if (!hasPair) showToast("这枚棋子当前没有可交换的目标。");
+        else setSelectedPieceId(piece.id);
+        return;
+      }
+      if (!piece) {
+        showToast(crossFrontline
+          ? "第二步请选择敌方前三排任意一枚存活棋子（包括军旗）。"
+          : "第二步请选择另一枚己方棋子。");
+        return;
+      }
+      if (piece.id === selectedPieceId) {
+        setSelectedPieceId(null);
+        return;
+      }
+      if (piece.side === room.viewer && crossFrontline) {
+        setSelectedPieceId(null);
+        const possibleTargets = room.snapshot.pieces.filter(
+          (candidate) => candidate.alive && candidate.side !== room.viewer,
+        );
+        const hasPair = possibleTargets.some(
+          (candidate) => !getProjectedAugmentExchangeViolation(
+            room.snapshot,
+            room.viewer as Side,
+            activeAugmentId,
+            piece,
+            candidate,
+          ),
+        );
+        if (!hasPair) showToast("这枚棋子当前没有可交换的敌方目标。");
+        else setSelectedPieceId(piece.id);
+        return;
+      }
+      const violation = getProjectedAugmentExchangeViolation(
+        room.snapshot,
+        room.viewer,
+        activeAugmentId,
+        fromPiece,
+        piece,
+      );
+      if (violation) showToast(ERROR_TEXT[violation] ?? "这两枚棋子不能执行交换。");
+      else void performAction({
+        type: "augment_exchange",
+        augmentId: activeAugmentId,
+        from: { row: fromPiece.row, col: fromPiece.col },
+        to: { row: piece.row, col: piece.col },
+      });
+      return;
+    }
+    if (piece?.side === room.viewer) {
       if (piece.id === selectedPieceId) {
         setSelectedPieceId(null);
       } else {
@@ -2420,11 +3019,12 @@ export default function GameApp({
   function handlePieceDrop(pieceId: string, position: Position) {
     dragDroppedRef.current = true;
     suppressClickUntilRef.current = Date.now() + 350;
-    if (!room || movementAnimation || !isPlayer(room.viewer)) return;
+    if (!room || movementAnimation || augmentEffectAnimations.length || !isPlayer(room.viewer)) return;
     const origin =
       room.snapshot.phase === "setup"
         ? activeSetupDraft?.[pieceId]
-        : room.snapshot.pieces.find((piece) => piece.alive && piece.id === pieceId);
+        : redeployDraft?.locations[pieceId] ??
+          room.snapshot.pieces.find((piece) => piece.alive && piece.id === pieceId);
     if (origin && samePosition(origin, position)) {
       setSelectedPieceId(null);
       return;
@@ -2467,6 +3067,60 @@ export default function GameApp({
     void performAction({ type: "ready", value: true, layout });
   }
 
+  function cancelActiveAugment() {
+    setActiveAugmentId(null);
+    setSelectedPieceId(null);
+    setRedeployDraft(null);
+    setSacrificeCandidateId(null);
+  }
+
+  function confirmRedeploy() {
+    if (!room || !isPlayer(room.viewer) || !redeployDraft || busy) return;
+    const placements = redeployPlacements(redeployDraft);
+    const violation = getProjectedAugmentRedeployViolation(
+      room.snapshot,
+      room.viewer,
+      redeployDraft.augmentId,
+      placements,
+    );
+    if (violation) {
+      showToast(ERROR_TEXT[violation] ?? "至少交换两枚棋子后才能完成换阵。");
+      return;
+    }
+    void performAction({
+      type: "augment_redeploy",
+      augmentId: redeployDraft.augmentId,
+      placements,
+    });
+  }
+
+  function confirmSacrifice() {
+    if (
+      !room ||
+      !isPlayer(room.viewer) ||
+      !activeAugmentId ||
+      !sacrificeCandidateId ||
+      busy
+    ) return;
+    const effect = getAugmentDefinition(activeAugmentId).effect;
+    if (effect.kind !== "sacrifice_reconnaissance") return;
+    const violation = getProjectedAugmentSacrificeViolation(
+      room.snapshot,
+      room.viewer,
+      activeAugmentId,
+      sacrificeCandidateId,
+    );
+    if (violation) {
+      showToast(ERROR_TEXT[violation] ?? "这枚棋子已经不能作为祭品。");
+      return;
+    }
+    void performAction({
+      type: "augment_sacrifice",
+      augmentId: activeAugmentId,
+      pieceId: sacrificeCandidateId,
+    });
+  }
+
   function activateAugment(augmentId: AugmentId) {
     if (!room || !isPlayer(room.viewer)) return;
     const augment = getAugmentDefinition(augmentId);
@@ -2489,6 +3143,9 @@ export default function GameApp({
     if (
       effect.kind !== "movement" &&
       effect.kind !== "exchange" &&
+      effect.kind !== "multi_move" &&
+      effect.kind !== "redeployment" &&
+      effect.kind !== "sacrifice_reconnaissance" &&
       !(effect.kind === "reconnaissance" && effect.mode === "choose_enemy")
     ) {
       showToast("这张强化会在满足条件时自动生效。");
@@ -2498,10 +3155,34 @@ export default function GameApp({
       showToast("当前棋面没有可发动的合法目标。");
       return;
     }
+    if (activeAugmentId === augmentId) {
+      setActiveAugmentId(null);
+      setSelectedPieceId(null);
+      setRedeployDraft(null);
+      setSacrificeCandidateId(null);
+      showToast("已取消本次军令选择。");
+      return;
+    }
+    if (effect.kind === "redeployment") {
+      const draft = createRedeployDraft(room.code, room.snapshot, room.viewer, augmentId);
+      if (!draft) {
+        showToast("己方半场内至少需要两枚可换位的非军旗棋子。");
+        return;
+      }
+      setRedeployDraft(draft);
+    } else {
+      setRedeployDraft(null);
+    }
+    setSacrificeCandidateId(null);
     setSelectedPieceId(null);
-    setActiveAugmentId((current) => current === augmentId ? null : augmentId);
+    setActiveAugmentId(augmentId);
     if (effect.kind === "reconnaissance") showToast("请在棋盘上选择一枚未知敌子。");
-    else if (effect.kind === "exchange") showToast("依次选择两枚可换防的己方棋子。");
+    else if (effect.kind === "exchange" && effect.mode === "cross_frontline") {
+      showToast("先选己方前三排的非军旗棋子，再选敌方前三排任意存活棋子；交换不会额外公开身份。");
+    } else if (effect.kind === "exchange") showToast("依次选择两枚可换防的己方棋子。");
+    else if (effect.kind === "multi_move") showToast("请选择一枚可移动的己方非工兵棋子。");
+    else if (effect.kind === "redeployment") showToast("在棋盘上两两换位，确认后才会提交。");
+    else if (effect.kind === "sacrifice_reconnaissance") showToast("选择一枚己方非军旗棋子，再确认弃子。");
     else showToast("先选择己方棋子，再选择高亮目标。");
   }
 
@@ -2625,13 +3306,80 @@ export default function GameApp({
         from: activeReplayFrame.move.from,
         to: activeReplayFrame.move.to,
         result: activeReplayFrame.move.result,
+        kind: activeReplayFrame.move.kind,
         augmentId: activeReplayFrame.move.augmentId,
+        augmentIds: activeReplayFrame.move.augmentIds,
+        secondaryFrom: activeReplayFrame.move.secondaryFrom,
+        secondaryTo: activeReplayFrame.move.secondaryTo,
+        secondaryActor: activeReplayFrame.move.secondaryActor,
+        relocations: activeReplayFrame.move.relocations,
+        pieceIds: activeReplayFrame.move.pieceChanges?.map((change) => change.pieceId),
+        positions: activeReplayFrame.move.pieceChanges?.map(
+          (change) => ({ row: change.row, col: change.col }),
+        ),
       }
     : undefined;
+  const replayEffectEvents: PublicEvent[] = (activeReplayFrame?.move?.effects ?? []).map(
+    (effect, index) => ({
+      id: activeReplayFrame!.move!.moveNumber * 100 + index + 1,
+      actor: effect.actor,
+      result: effect.result,
+      kind: "effect",
+      ...(effect.augmentId ? { augmentId: effect.augmentId } : {}),
+      pieceIds: [...effect.pieceIds],
+      positions: effect.positions.map((position) => ({ ...position })),
+    }),
+  );
+  const replayPreviousFrame = activeReplayFrame && replayIndex !== null && replayIndex > 0
+    ? replayFrames[replayIndex - 1] ?? null
+    : null;
+  const replayMovementAnimation =
+    activeReplayFrame?.move &&
+    replayMoveEvent &&
+    replayPreviousFrame &&
+    replayMovementAnimationIndex === replayIndex &&
+    activeReplayFrame.move.kind !== "redeploy" &&
+    activeReplayFrame.move.kind !== "sacrifice" &&
+    activeReplayFrame.move.kind !== "effect" &&
+    !reduceMotionRef.current
+      ? movementAnimationForTransition(
+          {
+            ...game,
+            phase: "playing",
+            turn: activeReplayFrame.move.actor,
+            pieces: replayPreviousFrame.pieces,
+            events: [],
+            moveNumber: Math.max(0, activeReplayFrame.move.moveNumber - 1),
+          },
+          {
+            ...game,
+            phase: "playing",
+            turn: activeReplayFrame.move.actor,
+            pieces: activeReplayFrame.pieces,
+            events: [replayMoveEvent],
+            moveNumber: activeReplayFrame.move.moveNumber,
+          },
+        )
+      : null;
+  const replayEffectAnimations: AugmentBoardEffectAnimation[] = (() => {
+    if (
+      !activeReplayFrame?.move ||
+      !replayMoveEvent ||
+      !replayPreviousFrame ||
+      replayEffectAnimationIndex !== replayIndex ||
+      reduceMotionRef.current
+    ) return [];
+    return augmentBoardEffectsForReplayTransition(
+      replayPreviousFrame.pieces,
+      activeReplayFrame.pieces,
+      activeReplayFrame.move,
+      animatedPieceIds(replayMovementAnimation),
+    );
+  })();
   const latestOpponentMove = latestOpponentMovementEvent(game.events, room.viewer);
   const highlightedMove = activeReplayFrame ? replayMoveEvent : latestOpponentMove;
   const displayedPieces = activeReplayFrame?.pieces ?? renderPieces;
-  const liveMovementAnimation = activeReplayFrame ? null : movementAnimation;
+  const liveMovementAnimation = activeReplayFrame ? replayMovementAnimation : movementAnimation;
   const displayedGame = activeReplayFrame
     ? { ...game, pieces: activeReplayFrame.pieces, events: replayMoveEvent ? [replayMoveEvent] : [] }
     : game;
@@ -2694,6 +3442,11 @@ export default function GameApp({
     return game.turn === side ? "行动" : "等待";
   };
   const lastEvents = [...game.events].reverse().slice(0, 6);
+  const battleReportEvents = activeReplayFrame
+    ? [replayMoveEvent, ...replayEffectEvents].filter(
+        (event): event is PublicEvent => Boolean(event),
+      )
+    : lastEvents;
   const activeDraftRound = game.augment?.draft.activeRound
     ? game.augment.draft.rounds.find((round) => round.number === game.augment?.draft.activeRound) ?? null
     : null;
@@ -2750,8 +3503,31 @@ export default function GameApp({
     viewerSide &&
       game.phase === "playing" &&
       game.turn === viewerSide &&
-      game.augment?.extraMove,
+      (game.augment?.extraMove || game.augment?.multiMove?.canPass),
   );
+  const pendingMultiMove = viewerSide && game.phase === "playing" && game.turn === viewerSide
+    ? game.augment?.multiMove ?? null
+    : null;
+  const activeEffect = activeAugmentId
+    ? getAugmentDefinition(activeAugmentId).effect
+    : null;
+  const redeployChangeCount = redeployDraft ? redeployChangedCount(redeployDraft) : 0;
+  const sacrificeCandidate = sacrificeCandidateId
+    ? game.pieces.find((piece) => piece.id === sacrificeCandidateId) ?? null
+    : null;
+  const boardInteractionLabel = activeEffect?.kind === "exchange"
+    ? activeEffect.mode === "cross_frontline" && !selectedPieceId
+      ? "可选己方前线棋子"
+      : "可交换"
+    : activeEffect?.kind === "redeployment"
+      ? selectedPieceId ? "可换位" : "可选换阵棋子"
+      : activeEffect?.kind === "multi_move"
+        ? "可发动连续移动"
+        : activeEffect?.kind === "sacrifice_reconnaissance"
+          ? "可选为祭品"
+          : activeEffect?.kind === "reconnaissance"
+            ? "可侦察"
+            : null;
   const showRepetitionWarning = Boolean(
     game.mode === "augment" &&
       game.phase !== "finished" &&
@@ -2873,6 +3649,7 @@ export default function GameApp({
           ) : null}
           {game.augment ? (
             <AugmentRail
+              key={`${room.code}-${primaryRailSide}`}
               label={viewerSide ? "我的" : sideName(primaryRailSide)}
               items={augmentRailItems(primaryRailSide)}
               activeId={viewerSide === primaryRailSide ? activeAugmentId : null}
@@ -2886,20 +3663,12 @@ export default function GameApp({
               onActivate={viewerSide === primaryRailSide ? activateAugment : undefined}
             />
           ) : null}
-          {canPassExtraMove ? (
-            <div className="extra-move-pass" aria-label="追加行动待处理">
-              <div>
-                <strong>追加行动</strong>
-                <span>局面不利时可主动交回行动权</span>
-              </div>
-              <button
-                type="button"
-                disabled={busy}
-                onClick={() => void performAction({ type: "pass_extra_move" })}
-              >
-                放弃追加行动
-              </button>
-            </div>
+          {game.augment && game.phase !== "setup" ? (
+            <AugmentRuleStatusPanel
+              game={game}
+              side={primaryRailSide}
+              ownerLabel={viewerSide ? "我的" : sideName(primaryRailSide)}
+            />
           ) : null}
           {game.phase === "setup" && timeControlMinutes !== null ? (
             <div className="time-control-card">
@@ -3015,13 +3784,96 @@ export default function GameApp({
             <p className="last-move-summary">
               <strong>{activeReplayFrame ? "复盘" : room.viewer === "spectator" ? "上一手" : "对手上一步"}</strong>
               <span>
-                {sideName(highlightedMove.actor)} · {boardCoordinate(highlightedMove.from)}
-                {highlightedMove.kind === "exchange" ? " ⇄ " : " → "}
-                {boardCoordinate(highlightedMove.to)}
+                {highlightedMove.kind === "redeploy"
+                  ? `${sideName(highlightedMove.actor)} · 批量换阵 ${highlightedMove.relocations?.length ?? 0} 枚`
+                  : highlightedMove.kind === "sacrifice"
+                    ? `${sideName(highlightedMove.actor)} · 弃子侦察`
+                    : <>
+                        {sideName(highlightedMove.actor)} · {boardCoordinate(highlightedMove.from)}
+                        {highlightedMove.kind === "exchange" ? " ⇄ " : " → "}
+                        {boardCoordinate(highlightedMove.to)}
+                      </>}
               </span>
             </p>
           ) : activeReplayFrame ? (
             <p className="last-move-summary"><strong>复盘</strong><span>{replayHasGap ? "回放记录不完整" : replayIsPartial ? `从第 ${activeReplayFrame.moveNumber} 手开始` : "开局阵型"}</span></p>
+          ) : null}
+          {!activeReplayFrame && (activeAugmentId || canPassExtraMove || pendingMultiMove) ? (
+            <div className="board-command-strip" aria-live="polite" aria-label="军令行动控制">
+              {redeployDraft ? (
+                <>
+                  <div>
+                    <strong>暗度陈仓 · 换阵编辑</strong>
+                    <span>依次点选或拖动两枚棋子换位；已改变 {redeployChangeCount} 枚。</span>
+                  </div>
+                  <div className="board-command-actions">
+                    <button type="button" className="is-secondary" disabled={busy} onClick={cancelActiveAugment}>取消</button>
+                    <button type="button" disabled={busy || redeployChangeCount < 2} onClick={confirmRedeploy}>确认换阵</button>
+                  </div>
+                </>
+              ) : activeEffect?.kind === "sacrifice_reconnaissance" ? (
+                <>
+                  <div>
+                    <strong>苦肉计 · 选择祭品</strong>
+                    <span>
+                      {sacrificeCandidate
+                        ? `已选择${sacrificeCandidate.type ? PIECE_INFO[sacrificeCandidate.type].label : "己方棋子"}；确认后不可撤回。`
+                        : "选择一枚己方非军旗棋子；敌方前线侦察目标由服务器随机决定。"}
+                    </span>
+                  </div>
+                  <div className="board-command-actions">
+                    <button type="button" className="is-secondary" disabled={busy} onClick={cancelActiveAugment}>取消</button>
+                    <button type="button" disabled={busy || !sacrificeCandidateId} onClick={confirmSacrifice}>确认弃子</button>
+                  </div>
+                </>
+              ) : activeEffect ? (
+                <>
+                  <div>
+                    <strong>{getAugmentDefinition(activeAugmentId!).name}</strong>
+                    <span>
+                      {activeEffect.kind === "exchange" && activeEffect.mode === "cross_frontline"
+                        ? selectedPieceId
+                          ? "第二步：选择敌方前三排任意一枚存活棋子（包括军旗，不额外公开身份）。"
+                          : "第一步：选择己方前三排的一枚非军旗棋子。"
+                        : activeEffect.kind === "multi_move"
+                          ? "选择一枚可移动的己方非工兵棋子，随后连续移动。"
+                          : activeEffect.kind === "exchange"
+                            ? selectedPieceId ? "再选择另一枚可交换的己方棋子。" : "先选择一枚可交换的己方棋子。"
+                            : activeEffect.kind === "reconnaissance"
+                              ? "选择一枚高亮的未知敌子。"
+                              : "选择己方棋子，再选择高亮目标。"}
+                    </span>
+                  </div>
+                  <div className="board-command-actions">
+                    <button type="button" className="is-secondary" disabled={busy} onClick={cancelActiveAugment}>取消</button>
+                  </div>
+                </>
+              ) : canPassExtraMove || pendingMultiMove ? (
+                <div className="extra-move-pass" aria-label="追加行动待处理">
+                  <div>
+                    <strong>
+                      {game.augment?.multiMove?.pieceId ? "同棋追加行动" : "追加行动"}
+                    </strong>
+                    <span>
+                      {pendingMultiMove
+                        ? pendingMultiMove.canPass
+                          ? `还可移动 ${pendingMultiMove.movesRemaining} 次；也可主动交回行动权。`
+                          : "已锁定这枚棋子；先完成第一次移动，随后可继续或放弃。"
+                        : "局面不利时可主动交回行动权。"}
+                    </span>
+                  </div>
+                  {canPassExtraMove ? (
+                    <button
+                      type="button"
+                      disabled={busy}
+                      onClick={() => void performAction({ type: "pass_extra_move" })}
+                    >
+                      放弃追加行动
+                    </button>
+                  ) : null}
+                </div>
+              ) : null}
+            </div>
           ) : null}
           <Board
             game={displayedGame}
@@ -3030,10 +3882,13 @@ export default function GameApp({
             selected={activeReplayFrame ? null : selectedPosition}
             targets={activeReplayFrame ? new Set<string>() : targetKeys}
             flipped={orientationFlipped}
-            busy={busy || Boolean(liveMovementAnimation)}
+            busy={busy || Boolean(liveMovementAnimation) || augmentEffectAnimations.length > 0}
             readOnly={Boolean(activeReplayFrame)}
             movementHighlight={highlightedMove}
             movementAnimation={liveMovementAnimation}
+            augmentEffectAnimations={activeReplayFrame ? replayEffectAnimations : augmentEffectAnimations}
+            interactionLabel={activeReplayFrame ? null : boardInteractionLabel}
+            nonCombatTargets={Boolean(activeEffect)}
             onCell={handleCell}
             onPieceDragStart={beginBoardPieceDrag}
             onPieceDrop={handlePieceDrop}
@@ -3070,8 +3925,16 @@ export default function GameApp({
         <aside className="side-panel activity-panel">
           {game.augment ? (
             <AugmentRail
+              key={`${room.code}-${secondaryRailSide}`}
               label={sideName(secondaryRailSide)}
               items={augmentRailItems(secondaryRailSide)}
+            />
+          ) : null}
+          {game.augment && game.phase !== "setup" ? (
+            <AugmentRuleStatusPanel
+              game={game}
+              side={secondaryRailSide}
+              ownerLabel={sideName(secondaryRailSide)}
             />
           ) : null}
           <div className="invite-block">
@@ -3081,10 +3944,10 @@ export default function GameApp({
             <button className="button secondary compact" type="button" onClick={() => void copyLink("spectator")}>复制{room.spectatorPolicy === "full" ? "明牌" : "安全"}观战链接</button>
           </div>
           <div className="activity-block">
-            <div className="panel-title-row"><strong>战报</strong><span>{game.moveNumber} 手</span></div>
-            {lastEvents.length ? (
+            <div className="panel-title-row"><strong>{activeReplayFrame ? "复盘战报" : "战报"}</strong><span>{activeReplayFrame ? activeReplayFrame.moveNumber : game.moveNumber} 手</span></div>
+            {battleReportEvents.length ? (
               <ol className="event-list">
-                {lastEvents.map((event) => <li key={event.id}>{eventText(event)}</li>)}
+                {battleReportEvents.map((event) => <li key={event.id}>{eventText(event)}</li>)}
               </ol>
             ) : <p className="empty-copy">暂无</p>}
           </div>
@@ -3143,7 +4006,7 @@ export default function GameApp({
           </section>
           <section>
             <h3>布阵</h3>
-            <p>棋子只能放在本方兵站或大本营，行营必须留空。军旗只能在大本营；地雷只能在最后两排；炸弹不能在第一排。强化局中，相关布阵牌可按牌面写明的 1 或 2 枚额度提供例外。双方确认后随机决定先手。</p>
+            <p>默认布阵中，棋子只能放在本方兵站或大本营，行营必须留空；军旗须在大本营，地雷须在最后两排，炸弹不能在第一排。强化局以牌面为准：「偷梁换柱」可将军旗放在己方底线任意站点，「深呼吸」可将地雷放在己方后三排；其他布阵军令也按牌面额度覆盖默认限制。双方确认后随机决定先手。</p>
           </section>
           <section>
             <h3>强化选择</h3>
@@ -3183,7 +4046,7 @@ export default function GameApp({
           </section>
           <section>
             <h3>军旗暴露</h3>
-            <p>司令阵亡后，己方军旗公开。若被进攻的大本营内不是军旗，另一座大本营中的军旗也会公开。</p>
+            <p>司令阵亡后，己方军旗公开。若被进攻的大本营内不是军旗，另一座大本营中的军旗也会公开。强化局中，「濒死悟道」尚未解锁时，进攻军旗会消耗行动但被保护阻止，军旗同时永久公开；敌方占领另一座大本营后保护解除。</p>
           </section>
           <section>
             <h3>复盘</h3>

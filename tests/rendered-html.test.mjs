@@ -181,6 +181,6 @@ test("live moves use one-shot monochrome motion and battle overlays", async () =
   assert.match(game, /next\.moveNumber !== previous\.moveNumber \+ 1/);
   assert.match(component, /BATTLE_ANIMATION_MS = 640/);
   assert.match(component, /movementAnimation\.kind === "exchange" \|\| movementAnimation\.outcome === "move"[\s\S]*MOVEMENT_ANIMATION_MS[\s\S]*BATTLE_ANIMATION_MS/);
-  assert.match(component, /if \(!room \|\| busy \|\| movementAnimation \|\| !isPlayer\(room\.viewer\)\) return/);
-  assert.match(component, /busy=\{busy \|\| Boolean\(liveMovementAnimation\)\}/);
+  assert.match(component, /if \(!room \|\| busy \|\| movementAnimation \|\| augmentEffectAnimations\.length \|\| !isPlayer\(room\.viewer\)\) return/);
+  assert.match(component, /busy=\{busy \|\| Boolean\(liveMovementAnimation\) \|\| augmentEffectAnimations\.length > 0\}/);
 });

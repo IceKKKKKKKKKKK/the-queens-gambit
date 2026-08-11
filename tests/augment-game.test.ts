@@ -6,6 +6,8 @@ import {
   AUGMENT_CATALOG_VERSION,
   AUGMENT_IDS,
   AUGMENT_SUITS,
+  FIFTY_CARD_AUGMENT_CATALOG_VERSION,
+  FIFTY_CARD_AUGMENT_IDS,
   LEGACY_AUGMENT_CATALOG_VERSION,
   LEGACY_AUGMENT_IDS,
   beginSecondAugmentDraft,
@@ -25,6 +27,8 @@ import {
   AUGMENT_RULES_VERSION,
   AUGMENT_DRAFT_TIMEOUT_MS,
   CLASSIC_RULES_VERSION,
+  FIFTY_CARD_AUGMENT_RULES_VERSION,
+  FIFTY_CARD_THREEFOLD_REPETITION_RULES_FINGERPRINT,
   LEGACY_AUGMENT_RULES_VERSION,
   THREEFOLD_REPETITION_RULES_FINGERPRINT,
   THREEFOLD_REPETITION_THRESHOLD,
@@ -41,10 +45,15 @@ import {
   createSetupDraft,
   gameModeForState,
   getAugmentMoveViolation,
+  getLegalTargets,
+  getMoveViolation,
+  getProjectedAugmentExchangeViolation,
+  getProjectedMoveViolation,
   getProjectedAugmentReconTargets,
   getProjectedSetupSwapViolation,
   getSetupDraftPlacementViolation,
   isValidRepetitionTrackerForState,
+  isValidAugmentRuleStateForState,
   isAllowedSetupPosition,
   movementAnimationForTransition,
   projectGame,
@@ -62,7 +71,7 @@ import {
 } from "../lib/game.ts";
 
 const ALL_AUGMENT_IDS = AUGMENT_IDS;
-const NEW_AUGMENT_EXECUTION_LEDGER = {
+const FIFTY_CARD_AUGMENT_EXECUTION_LEDGER = {
   "spade-rail-dominion": "active_movement",
   "spade-serpentine-offensive": "active_movement",
   "spade-deep-strike": "active_movement",
@@ -93,6 +102,29 @@ const NEW_AUGMENT_EXECUTION_LEDGER = {
   "diamond-drill": "clock",
   "diamond-forward-pair": "setup",
   "diamond-deep-pair": "setup",
+} as const satisfies Partial<Record<AugmentId, string>>;
+
+const V3_AUGMENT_EXECUTION_LEDGER = {
+  "spade-last-headquarters": "protected_flag_action_and_unlock",
+  "spade-cherry-bomb": "combat_chain_and_flag_immunity",
+  "spade-lightning-doctrine": "rank_boost_exclusions_and_doom",
+  "spade-iron-fortress": "immobility_and_symmetric_ties",
+  "spade-volatile-mines": "hit_memory_and_alternate_removal",
+  "heart-battalion-ascent": "capture_promotion_and_classic_isolation",
+  "heart-heavenly-exchange": "cross_frontline_privacy_and_charges",
+  "heart-sacrifice-aura": "casualty_threshold_and_public_promotion",
+  "heart-steady-advance": "one_edge_two_move_continuation",
+  "heart-shadow-redeploy": "exact_home_permutation",
+  "club-division-sapper": "durable_mine_precedence",
+  "club-bombardier": "single_and_dual_fuse",
+  "club-surprise-double-move": "same_piece_continuation_and_cleanup",
+  "club-bitter-ruse": "sacrifice_recon_and_flag_rejection",
+  "club-screened-strike": "rail_and_turning_road_screen",
+  "diamond-camp-assault": "ordinary_and_augment_camp_attack",
+  "diamond-command-fusion": "general_history_and_commander_tie",
+  "diamond-deep-breath": "rear_three_setup_rows",
+  "diamond-hidden-flag": "back_row_flag_setup",
+  "diamond-engineer-mutiny": "attacking_and_defending_commander",
 } as const satisfies Partial<Record<AugmentId, string>>;
 
 const SAFE_WHITE_SELECTION: Record<AugmentSuit, AugmentId> = {
@@ -270,6 +302,57 @@ function setRevealedBlackLoadout(
   return state;
 }
 
+function syncV3RuleStateForTest(state: GameState) {
+  const ruleState = state.augment!.ruleState!;
+  ruleState.baseTypes = Object.fromEntries(
+    state.pieces.map((candidate) => [candidate.id, candidate.type]),
+  );
+  ruleState.publiclyRevealedPieceIds = [];
+  ruleState.promotedPublicIds = [];
+  ruleState.headquartersUnlocked = { black: false, white: false };
+  ruleState.commanderFallen = {
+    black: state.pieces.some(
+      (candidate) => candidate.side === "black" && candidate.type === "commander" && !candidate.alive,
+    ),
+    white: state.pieces.some(
+      (candidate) => candidate.side === "white" && candidate.type === "commander" && !candidate.alive,
+    ),
+  };
+  ruleState.generalFallen = {
+    black: state.pieces.some(
+      (candidate) => candidate.side === "black" && candidate.type === "general" && !candidate.alive,
+    ),
+    white: state.pieces.some(
+      (candidate) => candidate.side === "white" && candidate.type === "general" && !candidate.alive,
+    ),
+  };
+  ruleState.mineHits = {};
+  ruleState.bombSecondFuse = {
+    black: { pieceId: null, survivalUsed: false },
+    white: { pieceId: null, survivalUsed: false },
+  };
+  ruleState.casualties = {
+    black: state.pieces.filter((candidate) => candidate.side === "black" && !candidate.alive).length,
+    white: state.pieces.filter((candidate) => candidate.side === "white" && !candidate.alive).length,
+  };
+  ruleState.sacrificePromotionSteps = { black: 0, white: 0 };
+  ruleState.lightning = { black: null, white: null };
+  ruleState.multiMove = { black: null, white: null };
+  return state;
+}
+
+function v3PlayingState(input: Parameters<typeof playingState>[0]) {
+  const state = playingState(input);
+  setRevealedBlackLoadout(
+    state,
+    input.blackAugments ?? [],
+    input.whiteAugments ?? (input.blackAugments ?? []).map(
+      (id) => SAFE_WHITE_SELECTION[getAugmentDefinition(id).suit],
+    ),
+  );
+  return syncV3RuleStateForTest(state);
+}
+
 const REVERSIBLE_CYCLE = [
   ["black", { row: 3, col: 0 }, { row: 4, col: 0 }],
   ["white", { row: 8, col: 4 }, { row: 7, col: 4 }],
@@ -297,6 +380,9 @@ function repetitionReadyState(repetitionSalt = "deterministic-repetition-test-sa
     ["heart-rail-turn", "club-rail-passage"],
     ["heart-rail-turn", "club-rail-passage"],
   );
+  state.rulesVersion = FIFTY_CARD_AUGMENT_RULES_VERSION;
+  state.augment!.draft.catalogVersion = FIFTY_CARD_AUGMENT_CATALOG_VERSION;
+  delete state.augment!.ruleState;
   return state;
 }
 
@@ -380,7 +466,7 @@ function forceSecondRoundSpades(state: GameState) {
   return round;
 }
 
-test("the augment engine coverage ledger names every one of the fifty cards", () => {
+test("the augment engine catalog exposes every one of the seventy cards", () => {
   assert.deepEqual([...ALL_AUGMENT_IDS].sort(), AUGMENT_CATALOG.map((augment) => augment.id).sort());
 });
 
@@ -407,13 +493,18 @@ test("classic remains the default ruleset and rejects every augment-only action"
   assert.equal(upgraded.repetitionTracker?.currentOccurrences, 0);
 });
 
-test("the v2 repetition contract is versioned while legacy augment rooms stay executable", () => {
-  assert.equal(AUGMENT_RULES_VERSION, "augment-duel-dark-v2");
+test("the v2 repetition contract stays frozen while v3 is current and legacy rooms stay executable", () => {
+  assert.equal(FIFTY_CARD_AUGMENT_RULES_VERSION, "augment-duel-dark-v2");
+  assert.equal(AUGMENT_RULES_VERSION, "augment-duel-dark-v3");
   assert.equal(LEGACY_AUGMENT_RULES_VERSION, "augment-duel-dark-v1");
   assert.equal(THREEFOLD_REPETITION_THRESHOLD, 3);
   assert.equal(
-    THREEFOLD_REPETITION_RULES_FINGERPRINT,
+    FIFTY_CARD_THREEFOLD_REPETITION_RULES_FINGERPRINT,
     "augment-duel-dark-v2:threefold-3:strategic-sha256-v1",
+  );
+  assert.equal(
+    THREEFOLD_REPETITION_RULES_FINGERPRINT,
+    "augment-duel-dark-v3:threefold-3:strategic-sha256-v2",
   );
   const deterministic = createAugmentGame({ repetitionSalt: "paired-seed-17" });
   assert.equal(deterministic.repetitionTracker?.salt, "paired-seed-17");
@@ -436,7 +527,7 @@ test("the synchronous strategic digest matches standard SHA-256 over the audited
     revealedFlags: [false, false],
     movedPieceIds: ["black-shuttle", "white-shuttle"],
     augment: {
-      catalogVersion: AUGMENT_CATALOG_VERSION,
+      catalogVersion: FIFTY_CARD_AUGMENT_CATALOG_VERSION,
       loadouts: [
         ["heart-rail-turn", "club-rail-passage"],
         ["heart-rail-turn", "club-rail-passage"],
@@ -556,15 +647,6 @@ test("turn, pieces, moved identities, loadout order, triggers, reveals, flags, a
     ["flag reveal", (state) => { state.revealedFlags.white = true; }],
     ["permanent recon", (state) => { state.augment!.permanentReveals.black.push("white-shuttle"); }],
     ["temporary recon", (state) => { state.augment!.temporaryReveals.black.push("white-shuttle"); }],
-    [
-      "extra move",
-      (state) => {
-        state.augment!.extraMove.black = {
-          augmentId: "heart-initiative",
-          excludedPieceId: "black-shuttle",
-        };
-      },
-    ],
   ];
   for (const [label, mutate] of cases) {
     const changed = JSON.parse(JSON.stringify(baseline)) as GameState;
@@ -591,6 +673,15 @@ test("draft and pending reconnaissance phases never count an occurrence", () => 
   assert.equal(adjudicateThreefoldRepetition(recon), false);
   assert.equal(recon.repetitionTracker?.currentOccurrences, 0);
   assert.equal(projectGame(recon, "black").repetition?.active, false);
+
+  const continuation = repetitionReadyState();
+  continuation.augment!.extraMove.black = {
+    augmentId: "heart-initiative",
+    excludedPieceId: "black-shuttle",
+  };
+  assert.equal(adjudicateThreefoldRepetition(continuation), false);
+  assert.equal(continuation.repetitionTracker?.currentOccurrences, 0);
+  assert.equal(projectGame(continuation, "black").repetition?.active, false);
 });
 
 test("manual and timed-out second-round reveals establish the first count exactly once", () => {
@@ -710,7 +801,7 @@ test("active movement, exchange, and extra-pass actions all invoke the unified a
   adjudicateThreefoldRepetition(extra);
   const passed = applyPlayerAction(extra, "black", { type: "pass_extra_move" });
   assert.equal(passed.augment?.extraMove.black, null);
-  assert.equal(Object.keys(passed.repetitionTracker?.counts ?? {}).length, 2);
+  assert.equal(Object.keys(passed.repetitionTracker?.counts ?? {}).length, 1);
   assert.equal(passed.repetitionTracker?.currentOccurrences, 1);
 });
 
@@ -1226,6 +1317,53 @@ test("an unusable extra move interrupted by the second draft is skipped after re
   assert.equal(state.turn, "white");
   assert.equal(state.augment?.extraMove.black, null);
   assert.equal(state.finishReason, null);
+});
+
+test("second-round mandatory reconnaissance settles an unusable retained move before no-moves", () => {
+  let state = startWithOpeningAugment("heart-initiative", 1_000);
+  state.turn = "black";
+  state.firstTurn = "black";
+  state.moveNumber = 8;
+  state.pieces = [
+    piece("only-mover", "black", "platoon", 3, 0),
+    piece("black-flag", "black", "flag", 11, 1),
+    piece("black-mine", "black", "mine", 10, 0),
+    piece("white-mover", "white", "platoon", 8, 4),
+  ];
+  state.replay = null;
+  state.clock!.turnStartedAt = 1_000;
+  state = applyPlayerAction(
+    state,
+    "black",
+    { type: "move", from: { row: 3, col: 0 }, to: { row: 4, col: 0 } },
+    1_000,
+  );
+  assert.equal(state.phase, "augment_draft");
+  const round = forceSecondRoundSpades(state);
+  state = applyPlayerAction(state, "black", {
+    type: "augment_select",
+    augmentId: "spade-total-intelligence",
+  });
+  state = applyPlayerAction(state, "black", { type: "augment_lock" });
+  state = applyPlayerAction(state, "white", {
+    type: "augment_select",
+    augmentId: round.players.white.options[0],
+  });
+  state = applyPlayerAction(state, "white", { type: "augment_lock" }, 2_000);
+  assert.equal(state.turn, "black");
+  assert.equal(state.augment?.pendingRecon.black?.remaining, 1);
+  assert.ok(state.augment?.extraMove.black);
+
+  const resolved = applyPlayerAction(state, "black", {
+    type: "augment_recon",
+    augmentId: "spade-total-intelligence",
+    target: { row: 8, col: 4 },
+  }, 2_001);
+  assert.equal(resolved.phase, "playing");
+  assert.equal(resolved.turn, "white");
+  assert.equal(resolved.augment?.pendingRecon.black, null);
+  assert.equal(resolved.augment?.extraMove.black, null);
+  assert.equal(resolved.finishReason, null);
 });
 
 test("passing an extra move spends thinking time, reveals the decision, and does not create a replay move", () => {
@@ -3516,9 +3654,1013 @@ test("the thirty-card v2 execution ledger exercises server rules, events, replay
   assert.equal(stalledResult.finishReason, null);
 
   const legacyIds = new Set<AugmentId>(LEGACY_AUGMENT_IDS);
-  const expectedNewIds = AUGMENT_IDS.filter((id) => !legacyIds.has(id)).sort();
-  assert.deepEqual(Object.keys(NEW_AUGMENT_EXECUTION_LEDGER).sort(), expectedNewIds);
+  const expectedNewIds = FIFTY_CARD_AUGMENT_IDS.filter((id) => !legacyIds.has(id)).sort();
+  assert.deepEqual(Object.keys(FIFTY_CARD_AUGMENT_EXECUTION_LEDGER).sort(), expectedNewIds);
   assert.deepEqual([...executed].sort(), expectedNewIds);
+});
+
+test("v3 rank, mine, camp, fusion, and mutiny passives use original identities and preserve classic combat", () => {
+  const ascent = v3PlayingState({
+    blackAugments: ["heart-battalion-ascent"],
+    pieces: [
+      piece("battalion", "black", "battalion", 5, 0),
+      piece("victim", "white", "engineer", 5, 1),
+      piece("black-spare", "black", "platoon", 8, 0),
+      piece("white-spare", "white", "platoon", 8, 4),
+    ],
+  });
+  const ascended = applyPlayerAction(ascent, "black", {
+    type: "move",
+    from: { row: 5, col: 0 },
+    to: { row: 5, col: 1 },
+  });
+  assert.equal(ascended.pieces.find((candidate) => candidate.id === "battalion")?.type, "regiment");
+  assert.equal(ascended.augment?.usedBySide.black.includes("heart-battalion-ascent"), false);
+  assert.equal(ascended.augment?.triggerCounts.black["heart-battalion-ascent"], 1);
+  assert.equal(ascended.replay?.moves[0].effects?.[0]?.result, "piece_promoted");
+
+  const classicCapture = v3PlayingState({
+    pieces: [
+      piece("battalion", "black", "battalion", 5, 0),
+      piece("victim", "white", "engineer", 5, 1),
+      piece("white-spare", "white", "platoon", 8, 4),
+    ],
+  });
+  const unchanged = applyPlayerAction(classicCapture, "black", {
+    type: "move",
+    from: { row: 5, col: 0 },
+    to: { row: 5, col: 1 },
+  });
+  assert.equal(unchanged.pieces.find((candidate) => candidate.id === "battalion")?.type, "battalion");
+
+  const sapper = v3PlayingState({
+    blackAugments: ["club-division-sapper", "spade-grand-maneuver"],
+    whiteAugments: ["club-forced-march", "spade-volatile-mines"],
+    pieces: [
+      piece("division", "black", "division", 5, 0),
+      piece("mine", "white", "mine", 5, 1),
+      piece("white-spare", "white", "platoon", 8, 4),
+    ],
+  });
+  const defused = applyPlayerAction(sapper, "black", {
+    type: "move",
+    from: { row: 5, col: 0 },
+    to: { row: 5, col: 1 },
+  });
+  assert.equal(defused.pieces.find((candidate) => candidate.id === "division")?.alive, true);
+  assert.equal(defused.pieces.find((candidate) => candidate.id === "mine")?.alive, false);
+  assert.deepEqual(defused.augment?.ruleState?.mineHits, {});
+
+  const camp = v3PlayingState({
+    blackAugments: ["diamond-camp-assault"],
+    pieces: [
+      piece("brigade", "black", "brigade", 6, 0),
+      piece("camper", "white", "company", 7, 1),
+      piece("white-spare", "white", "platoon", 8, 4),
+    ],
+  });
+  assert.equal(getMoveViolation(camp, "black", { row: 6, col: 0 }, { row: 7, col: 1 }), null);
+  const noCampCard = v3PlayingState({
+    pieces: camp.pieces.map((candidate) => ({ ...candidate })),
+  });
+  assert.equal(
+    getMoveViolation(noCampCard, "black", { row: 6, col: 0 }, { row: 7, col: 1 }),
+    "CAMP_PROTECTED",
+  );
+  const activeCampAssault = v3PlayingState({
+    blackAugments: ["diamond-camp-assault", "spade-deep-strike"],
+    whiteAugments: ["diamond-camp-transfer", "spade-strategic-reserve"],
+    pieces: [
+      piece("brigade", "black", "brigade", 1, 1),
+      piece("camper", "white", "company", 4, 1),
+      piece("white-spare", "white", "platoon", 8, 4),
+    ],
+  });
+  assert.equal(
+    getAugmentMoveViolation(
+      activeCampAssault,
+      "black",
+      "spade-deep-strike",
+      { row: 1, col: 1 },
+      { row: 4, col: 1 },
+    ),
+    null,
+  );
+
+  const fusion = v3PlayingState({
+    turn: "white",
+    blackAugments: ["diamond-command-fusion"],
+    pieces: [
+      piece("black-general", "black", "general", 6, 0),
+      piece("black-commander", "black", "commander", 6, 1),
+      piece("white-commander", "white", "commander", 5, 0),
+      piece("white-spare", "white", "platoon", 8, 4),
+    ],
+  });
+  const generalFell = applyPlayerAction(fusion, "white", {
+    type: "move",
+    from: { row: 5, col: 0 },
+    to: { row: 6, col: 0 },
+  });
+  assert.equal(generalFell.augment?.ruleState?.generalFallen.black, true);
+  const fused = applyPlayerAction(generalFell, "black", {
+    type: "move",
+    from: { row: 6, col: 1 },
+    to: { row: 6, col: 0 },
+  });
+  assert.equal(fused.pieces.find((candidate) => candidate.id === "black-commander")?.alive, true);
+  assert.equal(fused.pieces.find((candidate) => candidate.id === "white-commander")?.alive, false);
+
+  const mutiny = v3PlayingState({
+    blackAugments: ["club-bitter-ruse", "diamond-engineer-mutiny"],
+    whiteAugments: ["club-forced-march", "diamond-camp-transfer"],
+    pieces: [
+      piece("black-commander", "black", "commander", 10, 0),
+      piece("engineer", "black", "engineer", 6, 0),
+      piece("white-commander", "white", "commander", 5, 0),
+      piece("white-spare", "white", "platoon", 8, 4),
+    ],
+  });
+  const sacrificedCommander = applyPlayerAction(mutiny, "black", {
+    type: "augment_sacrifice",
+    augmentId: "club-bitter-ruse",
+    pieceId: "black-commander",
+  });
+  assert.equal(sacrificedCommander.augment?.ruleState?.commanderFallen.black, true);
+  sacrificedCommander.turn = "black";
+  const rebelled = applyPlayerAction(sacrificedCommander, "black", {
+    type: "move",
+    from: { row: 6, col: 0 },
+    to: { row: 5, col: 0 },
+  });
+  assert.equal(rebelled.pieces.find((candidate) => candidate.id === "engineer")?.alive, true);
+  assert.equal(rebelled.pieces.find((candidate) => candidate.id === "white-commander")?.alive, false);
+
+  const defendingMutiny = v3PlayingState({
+    turn: "white",
+    blackAugments: ["diamond-engineer-mutiny"],
+    pieces: [
+      { ...piece("fallen-commander", "black", "commander", 10, 0), alive: false },
+      piece("engineer", "black", "engineer", 5, 0),
+      piece("enemy-commander", "white", "commander", 4, 0),
+      piece("white-spare", "white", "platoon", 8, 4),
+    ],
+  });
+  defendingMutiny.augment!.triggerCounts.black["diamond-engineer-mutiny"] = 1;
+  const mutinyHeld = applyPlayerAction(defendingMutiny, "white", {
+    type: "move",
+    from: { row: 4, col: 0 },
+    to: { row: 5, col: 0 },
+  });
+  assert.equal(mutinyHeld.pieces.find((candidate) => candidate.id === "engineer")?.alive, true);
+  assert.equal(
+    mutinyHeld.pieces.find((candidate) => candidate.id === "enemy-commander")?.alive,
+    false,
+  );
+});
+
+test("v3 fortress and dual bombardier resolve symmetric advantages without consuming passives", () => {
+  const fortress = v3PlayingState({
+    blackAugments: ["spade-iron-fortress"],
+    pieces: [
+      piece("commander", "black", "commander", 5, 4),
+      piece("equal-black", "black", "platoon", 6, 0),
+      piece("equal-white", "white", "platoon", 5, 0),
+      piece("white-spare", "white", "platoon", 8, 4),
+    ],
+  });
+  assert.equal(
+    getMoveViolation(fortress, "black", { row: 5, col: 4 }, { row: 5, col: 3 }),
+    "FORTRESS_COMMANDER_IMMOBILE",
+  );
+  const tieWon = applyPlayerAction(fortress, "black", {
+    type: "move",
+    from: { row: 6, col: 0 },
+    to: { row: 5, col: 0 },
+  });
+  assert.equal(tieWon.pieces.find((candidate) => candidate.id === "equal-black")?.alive, true);
+  assert.equal(tieWon.pieces.find((candidate) => candidate.id === "equal-white")?.alive, false);
+  assert.equal(tieWon.augment?.usedBySide.black.includes("spade-iron-fortress"), false);
+
+  const dualFuse = v3PlayingState({
+    blackAugments: ["club-bombardier"],
+    whiteAugments: ["club-bombardier"],
+    pieces: [
+      piece("black-bomb", "black", "bomb", 5, 0),
+      piece("white-bomb", "white", "bomb", 5, 1),
+      piece("black-spare", "black", "platoon", 8, 0),
+      piece("white-spare", "white", "platoon", 8, 4),
+    ],
+  });
+  const dualFuseBefore = projectGame(dualFuse, "black");
+  const standoff = applyPlayerAction(dualFuse, "black", {
+    type: "move",
+    from: { row: 5, col: 0 },
+    to: { row: 5, col: 1 },
+  });
+  assert.equal(standoff.pieces.find((candidate) => candidate.id === "black-bomb")?.alive, true);
+  assert.equal(standoff.pieces.find((candidate) => candidate.id === "white-bomb")?.alive, true);
+  assert.deepEqual(standoff.augment?.usedBySide.black, ["club-bombardier"]);
+  assert.deepEqual(standoff.augment?.usedBySide.white, ["club-bombardier"]);
+  assert.deepEqual(standoff.replay?.moves[0].augmentIds, ["club-bombardier", "club-bombardier"]);
+  assert.equal(standoff.replay?.moves[0].pieceChanges?.length, 2);
+  assert.equal(
+    movementAnimationForTransition(dualFuseBefore, projectGame(standoff, "black"))?.outcome,
+    "repelled",
+  );
+
+  const fuseIntoChain = v3PlayingState({
+    blackAugments: ["club-bombardier", "spade-grand-maneuver"],
+    whiteAugments: ["club-forced-march", "spade-cherry-bomb"],
+    pieces: [
+      piece("attacker", "black", "bomb", 5, 0),
+      piece("defender", "white", "bomb", 5, 1),
+      piece("chain", "white", "bomb", 5, 2),
+      piece("black-spare", "black", "platoon", 8, 0),
+      piece("white-spare", "white", "platoon", 8, 4),
+    ],
+  });
+  const fuseIntoChainBefore = projectGame(fuseIntoChain, "black");
+  const chainedWinner = applyPlayerAction(fuseIntoChain, "black", {
+    type: "move",
+    from: { row: 5, col: 0 },
+    to: { row: 5, col: 1 },
+  });
+  assert.equal(chainedWinner.replay?.moves[0].result, "attacker_survives");
+  assert.equal(chainedWinner.pieces.find((candidate) => candidate.id === "attacker")?.alive, false);
+  assert.equal(
+    movementAnimationForTransition(
+      fuseIntoChainBefore,
+      projectGame(chainedWinner, "black"),
+    )?.outcome,
+    "capture",
+  );
+});
+
+test("v3 objective and setup cards enforce the extra headquarters and rear-row deployment contracts", () => {
+  const objective = v3PlayingState({
+    blackAugments: ["spade-grand-maneuver"],
+    whiteAugments: ["spade-last-headquarters"],
+    pieces: [
+      piece("flag", "white", "flag", 11, 1),
+      piece("attacker", "black", "platoon", 10, 1),
+      piece("occupier", "black", "platoon", 10, 3),
+      piece("white-spare", "white", "platoon", 8, 4),
+    ],
+  });
+  const objectiveBefore = projectGame(objective, "black");
+  assert.equal(
+    getProjectedMoveViolation(
+      objectiveBefore,
+      "black",
+      { row: 10, col: 1 },
+      { row: 11, col: 1 },
+    ),
+    null,
+  );
+  const protectedFlag = applyPlayerAction(objective, "black", {
+    type: "move",
+    from: { row: 10, col: 1 },
+    to: { row: 11, col: 1 },
+  });
+  assert.equal(protectedFlag.phase, "playing");
+  assert.equal(protectedFlag.turn, "white");
+  assert.equal(protectedFlag.revealedFlags.white, true);
+  assert.equal(protectedFlag.events.at(-1)?.result, "flag_protected");
+  assert.equal(protectedFlag.replay?.moves[0].result, "flag_protected");
+  assert.equal(protectedFlag.pieces.find((candidate) => candidate.id === "flag")?.alive, true);
+  assert.equal(protectedFlag.pieces.find((candidate) => candidate.id === "attacker")?.row, 10);
+  assert.equal(
+    movementAnimationForTransition(objectiveBefore, projectGame(protectedFlag, "black"))?.outcome,
+    "repelled",
+  );
+  protectedFlag.turn = "black";
+  const unlocked = applyPlayerAction(protectedFlag, "black", {
+    type: "move",
+    from: { row: 10, col: 3 },
+    to: { row: 11, col: 3 },
+  });
+  assert.equal(unlocked.augment?.ruleState?.headquartersUnlocked.white, true);
+  assert.equal(unlocked.replay?.moves.at(-1)?.effects?.[0]?.result, "headquarters_unlocked");
+  unlocked.turn = "black";
+  const captured = applyPlayerAction(unlocked, "black", {
+    type: "move",
+    from: { row: 10, col: 1 },
+    to: { row: 11, col: 1 },
+  });
+  assert.equal(captured.finishReason, "flag");
+  assert.equal(captured.winner, "black");
+
+  const flexibleFlag = v3PlayingState({
+    blackAugments: ["spade-grand-maneuver", "diamond-camp-transfer"],
+    whiteAugments: ["spade-last-headquarters", "diamond-hidden-flag"],
+    pieces: [
+      piece("flag", "white", "flag", 0, 0),
+      piece("occupier", "black", "platoon", 1, 1),
+      piece("white-spare", "white", "platoon", 3, 4),
+    ],
+  });
+  const flexibleUnlocked = applyPlayerAction(flexibleFlag, "black", {
+    type: "move",
+    from: { row: 1, col: 1 },
+    to: { row: 0, col: 1 },
+  });
+  assert.equal(flexibleUnlocked.augment?.ruleState?.headquartersUnlocked.white, true);
+
+  assert.equal(isAllowedSetupPosition("mine", "black", { row: 9, col: 0 }), false);
+  assert.equal(
+    isAllowedSetupPosition("mine", "black", { row: 9, col: 0 }, ["diamond-deep-breath"]),
+    true,
+  );
+  assert.equal(isAllowedSetupPosition("flag", "black", { row: 11, col: 0 }), false);
+  assert.equal(
+    isAllowedSetupPosition("flag", "black", { row: 11, col: 0 }, ["diamond-hidden-flag"]),
+    true,
+  );
+  assert.equal(
+    isAllowedSetupPosition("flag", "black", { row: 10, col: 0 }, ["diamond-hidden-flag"]),
+    false,
+  );
+});
+
+test("v3 exchange and redeployment are complete-turn, exact-set permutations with authoritative replay", () => {
+  const exchange = v3PlayingState({
+    blackAugments: ["heart-heavenly-exchange"],
+    pieces: [
+      piece("own-front", "black", "platoon", 6, 0),
+      piece("enemy-front", "white", "company", 5, 0),
+      piece("enemy-back", "white", "company", 9, 0),
+      piece("white-spare", "white", "platoon", 8, 4),
+    ],
+  });
+  expectRuleError(
+    exchange,
+    "black",
+    {
+      type: "augment_exchange",
+      augmentId: "heart-heavenly-exchange",
+      from: { row: 6, col: 0 },
+      to: { row: 9, col: 0 },
+    },
+    "AUGMENT_PATH_INVALID",
+  );
+  const exchanged = applyPlayerAction(exchange, "black", {
+    type: "augment_exchange",
+    augmentId: "heart-heavenly-exchange",
+    from: { row: 6, col: 0 },
+    to: { row: 5, col: 0 },
+  });
+  assert.equal(exchanged.turn, "white");
+  assert.deepEqual(exchanged.movedPieceIds, ["enemy-front", "own-front"]);
+  assert.deepEqual(
+    exchanged.replay?.moves[0].relocations?.map((relocation) => relocation.pieceId),
+    ["own-front", "enemy-front"],
+  );
+
+  const hiddenFlagExchange = v3PlayingState({
+    blackAugments: ["heart-heavenly-exchange"],
+    pieces: [
+      piece("own-front", "black", "platoon", 6, 1),
+      piece("hidden-flag", "white", "flag", 5, 1),
+      piece("white-spare", "white", "platoon", 8, 4),
+    ],
+  });
+  const hiddenProjection = projectGame(hiddenFlagExchange, "black");
+  assert.equal(
+    hiddenProjection.pieces.find((candidate) => candidate.id === "hidden-flag")?.type,
+    null,
+  );
+  assert.equal(
+    getProjectedAugmentExchangeViolation(
+      hiddenProjection,
+      "black",
+      "heart-heavenly-exchange",
+      { row: 6, col: 1 },
+      { row: 5, col: 1 },
+    ),
+    null,
+  );
+  const flagExchanged = applyPlayerAction(hiddenFlagExchange, "black", {
+    type: "augment_exchange",
+    augmentId: "heart-heavenly-exchange",
+    from: { row: 6, col: 1 },
+    to: { row: 5, col: 1 },
+  });
+  assert.deepEqual(
+    flagExchanged.pieces.find((candidate) => candidate.id === "hidden-flag"),
+    { id: "hidden-flag", side: "white", type: "flag", row: 6, col: 1, alive: true },
+  );
+  assert.equal(projectGame(flagExchanged, "black").revealedFlags.white, false);
+
+  const redeploy = v3PlayingState({
+    blackAugments: ["heart-shadow-redeploy"],
+    pieces: [
+      piece("home-a", "black", "platoon", 8, 0),
+      piece("home-b", "black", "company", 8, 1),
+      piece("outside", "black", "brigade", 5, 0),
+      piece("flag", "black", "flag", 11, 1),
+      piece("white-spare", "white", "platoon", 3, 4),
+    ],
+  });
+  expectRuleError(
+    redeploy,
+    "black",
+    {
+      type: "augment_redeploy",
+      augmentId: "heart-shadow-redeploy",
+      placements: [{ pieceId: "home-a", row: 8, col: 1 }],
+    },
+    "INCOMPLETE_REDEPLOYMENT",
+  );
+  const rearranged = applyPlayerAction(redeploy, "black", {
+    type: "augment_redeploy",
+    augmentId: "heart-shadow-redeploy",
+    placements: [
+      { pieceId: "home-a", row: 8, col: 1 },
+      { pieceId: "home-b", row: 8, col: 0 },
+    ],
+  });
+  assert.deepEqual(rearranged.replay?.moves[0].relocations?.map((entry) => entry.pieceId), ["home-a", "home-b"]);
+  assert.deepEqual(rearranged.events.at(-1)?.pieceIds, ["home-a", "home-b"]);
+  assert.deepEqual(
+    rearranged.pieces.find((candidate) => candidate.id === "outside"),
+    redeploy.pieces.find((candidate) => candidate.id === "outside"),
+  );
+});
+
+test("v3 bitter ruse feeds casualty aura, reveals only allowed information, and rejects flag sacrifice", () => {
+  const dead = [0, 1, 2].map((index) => ({
+    ...piece(`dead-${index}`, "black", "company", 9, index),
+    alive: false,
+  }));
+  const state = v3PlayingState({
+    blackAugments: ["heart-sacrifice-aura", "club-bitter-ruse"],
+    whiteAugments: ["heart-rail-turn", "club-forced-march"],
+    pieces: [
+      ...dead,
+      piece("platoon", "black", "platoon", 8, 0),
+      piece("offering", "black", "company", 8, 1),
+      piece("flag", "black", "flag", 11, 1),
+      piece("front-one", "white", "company", 5, 0),
+      piece("front-two", "white", "engineer", 4, 0),
+      piece("white-spare", "white", "platoon", 8, 4),
+    ],
+  });
+  expectRuleError(
+    state,
+    "black",
+    { type: "augment_sacrifice", augmentId: "club-bitter-ruse", pieceId: "flag" },
+    "AUGMENT_PIECE_INELIGIBLE",
+  );
+  const resolved = applyPlayerAction(state, "black", {
+    type: "augment_sacrifice",
+    augmentId: "club-bitter-ruse",
+    pieceId: "offering",
+  });
+  assert.equal(resolved.pieces.find((candidate) => candidate.id === "platoon")?.type, "company");
+  assert.equal(resolved.augment?.ruleState?.casualties.black, 4);
+  assert.equal(resolved.augment?.ruleState?.sacrificePromotionSteps.black, 1);
+  assert.equal(resolved.augment?.permanentReveals.black.length, 2);
+  assert.deepEqual(resolved.events.at(-1)?.pieceIds, ["offering"]);
+  assert.equal(resolved.augment?.usedBySide.black.includes("heart-sacrifice-aura"), false);
+  assert.equal(resolved.replay?.moves[0].effects?.some((effect) => effect.result === "piece_promoted"), true);
+});
+
+test("v3 volatile mines and cherry bombs resolve hit memory, public pulses, and deduplicated chain deaths", () => {
+  const durable = v3PlayingState({
+    blackAugments: ["spade-grand-maneuver"],
+    whiteAugments: ["spade-volatile-mines"],
+    pieces: [
+      piece("first", "black", "company", 5, 0),
+      piece("second", "black", "company", 5, 2),
+      piece("bomb", "black", "bomb", 4, 1),
+      piece("mine", "white", "mine", 5, 1),
+      piece("white-spare", "white", "platoon", 8, 4),
+    ],
+  });
+  const firstHit = applyPlayerAction(durable, "black", {
+    type: "move",
+    from: { row: 5, col: 0 },
+    to: { row: 5, col: 1 },
+  });
+  assert.equal(firstHit.pieces.find((candidate) => candidate.id === "first")?.alive, false);
+  assert.equal(firstHit.pieces.find((candidate) => candidate.id === "mine")?.alive, true);
+  assert.equal(firstHit.augment?.ruleState?.mineHits.mine, 1);
+  assert.equal(firstHit.replay?.moves[0].effects?.[0]?.result, "mine_hit");
+  assert.equal(projectGame(firstHit, "black").pieces.find((candidate) => candidate.id === "mine")?.mineHits, 1);
+  firstHit.turn = "black";
+  const bombClearedHitMemory = applyPlayerAction(firstHit, "black", {
+    type: "move",
+    from: { row: 4, col: 1 },
+    to: { row: 5, col: 1 },
+  });
+  assert.equal(bombClearedHitMemory.pieces.find((candidate) => candidate.id === "mine")?.alive, false);
+  assert.deepEqual(bombClearedHitMemory.augment?.ruleState?.mineHits, {});
+  firstHit.turn = "black";
+  const secondHit = applyPlayerAction(firstHit, "black", {
+    type: "move",
+    from: { row: 5, col: 2 },
+    to: { row: 5, col: 1 },
+  });
+  assert.equal(secondHit.pieces.find((candidate) => candidate.id === "second")?.alive, false);
+  assert.equal(secondHit.pieces.find((candidate) => candidate.id === "mine")?.alive, false);
+  assert.deepEqual(secondHit.augment?.ruleState?.mineHits, {});
+  assert.equal(secondHit.augment?.usedBySide.white.includes("spade-volatile-mines"), false);
+  assert.equal(secondHit.augment?.triggerCounts.white["spade-volatile-mines"], 2);
+
+  const normalMine = v3PlayingState({
+    pieces: [
+      piece("engineer", "black", "engineer", 5, 0),
+      piece("mine", "white", "mine", 5, 1),
+      piece("white-spare", "white", "platoon", 8, 4),
+    ],
+  });
+  const normallyDefused = applyPlayerAction(normalMine, "black", {
+    type: "move",
+    from: { row: 5, col: 0 },
+    to: { row: 5, col: 1 },
+  });
+  assert.equal(normallyDefused.pieces.find((candidate) => candidate.id === "engineer")?.alive, true);
+
+  const cherry = v3PlayingState({
+    turn: "white",
+    blackAugments: ["spade-cherry-bomb"],
+    pieces: [
+      piece("first-bomb", "black", "bomb", 5, 1),
+      piece("second-bomb", "black", "bomb", 5, 2),
+      piece("victim", "white", "company", 5, 3),
+      piece("immune-flag", "black", "flag", 4, 2),
+      piece("attacker", "white", "division", 5, 0),
+      piece("black-spare", "black", "platoon", 8, 0),
+    ],
+  });
+  const exploded = applyPlayerAction(cherry, "white", {
+    type: "move",
+    from: { row: 5, col: 0 },
+    to: { row: 5, col: 1 },
+  });
+  assert.equal(exploded.pieces.find((candidate) => candidate.id === "second-bomb")?.alive, false);
+  assert.equal(exploded.pieces.find((candidate) => candidate.id === "victim")?.alive, false);
+  assert.equal(exploded.pieces.find((candidate) => candidate.id === "immune-flag")?.alive, true);
+  const chain = exploded.replay?.moves[0].effects?.find((effect) => effect.result === "chain_explosion");
+  assert.deepEqual(chain?.pieceIds, ["second-bomb", "victim"]);
+  assert.equal(new Set(chain?.pieceIds).size, chain?.pieceIds.length);
+  assert.equal(buildReplayFrames(exploded.replay).at(-1)?.pieces.find((candidate) => candidate.id === "victim")?.alive, false);
+
+  const sacrificedMine = v3PlayingState({
+    turn: "black",
+    blackAugments: ["spade-grand-maneuver", "club-forced-march"],
+    whiteAugments: ["spade-volatile-mines", "club-bitter-ruse"],
+    pieces: [
+      piece("attacker", "black", "company", 5, 0),
+      piece("mine", "white", "mine", 5, 1),
+      piece("white-spare", "white", "platoon", 8, 4),
+    ],
+  });
+  const mineHitBeforeSacrifice = applyPlayerAction(sacrificedMine, "black", {
+    type: "move",
+    from: { row: 5, col: 0 },
+    to: { row: 5, col: 1 },
+  });
+  const mineSacrificed = applyPlayerAction(mineHitBeforeSacrifice, "white", {
+    type: "augment_sacrifice",
+    augmentId: "club-bitter-ruse",
+    pieceId: "mine",
+  });
+  assert.deepEqual(mineSacrificed.augment?.ruleState?.mineHits, {});
+
+  const chainedMine = v3PlayingState({
+    blackAugments: ["spade-grand-maneuver", "spade-strategic-reserve"],
+    whiteAugments: ["spade-volatile-mines", "spade-cherry-bomb"],
+    pieces: [
+      piece("bomb-attacker", "black", "company", 5, 0),
+      piece("mine-attacker", "black", "company", 5, 3),
+      piece("bomb", "white", "bomb", 5, 1),
+      piece("mine", "white", "mine", 5, 2),
+      piece("white-spare", "white", "platoon", 8, 4),
+    ],
+  });
+  const chainedMineHit = applyPlayerAction(chainedMine, "black", {
+    type: "move",
+    from: { row: 5, col: 3 },
+    to: { row: 5, col: 2 },
+  });
+  chainedMineHit.turn = "black";
+  const mineRemovedByChain = applyPlayerAction(chainedMineHit, "black", {
+    type: "move",
+    from: { row: 5, col: 0 },
+    to: { row: 5, col: 1 },
+  });
+  assert.equal(mineRemovedByChain.pieces.find((candidate) => candidate.id === "mine")?.alive, false);
+  assert.deepEqual(mineRemovedByChain.augment?.ruleState?.mineHits, {});
+});
+
+test("v3 screened strike supports one distant rail screen and steady advance remains the stricter combination", () => {
+  const screened = v3PlayingState({
+    blackAugments: ["club-screened-strike"],
+    pieces: [
+      piece("division", "black", "division", 5, 0),
+      piece("screen", "black", "platoon", 5, 2),
+      piece("target", "white", "company", 5, 4),
+      piece("white-spare", "white", "platoon", 8, 4),
+    ],
+  });
+  assert.equal(getMoveViolation(screened, "black", { row: 5, col: 0 }, { row: 5, col: 4 }), null);
+  const struck = applyPlayerAction(screened, "black", {
+    type: "move",
+    from: { row: 5, col: 0 },
+    to: { row: 5, col: 4 },
+  });
+  assert.equal(struck.pieces.find((candidate) => candidate.id === "target")?.alive, false);
+  assert.equal(struck.pieces.find((candidate) => candidate.id === "screen")?.alive, true);
+
+  const turningRoad = v3PlayingState({
+    blackAugments: ["club-screened-strike"],
+    pieces: [
+      piece("division", "black", "division", 0, 0),
+      piece("screen", "black", "platoon", 1, 0),
+      piece("target", "white", "company", 1, 1),
+      piece("white-spare", "white", "platoon", 8, 4),
+    ],
+  });
+  assert.equal(
+    getMoveViolation(turningRoad, "black", { row: 0, col: 0 }, { row: 1, col: 1 }),
+    null,
+  );
+  const turnedStrike = applyPlayerAction(turningRoad, "black", {
+    type: "move",
+    from: { row: 0, col: 0 },
+    to: { row: 1, col: 1 },
+  });
+  assert.equal(turnedStrike.pieces.find((candidate) => candidate.id === "target")?.alive, false);
+
+  const protectedCamp = v3PlayingState({
+    blackAugments: ["club-screened-strike", "spade-grand-maneuver"],
+    whiteAugments: ["club-forced-march", "spade-strategic-reserve"],
+    pieces: [
+      piece("division", "black", "division", 3, 0),
+      piece("screen", "black", "platoon", 3, 1),
+      piece("camper", "white", "company", 2, 1),
+      piece("white-spare", "white", "platoon", 8, 4),
+    ],
+  });
+  assert.equal(
+    getMoveViolation(protectedCamp, "black", { row: 3, col: 0 }, { row: 2, col: 1 }),
+    "CAMP_PROTECTED",
+  );
+  assert.equal(
+    getAugmentMoveViolation(
+      protectedCamp,
+      "black",
+      "spade-grand-maneuver",
+      { row: 3, col: 0 },
+      { row: 2, col: 1 },
+    ),
+    "CAMP_PROTECTED",
+  );
+
+  const roadAlternative = v3PlayingState({
+    blackAugments: ["club-screened-strike"],
+    pieces: [
+      piece("division", "black", "division", 1, 0),
+      piece("screen", "black", "platoon", 2, 1),
+      piece("target", "white", "company", 1, 2),
+      piece("white-spare", "white", "platoon", 8, 4),
+    ],
+  });
+  assert.equal(
+    getMoveViolation(roadAlternative, "black", { row: 1, col: 0 }, { row: 1, col: 2 }),
+    null,
+  );
+
+  const noScreen = v3PlayingState({
+    blackAugments: ["club-screened-strike"],
+    pieces: screened.pieces.filter((candidate) => candidate.id !== "screen").map((candidate) => ({ ...candidate })),
+  });
+  assert.equal(
+    getMoveViolation(noScreen, "black", { row: 5, col: 0 }, { row: 5, col: 4 }),
+    "SCREENED_ATTACK_REQUIRED",
+  );
+  const twoScreens = v3PlayingState({
+    blackAugments: ["club-screened-strike"],
+    pieces: [
+      piece("division", "black", "division", 5, 0),
+      piece("screen-one", "black", "platoon", 5, 1),
+      piece("screen-two", "black", "platoon", 5, 2),
+      piece("target", "white", "company", 5, 4),
+      piece("white-spare", "white", "platoon", 8, 4),
+    ],
+  });
+  assert.equal(
+    getMoveViolation(twoScreens, "black", { row: 5, col: 0 }, { row: 5, col: 4 }),
+    "SCREENED_ATTACK_REQUIRED",
+  );
+  const strict = v3PlayingState({
+    blackAugments: ["club-screened-strike", "heart-steady-advance"],
+    whiteAugments: ["club-forced-march", "heart-rail-turn"],
+    pieces: screened.pieces.map((candidate) => ({ ...candidate })),
+  });
+  assert.equal(
+    getMoveViolation(strict, "black", { row: 5, col: 0 }, { row: 5, col: 4 }),
+    "STEADY_ADVANCE_ONE_EDGE",
+  );
+
+  const activeBypass = v3PlayingState({
+    blackAugments: ["club-screened-strike", "spade-grand-maneuver"],
+    whiteAugments: ["club-forced-march", "spade-strategic-reserve"],
+    pieces: screened.pieces.map((candidate) => ({ ...candidate })),
+  });
+  assert.equal(
+    getAugmentMoveViolation(
+      activeBypass,
+      "black",
+      "spade-grand-maneuver",
+      { row: 5, col: 0 },
+      { row: 5, col: 4 },
+    ),
+    "SCREENED_ATTACK_REQUIRED",
+  );
+});
+
+test("v3 steady and surprise multi-moves retain one turn, enforce scope, and clear every terminal continuation", () => {
+  const steady = v3PlayingState({
+    blackAugments: ["heart-steady-advance"],
+    pieces: [
+      piece("first", "black", "platoon", 5, 0),
+      piece("second", "black", "company", 5, 2),
+      piece("white-spare", "white", "platoon", 8, 4),
+    ],
+  });
+  assert.equal(
+    getMoveViolation(steady, "black", { row: 5, col: 0 }, { row: 5, col: 4 }),
+    "STEADY_ADVANCE_ONE_EDGE",
+  );
+  const firstStep = applyPlayerAction(steady, "black", {
+    type: "move",
+    from: { row: 5, col: 0 },
+    to: { row: 4, col: 0 },
+  });
+  assert.equal(firstStep.turn, "black");
+  assert.equal(firstStep.augment?.ruleState?.multiMove.black?.movesRemaining, 1);
+  assert.equal(firstStep.augment?.triggerCounts.black["heart-steady-advance"], 1);
+  assert.equal(firstStep.augment?.usedBySide.black.includes("heart-steady-advance"), false);
+  assert.deepEqual(firstStep.replay?.moves.at(-1)?.augmentIds, ["heart-steady-advance"]);
+  assert.deepEqual(firstStep.events.at(-1)?.augmentIds, ["heart-steady-advance"]);
+  assert.equal(
+    firstStep.events.some(
+      (event) =>
+        event.result === "augment_used" && event.augmentId === "heart-steady-advance",
+    ),
+    false,
+  );
+  const secondStep = applyPlayerAction(firstStep, "black", {
+    type: "move",
+    from: { row: 5, col: 2 },
+    to: { row: 5, col: 3 },
+  });
+  assert.equal(secondStep.turn, "white");
+  assert.equal(secondStep.augment?.ruleState?.multiMove.black, null);
+
+  const surprise = v3PlayingState({
+    blackAugments: ["club-surprise-double-move"],
+    pieces: [
+      piece("fixed", "black", "platoon", 5, 0),
+      piece("other", "black", "company", 5, 2),
+      piece("white-spare", "white", "platoon", 8, 4),
+    ],
+  });
+  const begun = applyPlayerAction(surprise, "black", {
+    type: "augment_begin_multi_move",
+    augmentId: "club-surprise-double-move",
+    pieceId: "fixed",
+  });
+  assert.deepEqual(begun.augment?.usedBySide.black, ["club-surprise-double-move"]);
+  expectRuleError(
+    begun,
+    "black",
+    { type: "move", from: { row: 5, col: 2 }, to: { row: 5, col: 3 } },
+    "MULTI_MOVE_SAME_PIECE_REQUIRED",
+  );
+  const surpriseFirst = applyPlayerAction(begun, "black", {
+    type: "move",
+    from: { row: 5, col: 0 },
+    to: { row: 4, col: 0 },
+  });
+  const passed = applyPlayerAction(surpriseFirst, "black", { type: "pass_extra_move" });
+  assert.equal(passed.turn, "white");
+  assert.equal(passed.augment?.ruleState?.multiMove.black, null);
+
+  const flagFinish = v3PlayingState({
+    blackAugments: ["club-surprise-double-move"],
+    pieces: [
+      piece("fixed", "black", "platoon", 5, 0),
+      piece("flag", "white", "flag", 5, 1),
+      piece("white-spare", "white", "platoon", 8, 4),
+    ],
+  });
+  const flagBegun = applyPlayerAction(flagFinish, "black", {
+    type: "augment_begin_multi_move",
+    augmentId: "club-surprise-double-move",
+    pieceId: "fixed",
+  });
+  const won = applyPlayerAction(flagBegun, "black", {
+    type: "move",
+    from: { row: 5, col: 0 },
+    to: { row: 5, col: 1 },
+  });
+  assert.equal(won.phase, "finished");
+  assert.equal(won.augment?.ruleState?.multiMove.black, null);
+
+  const resigned = applyPlayerAction(begun, "black", { type: "resign" });
+  assert.equal(resigned.augment?.ruleState?.multiMove.black, null);
+  assert.equal(resigned.augment?.extraMove.black, null);
+
+  const timeoutBase = v3PlayingState({
+    blackAugments: ["club-surprise-double-move"],
+    clock: { initialMs: 1, remainingMs: { black: 1, white: 1 }, turnStartedAt: 100 },
+    pieces: [
+      piece("fixed", "black", "platoon", 5, 0),
+      piece("white-spare", "white", "platoon", 8, 4),
+    ],
+  });
+  const timeoutBegun = applyPlayerAction(timeoutBase, "black", {
+    type: "augment_begin_multi_move",
+    augmentId: "club-surprise-double-move",
+    pieceId: "fixed",
+  }, 100);
+  const timedOut = applyPlayerAction(timeoutBegun, "black", {
+    type: "move",
+    from: { row: 5, col: 0 },
+    to: { row: 4, col: 0 },
+  }, 102);
+  assert.equal(timedOut.finishReason, "timeout");
+  assert.equal(timedOut.augment?.ruleState?.multiMove.black, null);
+});
+
+test("v3 lightning boosts only eligible combat ranks and destroys its own flag after the final full turn", () => {
+  const started = startWithOpeningAugment("spade-lightning-doctrine");
+  const ruleState = started.augment!.ruleState!;
+  const boostedCompany = started.pieces.find(
+    (candidate) => candidate.side === "black" && ruleState.baseTypes[candidate.id] === "company",
+  )!;
+  const excludedEngineer = started.pieces.find(
+    (candidate) => candidate.side === "black" && ruleState.baseTypes[candidate.id] === "engineer",
+  )!;
+  assert.equal(boostedCompany.type, "battalion");
+  assert.equal(excludedEngineer.type, "engineer");
+  assert.equal(ruleState.lightning.black?.remainingOwnTurns, 12);
+  assert.equal(started.augment?.usedBySide.black.includes("spade-lightning-doctrine"), false);
+
+  const doom = v3PlayingState({
+    blackAugments: ["spade-lightning-doctrine"],
+    pieces: [
+      piece("mover", "black", "platoon", 5, 0),
+      piece("flag", "black", "flag", 11, 1),
+      piece("white-spare", "white", "platoon", 8, 4),
+    ],
+  });
+  doom.augment!.ruleState!.lightning.black = {
+    augmentId: "spade-lightning-doctrine",
+    remainingOwnTurns: 1,
+  };
+  doom.augment!.triggerCounts.black["spade-lightning-doctrine"] = 1;
+  const expired = applyPlayerAction(doom, "black", {
+    type: "move",
+    from: { row: 5, col: 0 },
+    to: { row: 4, col: 0 },
+  });
+  assert.equal(expired.phase, "finished");
+  assert.equal(expired.winner, "white");
+  assert.equal(expired.pieces.find((candidate) => candidate.id === "flag")?.alive, false);
+  assert.equal(expired.replay?.moves[0].effects?.some((effect) => effect.result === "flag_destroyed"), true);
+});
+
+test("v3 persisted rule runtime accepts natural ranks and continuations while rejecting corrupted state", () => {
+  const baseline = startWithOpeningAugment("spade-grand-maneuver");
+  assert.equal(isValidAugmentRuleStateForState(baseline), true);
+  assert.equal(
+    isValidAugmentRuleStateForState(JSON.parse(JSON.stringify(baseline)) as GameState),
+    true,
+  );
+
+  const tamperedRank = JSON.parse(JSON.stringify(baseline)) as GameState;
+  const battalion = tamperedRank.pieces.find(
+    (candidate) =>
+      tamperedRank.augment!.ruleState!.baseTypes[candidate.id] === "battalion",
+  )!;
+  battalion.type = "commander";
+  assert.equal(isValidAugmentRuleStateForState(tamperedRank), false);
+
+  const legitimateAscent = startWithOpeningAugment("heart-battalion-ascent");
+  const promotedBattalion = legitimateAscent.pieces.find(
+    (candidate) =>
+      candidate.side === "black" &&
+      legitimateAscent.augment!.ruleState!.baseTypes[candidate.id] === "battalion",
+  )!;
+  promotedBattalion.type = "regiment";
+  legitimateAscent.augment!.ruleState!.promotedPublicIds.push(promotedBattalion.id);
+  legitimateAscent.augment!.triggerCounts.black["heart-battalion-ascent"] = 1;
+  assert.equal(isValidAugmentRuleStateForState(legitimateAscent), true);
+
+  const lightning = startWithOpeningAugment("spade-lightning-doctrine");
+  assert.equal(isValidAugmentRuleStateForState(lightning), true);
+
+  const durableRecovery = startWithOpeningAugment("spade-volatile-mines");
+  const durableRuleState = durableRecovery.augment!.ruleState!;
+  const durableMine = durableRecovery.pieces.find(
+    (candidate) =>
+      candidate.side === "black" && durableRuleState.baseTypes[candidate.id] === "mine",
+  )!;
+  const mineAttacker = durableRecovery.pieces.find(
+    (candidate) =>
+      candidate.side === "white" && durableRuleState.baseTypes[candidate.id] === "company",
+  )!;
+  const bombAttacker = durableRecovery.pieces.find(
+    (candidate) =>
+      candidate.side === "white" && durableRuleState.baseTypes[candidate.id] === "bomb",
+  )!;
+  const placeBySwap = (selected: Piece, target: Position) => {
+    const occupant = durableRecovery.pieces.find(
+      (candidate) => candidate.alive && candidate.id !== selected.id && candidate.row === target.row && candidate.col === target.col,
+    );
+    if (occupant) swapPositions(selected, occupant);
+    else Object.assign(selected, target);
+  };
+  placeBySwap(durableMine, { row: 5, col: 1 });
+  placeBySwap(mineAttacker, { row: 5, col: 0 });
+  placeBySwap(bombAttacker, { row: 4, col: 1 });
+  durableRecovery.turn = "white";
+  durableRecovery.clock!.turnStartedAt = 1_000;
+  const durableHit = applyPlayerAction(durableRecovery, "white", {
+    type: "move",
+    from: { row: 5, col: 0 },
+    to: { row: 5, col: 1 },
+  }, 1_001);
+  durableHit.turn = "white";
+  durableHit.clock!.turnStartedAt = 1_001;
+  const durableRemoved = applyPlayerAction(durableHit, "white", {
+    type: "move",
+    from: { row: 4, col: 1 },
+    to: { row: 5, col: 1 },
+  }, 1_002);
+  assert.deepEqual(durableRemoved.augment?.ruleState?.mineHits, {});
+  assert.equal(isValidAugmentRuleStateForState(durableRemoved), true);
+  assert.equal(
+    isValidAugmentRuleStateForState(JSON.parse(JSON.stringify(durableRemoved)) as GameState),
+    true,
+  );
+
+  const validRecon = startWithOpeningAugment("heart-targeted-recon");
+  assert.equal(validRecon.augment?.pendingRecon.black?.remaining, 1);
+  assert.equal(isValidAugmentRuleStateForState(validRecon), true);
+  const badPendingRecon = JSON.parse(JSON.stringify(validRecon)) as GameState;
+  badPendingRecon.augment!.pendingRecon.black = {
+    augmentId: "not-real" as AugmentId,
+    remaining: 999,
+  };
+  assert.equal(isValidAugmentRuleStateForState(badPendingRecon), false);
+
+  const badReveal = JSON.parse(JSON.stringify(baseline)) as GameState;
+  badReveal.augment!.permanentReveals.black.push(
+    badReveal.pieces.find((candidate) => candidate.side === "black")!.id,
+  );
+  assert.equal(isValidAugmentRuleStateForState(badReveal), false);
+  const duplicateReveal = JSON.parse(JSON.stringify(baseline)) as GameState;
+  const whiteId = duplicateReveal.pieces.find((candidate) => candidate.side === "white")!.id;
+  duplicateReveal.augment!.temporaryReveals.black.push(whiteId, whiteId);
+  assert.equal(isValidAugmentRuleStateForState(duplicateReveal), false);
+
+  const multiCharge = startWithOpeningAugment("spade-command-chain");
+  multiCharge.turn = "black";
+  const quietMove = multiCharge.pieces
+    .filter((candidate) => candidate.side === "black" && candidate.alive)
+    .flatMap((candidate) =>
+      getLegalTargets(multiCharge, "black", candidate)
+        .filter((target) => !multiCharge.pieces.some((other) => other.alive && other.row === target.row && other.col === target.col))
+        .map((target) => ({ candidate, target })),
+    )[0]!;
+  const continuation = applyPlayerAction(multiCharge, "black", {
+    type: "move",
+    from: { row: quietMove.candidate.row, col: quietMove.candidate.col },
+    to: quietMove.target,
+  }, 1_001);
+  assert.equal(continuation.augment?.extraMove.black?.augmentId, "spade-command-chain");
+  assert.equal(continuation.augment?.triggerCounts.black["spade-command-chain"], 1);
+  assert.equal(isValidAugmentRuleStateForState(continuation), true);
+  const finished = applyPlayerAction(continuation, "black", { type: "resign" }, 1_002);
+  assert.equal(isValidAugmentRuleStateForState(finished), true);
+  const corruptFinished = JSON.parse(JSON.stringify(finished)) as GameState;
+  corruptFinished.augment!.extraMove.black = {
+    augmentId: "spade-command-chain",
+    excludedPieceId: quietMove.candidate.id,
+  };
+  assert.equal(isValidAugmentRuleStateForState(corruptFinished), false);
+});
+
+test("the v3 execution ledger is backed by the twenty rule-specific positive and rejection suites", () => {
+  const frozenFifty = new Set<AugmentId>(FIFTY_CARD_AUGMENT_IDS);
+  const expectedV3Ids = AUGMENT_IDS.filter((id) => !frozenFifty.has(id)).sort();
+  assert.deepEqual(Object.keys(V3_AUGMENT_EXECUTION_LEDGER).sort(), expectedV3Ids);
 });
 
 test("one million seeded drafts have reproducible suit and card exposure fairness", { timeout: 180_000 }, (t) => {

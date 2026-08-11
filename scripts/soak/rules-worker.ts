@@ -2,10 +2,8 @@ import { fileURLToPath } from "node:url";
 import { resolve } from "node:path";
 
 import {
-  AUGMENT_IDS,
   AUGMENT_SUITS,
   getAugmentDefinition,
-  getAugmentsBySuit,
   validateAugmentDraftState,
   type AugmentId,
   type AugmentSlot,
@@ -24,12 +22,19 @@ import {
   projectGame,
   type GameState,
   type PlayerAction,
+  type PublicPiece,
   type Side,
 } from "../../lib/game.ts";
 import {
+  constrainActiveDraftToSimulationPool,
   createControlledPairGame,
   withDeterministicEngineRandom,
 } from "../balance/tournament.ts";
+import {
+  SIMULATION_ELIGIBLE_AUGMENT_IDS,
+  isSimulationEligibleAugment,
+  simulationIdsBySuit,
+} from "../balance/simulation-pool.ts";
 import {
   SeededRandom,
   determinizeFromProjection,
@@ -73,9 +78,10 @@ function expect(
 }
 
 function coveragePairs() {
+  const bySuit = simulationIdsBySuit();
   const result: Array<[AugmentId, AugmentId]> = [];
   for (const suit of AUGMENT_SUITS) {
-    const cards = getAugmentsBySuit(suit).map((card) => card.id);
+    const cards = bySuit[suit];
     for (let index = 0; index < cards.length; index += 2) {
       result.push([cards[index], cards[(index + 1) % cards.length]]);
     }
@@ -88,6 +94,7 @@ const BATTLE_RESULTS = new Set([
   "attacker_survives",
   "defender_survives",
   "both_removed",
+  "flag_protected",
   "flag_captured",
 ]);
 
@@ -106,6 +113,184 @@ function recordAugmentIds(record: { augmentId?: AugmentId; augmentIds?: AugmentI
 
 function sortedMultiset(values: readonly string[]) {
   return [...values].sort((first, second) => first.localeCompare(second));
+}
+
+function triggerKey(side: Side, id: AugmentId) {
+  return `${side}:${id}`;
+}
+
+function originalPieceTypeForAudit(state: GameState, pieceId: string) {
+  const piece = state.pieces.find((candidate) => candidate.id === pieceId);
+  return state.augment?.ruleState?.baseTypes[pieceId] ?? piece?.type;
+}
+
+function newEventsSince(before: GameState, after: GameState) {
+  const previousLastEventId = before.events.at(-1)?.id ?? 0;
+  return after.events.filter((event) => event.id > previousLastEventId);
+}
+
+function recordCarriesAugment(
+  record: { augmentId?: AugmentId; augmentIds?: AugmentId[] },
+  id: AugmentId,
+) {
+  return recordAugmentIds(record).includes(id);
+}
+
+function newlyRevealedToLoadout(before: GameState, after: GameState, side: Side, id: AugmentId) {
+  return !(before.augment?.draft.loadouts[side] ?? []).includes(id) &&
+    (after.augment?.draft.loadouts[side] ?? []).includes(id);
+}
+
+/**
+ * Passive trigger counters describe semantic rule pulses, not charged-card
+ * consumption. Keep this deliberately explicit for the v3 passive modes so a
+ * new passive cannot silently inherit the old `augment_used` contract.
+ */
+function expectedPassiveTriggerDelta(
+  before: GameState,
+  after: GameState,
+  action: PlayerAction,
+  side: Side,
+  id: AugmentId,
+) {
+  const definition = getAugmentDefinition(id);
+  if (definition.activation !== "passive") return 0;
+  if (!(after.augment?.draft.loadouts[side] ?? []).includes(id)) return 0;
+  const effect = definition.effect;
+  const beforeRule = before.augment?.ruleState;
+  const afterRule = after.augment?.ruleState;
+  if (!afterRule) return 0;
+  const events = newEventsSince(before, after);
+
+  if (effect.kind === "multi_move" && effect.mode === "two_single_edge_moves") {
+    const previous = beforeRule?.multiMove[side] ?? null;
+    const next = afterRule.multiMove[side];
+    return previous === null &&
+        next?.augmentId === id &&
+        next.pieceId === null &&
+        next.movesRemaining === 1 &&
+        next.movesCompleted === 1 &&
+        next.mayUseDifferentPieces
+      ? 1
+      : 0;
+  }
+
+  if (effect.kind === "combat" && effect.mode === "bomb_death_splash") {
+    if (action.type !== "move" && action.type !== "augment_move") return 0;
+    return before.pieces.filter((piece) => {
+      if (!piece.alive || piece.side !== side || originalPieceTypeForAudit(before, piece.id) !== "bomb") {
+        return false;
+      }
+      return after.pieces.find((candidate) => candidate.id === piece.id)?.alive === false;
+    }).length;
+  }
+
+  if (effect.kind === "promotion" && effect.mode === "platoon_loss_threshold") {
+    return Math.max(
+      0,
+      afterRule.sacrificePromotionSteps[side] -
+        (beforeRule?.sacrificePromotionSteps[side] ?? 0),
+    );
+  }
+
+  if (effect.kind === "promotion" && effect.mode === "battalion_on_capture") {
+    return events.filter(
+      (event) =>
+        event.result === "piece_promoted" &&
+        event.actor === side &&
+        event.augmentId === id,
+    ).length;
+  }
+
+  if (effect.kind === "doctrine" && effect.mode === "lightning_rank_boost") {
+    return beforeRule?.lightning[side]?.augmentId !== id &&
+        afterRule.lightning[side]?.augmentId === id
+      ? 1
+      : 0;
+  }
+
+  if (effect.kind === "objective" && effect.mode === "last_headquarters") {
+    const protectedFlags = events.filter(
+      (event) => event.result === "flag_protected" && recordCarriesAugment(event, id),
+    ).length;
+    const unlockedNow = !beforeRule?.headquartersUnlocked[side] &&
+      afterRule.headquartersUnlocked[side];
+    const revealedAfterUnlock = newlyRevealedToLoadout(before, after, side, id) &&
+      Boolean(beforeRule?.headquartersUnlocked[side]) &&
+      afterRule.headquartersUnlocked[side];
+    return protectedFlags + Number(unlockedNow || revealedAfterUnlock);
+  }
+
+  if (effect.kind === "combat" && effect.mode === "command_fusion") {
+    return afterRule.generalFallen[side] &&
+        (!beforeRule?.generalFallen[side] || newlyRevealedToLoadout(before, after, side, id))
+      ? 1
+      : 0;
+  }
+
+  if (effect.kind === "combat" && effect.mode === "engineer_mutiny") {
+    return afterRule.commanderFallen[side] &&
+        (!beforeRule?.commanderFallen[side] || newlyRevealedToLoadout(before, after, side, id))
+      ? 1
+      : 0;
+  }
+
+  if (
+    effect.kind === "combat" &&
+    (effect.mode === "durable_mines" || effect.mode === "division_defuses_mine") &&
+    (action.type === "move" || action.type === "augment_move")
+  ) {
+    const attacker = before.pieces.find(
+      (piece) => piece.alive && samePosition(piece, action.from),
+    );
+    const defender = before.pieces.find(
+      (piece) => piece.alive && samePosition(piece, action.to),
+    );
+    const replayMove = after.replay?.moves.at(-1);
+    if (
+      !attacker ||
+      !defender ||
+      attacker.side !== side ||
+      defender.side === side ||
+      originalPieceTypeForAudit(before, defender.id) !== "mine" ||
+      replayMove?.actor !== side ||
+      !samePosition(replayMove.from, action.from) ||
+      !samePosition(replayMove.to, action.to)
+    ) {
+      return 0;
+    }
+    if (effect.mode === "division_defuses_mine") {
+      return originalPieceTypeForAudit(before, attacker.id) === "division" &&
+          replayMove.result === "attacker_survives"
+        ? 1
+        : 0;
+    }
+    return originalPieceTypeForAudit(before, attacker.id) !== "bomb" &&
+        (replayMove.result === "defender_survives" || replayMove.result === "both_removed")
+      ? 1
+      : 0;
+  }
+
+  return 0;
+}
+
+function replayEventResultMatches(
+  event: GameState["events"][number],
+  replayMove: NonNullable<GameState["replay"]>["moves"][number],
+) {
+  if (replayMove.kind === "redeploy") return event.result === "pieces_redeployed";
+  if (replayMove.kind === "sacrifice") return event.result === "piece_sacrificed";
+  return BATTLE_RESULTS.has(event.result) && event.result === replayMove.result;
+}
+
+function validAttributionMultiplicity(ids: readonly AugmentId[]) {
+  const counts = new Map<AugmentId, number>();
+  for (const id of ids) counts.set(id, (counts.get(id) ?? 0) + 1);
+  return [...counts].every(([id, count]) => {
+    if (count <= 1) return true;
+    const effect = getAugmentDefinition(id).effect;
+    return count === 2 && effect.kind === "combat" && effect.mode === "bomb_second_fuse";
+  });
 }
 
 export interface ReferenceRepetitionOracle {
@@ -235,14 +420,16 @@ export function observeReferenceRepetition(
   return occurrences;
 }
 
-function verifyActionSettlement(
+export function verifyActionSettlement(
   before: GameState,
   after: GameState,
   action: PlayerAction,
 ) {
-  const triggerDeltas: string[] = [];
+  const newEvents = newEventsSince(before, after);
+  const eventBackedTriggerDeltas: string[] = [];
+  const passiveTriggerDeltas = new Map<string, number>();
   for (const side of ["black", "white"] as const) {
-    for (const id of AUGMENT_IDS) {
+    for (const id of SIMULATION_ELIGIBLE_AUGMENT_IDS) {
       const previousCount = before.augment?.triggerCounts[side][id] ?? 0;
       const nextCount = after.augment?.triggerCounts[side][id] ?? 0;
       const delta = nextCount - previousCount;
@@ -252,20 +439,60 @@ function verifyActionSettlement(
         `${side}/${id} trigger count moved backwards during ${action.type}.`,
         { action, previousCount, nextCount },
       );
+      const definition = getAugmentDefinition(id);
+      if (definition.activation === "passive") {
+        const expectedDelta = expectedPassiveTriggerDelta(before, after, action, side, id);
+        expect(
+          delta === expectedDelta,
+          "duplicateSettlements",
+          `${side}/${id} passive trigger delta ${delta} did not match semantic evidence ${expectedDelta} during ${action.type}.`,
+          { action, previousCount, nextCount, expectedDelta },
+        );
+        if (delta > 0) {
+          passiveTriggerDeltas.set(triggerKey(side, id), delta);
+          const effect = definition.effect;
+          if (effect.kind === "multi_move" && effect.mode === "two_single_edge_moves") {
+            const replayMove = after.replay?.moves.at(-1);
+            const movementEvent = newEvents.find(
+              (event) =>
+                event.from !== undefined &&
+                event.to !== undefined &&
+                event.actor === side &&
+                recordCarriesAugment(event, id),
+            );
+            expect(
+              replayMove?.actor === side &&
+                recordCarriesAugment(replayMove, id) &&
+                movementEvent !== undefined,
+              "replayDivergences",
+              `${side}/${id} passive continuation opened without movement event/replay attribution.`,
+              { action, replayMove, movementEvent },
+            );
+          }
+          if (effect.kind === "combat" && effect.mode === "bomb_death_splash") {
+            expect(
+              newEvents.some(
+                (event) => event.result === "chain_explosion" && event.augmentId === id,
+              ),
+              "replayDivergences",
+              `${side}/${id} passive bomb chain lacked its authoritative effect event.`,
+              { action, delta },
+            );
+          }
+        }
+        continue;
+      }
       expect(
         delta <= 1,
         "duplicateSettlements",
-        `${side}/${id} settled ${delta} times during one ${action.type} action.`,
+        `${side}/${id} charged trigger settled ${delta} times during one ${action.type} action.`,
         { action, previousCount, nextCount },
       );
-      if (delta === 1) triggerDeltas.push(`${side}:${id}`);
+      if (delta === 1) eventBackedTriggerDeltas.push(triggerKey(side, id));
     }
   }
 
-  const previousLastEventId = before.events.at(-1)?.id ?? 0;
-  const newAugmentEvents = after.events.filter(
-    (event) => event.id > previousLastEventId && event.result === "augment_used",
-  );
+  const newAugmentEvents = newEvents.filter((event) => event.result === "augment_used");
   for (const event of newAugmentEvents) {
     expect(
       event.augmentId,
@@ -279,10 +506,10 @@ function verifyActionSettlement(
   );
   expect(
     stableStringify(sortedMultiset(eventSettlements)) ===
-      stableStringify(sortedMultiset(triggerDeltas)),
+      stableStringify(sortedMultiset(eventBackedTriggerDeltas)),
     "duplicateSettlements",
-    `Trigger deltas and augment_used events diverged during ${action.type}.`,
-    { action, triggerDeltas, eventSettlements },
+    `Charged trigger deltas and augment_used events diverged during ${action.type}.`,
+    { action, eventBackedTriggerDeltas, eventSettlements },
   );
 
   const previousReplayLength = before.replay?.moves.length ?? 0;
@@ -297,12 +524,14 @@ function verifyActionSettlement(
   if (replayDelta === 1) {
     const replayMove = after.replay?.moves.at(-1);
     expect(replayMove, "replayDivergences", `${action.type} added no readable replay move.`);
-    const movementEvents = after.events.filter(
+    const movementEvents = newEvents.filter(
       (event) =>
-        event.id > previousLastEventId &&
-        BATTLE_RESULTS.has(event.result) &&
+        replayEventResultMatches(event, replayMove) &&
         event.from !== undefined &&
-        event.to !== undefined,
+        event.to !== undefined &&
+        event.actor === replayMove.actor &&
+        samePosition(event.from, replayMove.from) &&
+        samePosition(event.to, replayMove.to),
     );
     expect(
       movementEvents.length === 1,
@@ -315,7 +544,7 @@ function verifyActionSettlement(
       movementEvent.actor === replayMove.actor &&
         samePosition(movementEvent.from, replayMove.from) &&
         samePosition(movementEvent.to, replayMove.to) &&
-        movementEvent.result === replayMove.result &&
+        replayEventResultMatches(movementEvent, replayMove) &&
         movementEvent.kind === replayMove.kind &&
         samePosition(movementEvent.secondaryFrom, replayMove.secondaryFrom) &&
         samePosition(movementEvent.secondaryTo, replayMove.secondaryTo) &&
@@ -327,13 +556,71 @@ function verifyActionSettlement(
     );
     const replaySettlements = recordAugmentIds(replayMove);
     const eventAugmentIds = newAugmentEvents.map((event) => event.augmentId!);
+    const replayCounts = new Map<AugmentId, number>();
+    const eventCounts = new Map<AugmentId, number>();
+    for (const id of replaySettlements) replayCounts.set(id, (replayCounts.get(id) ?? 0) + 1);
+    for (const id of eventAugmentIds) eventCounts.set(id, (eventCounts.get(id) ?? 0) + 1);
     expect(
-      stableStringify(sortedMultiset(replaySettlements)) ===
-        stableStringify(sortedMultiset(eventAugmentIds)),
+      [...eventCounts].every(([id, count]) => (replayCounts.get(id) ?? 0) >= count),
       "replayDivergences",
-      `Replay augmentIds and augment_used events diverged during ${action.type}.`,
+      `Replay omitted a charged augment_used settlement during ${action.type}.`,
       { action, replaySettlements, eventAugmentIds, moveNumber: replayMove.moveNumber },
     );
+
+    const attributionBudget = new Map<AugmentId, number>(eventCounts);
+    for (const [key, delta] of passiveTriggerDeltas) {
+      const id = key.slice(key.indexOf(":") + 1) as AugmentId;
+      if (delta > 0) attributionBudget.set(id, Math.max(attributionBudget.get(id) ?? 0, 1));
+    }
+    const pendingMultiId = before.augment?.ruleState?.multiMove[replayMove.actor]?.augmentId;
+    if (pendingMultiId) {
+      attributionBudget.set(
+        pendingMultiId,
+        Math.max(attributionBudget.get(pendingMultiId) ?? 0, 1),
+      );
+    }
+    if ("augmentId" in action && action.augmentId) {
+      attributionBudget.set(
+        action.augmentId,
+        Math.max(attributionBudget.get(action.augmentId) ?? 0, 1),
+      );
+    }
+    expect(
+      [...replayCounts].every(
+        ([id, count]) => count <= (attributionBudget.get(id) ?? 0),
+      ),
+      "duplicateSettlements",
+      `Replay carried an unsupported or duplicate augment attribution during ${action.type}.`,
+      { action, replaySettlements, attributionBudget: [...attributionBudget] },
+    );
+  }
+
+  for (const side of ["black", "white"] as const) {
+    const pending = before.augment?.ruleState?.multiMove[side];
+    if (!pending) continue;
+    if ((action.type === "move" || action.type === "augment_move") && before.turn === side) {
+      const replayMove = after.replay?.moves.at(-1);
+      expect(
+        replayDelta === 1 && replayMove && recordCarriesAugment(replayMove, pending.augmentId),
+        "replayDivergences",
+        `${side}/${pending.augmentId} continuation move lacked replay attribution.`,
+        { action, pending, replayMove },
+      );
+    }
+    if (action.type === "pass_extra_move" && before.turn === side) {
+      const passEvents = newEvents.filter(
+        (event) =>
+          event.result === "extra_move_passed" &&
+          event.actor === side &&
+          event.augmentId === pending.augmentId,
+      );
+      expect(
+        after.augment?.ruleState?.multiMove[side] === null && passEvents.length === 1,
+        "duplicateSettlements",
+        `${side}/${pending.augmentId} continuation pass lacked one authoritative settlement.`,
+        { action, pending, passEvents },
+      );
+    }
   }
 }
 
@@ -405,9 +692,11 @@ function verifyBoardAndAccounting(state: GameState) {
       for (const [id, count] of Object.entries(state.augment.triggerCounts[side])) {
         const definition = getAugmentDefinition(id as AugmentId);
         expect(
-          typeof count === "number" && count >= 0 && count <= definition.charges,
+          Number.isSafeInteger(count) &&
+            count >= 0 &&
+            (definition.activation === "passive" || count <= definition.charges),
           "duplicateSettlements",
-          `${side}/${id} trigger count ${String(count)} exceeds charges ${definition.charges}.`,
+          `${side}/${id} trigger count ${String(count)} violates its activation contract.`,
         );
       }
     }
@@ -422,9 +711,9 @@ function verifyBoardAndAccounting(state: GameState) {
   for (const event of state.events) {
     if (event.augmentIds) {
       expect(
-        new Set(event.augmentIds).size === event.augmentIds.length,
+        validAttributionMultiplicity(event.augmentIds),
         "duplicateSettlements",
-        `Event ${event.id} settled one augment more than once.`,
+        `Event ${event.id} contains unsupported duplicate augment attribution.`,
       );
     }
   }
@@ -443,9 +732,9 @@ function verifyBoardAndAccounting(state: GameState) {
     for (const move of state.replay.moves) {
       if (move.augmentIds) {
         expect(
-          new Set(move.augmentIds).size === move.augmentIds.length,
+          validAttributionMultiplicity(move.augmentIds),
           "duplicateSettlements",
-          `Replay move ${move.moveNumber} settled one augment more than once.`,
+          `Replay move ${move.moveNumber} contains unsupported duplicate augment attribution.`,
         );
       }
     }
@@ -585,10 +874,15 @@ function verifySetupPrivacyState(state: GameState, nowMs: number, label: string)
   }
 }
 
-function verifySetupPrivacyScenarios(seed: string, nowMs: number) {
-  let state = withDeterministicEngineRandom(`${seed}:create`, () =>
-    createAugmentGame({ ranked: true })
+export function createClocklessSetupPrivacyState(seed: string) {
+  const state = withDeterministicEngineRandom(`${seed}:create`, () =>
+    createAugmentGame({ ranked: true }),
   );
+  return constrainActiveDraftToSimulationPool(state, `${seed}:eligible-pool`);
+}
+
+function verifySetupPrivacyScenarios(seed: string, nowMs: number) {
+  let state = createClocklessSetupPrivacyState(seed);
   verifySetupPrivacyState(state, nowMs, "unready-unselected");
   for (const side of ["black", "white"] as const) {
     const activeRound = state.augment?.draft.activeRound;
@@ -597,6 +891,13 @@ function verifySetupPrivacyScenarios(seed: string, nowMs: number) {
     );
     const selection = round?.players[side].options[0];
     expect(selection, "privacyLeaks", `setup privacy fixture has no ${side} offer.`);
+    expect(
+      round.players[side].options.every(isSimulationEligibleAugment) &&
+        isSimulationEligibleAugment(selection),
+      "invariantFailures",
+      `setup privacy fixture exposed an excluded clock augment to ${side}.`,
+      { options: round.players[side].options },
+    );
     state = applyAuditedAction(
       state,
       side,
@@ -611,6 +912,11 @@ function verifySetupPrivacyScenarios(seed: string, nowMs: number) {
       nowMs,
       `${seed}:${side}:lock`,
     );
+    expect(
+      (state.augment?.draft.loadouts[side] ?? []).every(isSimulationEligibleAugment),
+      "invariantFailures",
+      `setup privacy fixture selected an excluded clock augment for ${side}.`,
+    );
   }
   verifySetupPrivacyState(state, nowMs, "unready-locked-loadouts");
   state = applyAuditedAction(state, "black", { type: "ready", value: true }, nowMs);
@@ -620,6 +926,63 @@ function verifySetupPrivacyScenarios(seed: string, nowMs: number) {
     "setup privacy fixture did not retain one-sided readiness.",
   );
   verifySetupPrivacyState(state, nowMs, "black-ready-only");
+}
+
+function publicRuleIdentityIsVisible(state: GameState, pieceId: string) {
+  const ruleState = state.augment?.ruleState;
+  return Boolean(
+    ruleState?.publiclyRevealedPieceIds.includes(pieceId) ||
+      ruleState?.promotedPublicIds.includes(pieceId),
+  );
+}
+
+export function verifyProjectedRuleMetadata(
+  state: GameState,
+  projected: PublicPiece,
+  label: string,
+) {
+  const ruleState = state.augment?.ruleState;
+  const publiclyRevealed = Boolean(
+    ruleState?.publiclyRevealedPieceIds.includes(projected.id),
+  );
+  const promoted = Boolean(ruleState?.promotedPublicIds.includes(projected.id));
+  const mineHits = ruleState?.mineHits[projected.id] === 1 ? 1 : 0;
+  if (ruleState) {
+    expect(
+      projected.publiclyRevealed === publiclyRevealed,
+      "privacyLeaks",
+      `${label} projected inconsistent public-reveal metadata for ${projected.id}.`,
+      { expected: publiclyRevealed, actual: projected.publiclyRevealed },
+    );
+    expect(
+      projected.promoted === promoted,
+      "privacyLeaks",
+      `${label} projected inconsistent promotion metadata for ${projected.id}.`,
+      { expected: promoted, actual: projected.promoted },
+    );
+    expect(
+      projected.mineHits === mineHits,
+      "privacyLeaks",
+      `${label} projected inconsistent durable-mine hit metadata for ${projected.id}.`,
+      { expected: mineHits, actual: projected.mineHits },
+    );
+    return;
+  }
+  expect(
+    (projected.publiclyRevealed ?? false) === false,
+    "privacyLeaks",
+    `${label} projected v3 public-reveal metadata in a legacy game for ${projected.id}.`,
+  );
+  expect(
+    (projected.promoted ?? false) === false,
+    "privacyLeaks",
+    `${label} projected v3 promotion metadata in a legacy game for ${projected.id}.`,
+  );
+  expect(
+    (projected.mineHits ?? 0) === 0,
+    "privacyLeaks",
+    `${label} projected v3 durable-mine metadata in a legacy game for ${projected.id}.`,
+  );
 }
 
 function verifyProjectionPrivacy(state: GameState, nowMs: number) {
@@ -632,11 +995,13 @@ function verifyProjectionPrivacy(state: GameState, nowMs: number) {
     for (const projected of projection.pieces) {
       const authoritative = state.pieces.find((piece) => piece.id === projected.id);
       expect(authoritative, "privacyLeaks", `Projection invented piece ${projected.id}.`);
+      verifyProjectedRuleMetadata(state, projected, viewer);
       const publicFlag = authoritative.type === "flag" && state.revealedFlags[authoritative.side];
       const maySee =
         state.phase === "finished" ||
         authoritative.side === viewer ||
         publicFlag ||
+        publicRuleIdentityIsVisible(state, authoritative.id) ||
         known.has(authoritative.id);
       expect(
         projected.type === (maySee ? authoritative.type : null),
@@ -668,6 +1033,9 @@ function verifyProjectionPrivacy(state: GameState, nowMs: number) {
       "privacyLeaks",
       `Hidden spectator perspective diverged from ${viewer}'s piece knowledge.`,
     );
+    for (const projected of hiddenPerspective.pieces) {
+      verifyProjectedRuleMetadata(state, projected, `Hidden ${viewer} spectator`);
+    }
     expect(
       stableStringify(hiddenPerspective.augment?.draft ?? null) ===
         stableStringify(projection.augment?.draft ?? null),
@@ -687,8 +1055,12 @@ function verifyProjectionPrivacy(state: GameState, nowMs: number) {
   for (const projected of hiddenSpectator.pieces) {
     const authoritative = state.pieces.find((piece) => piece.id === projected.id);
     expect(authoritative, "privacyLeaks", `Hidden spectator received unknown piece ${projected.id}.`);
+    verifyProjectedRuleMetadata(state, projected, "Hidden spectator");
     const publicFlag = authoritative.type === "flag" && state.revealedFlags[authoritative.side];
-    const maySee = state.phase === "finished" || publicFlag;
+    const maySee =
+      state.phase === "finished" ||
+      publicFlag ||
+      publicRuleIdentityIsVisible(state, authoritative.id);
     expect(
       projected.type === (maySee ? authoritative.type : null),
       "privacyLeaks",
@@ -778,7 +1150,7 @@ function completeDraft(
   seed: string,
   repetitionOracle?: ReferenceRepetitionOracle,
 ) {
-  let next = state;
+  let next = constrainActiveDraftToSimulationPool(state, `${seed}:initial`);
   const roundNumber = next.augment?.draft.activeRound;
   expect(roundNumber, "invariantFailures", "Draft phase has no active round.");
   for (const side of ["black", "white"] as const) {
@@ -803,6 +1175,10 @@ function completeDraft(
         nowMs,
         `${seed}:${side}:refresh`,
         repetitionOracle,
+      );
+      next = constrainActiveDraftToSimulationPool(
+        next,
+        `${seed}:${side}:post-refresh`,
       );
       const refreshedDraft = next.augment?.draft;
       const refreshedRound = refreshedDraft?.rounds.find(
@@ -914,10 +1290,10 @@ function verifyRejectedActionDoesNotMutate(state: GameState, nowMs: number) {
   );
 }
 
-export const THREEFOLD_TRACE_SEED = "rules-v11-threefold-trace";
+export const THREEFOLD_TRACE_SEED = "rules-v13-v3-no-clock-threefold-trace";
 export const THREEFOLD_TRACE_CARD_PAIR = [
   "club-road-patrol",
-  "club-pocket-time",
+  "club-engineer-oath",
 ] as const satisfies readonly [AugmentId, AugmentId];
 
 function isEmptyDestination(state: GameState, action: PlayerAction) {
@@ -1002,7 +1378,6 @@ function applyTraceCycle(
   const occurrences: number[] = [];
   for (let repetition = 0; repetition < repetitions; repetition += 1) {
     for (const [index, action] of actions.entries()) {
-      nowMs += 100;
       state = applyAuditedAction(
         state,
         state.turn,
@@ -1019,7 +1394,7 @@ function applyTraceCycle(
 
 /** A bounded, deterministic product trace used by tests and every rules worker. */
 export function runThreefoldTrace() {
-  let nowMs = 1_000_000;
+  const nowMs = 1_000_000;
   const oracle = createReferenceRepetitionOracle();
   let state = createControlledPairGame(
     THREEFOLD_TRACE_CARD_PAIR[0],
@@ -1035,7 +1410,6 @@ export function runThreefoldTrace() {
       "hangs",
       `Known threefold trace has no non-capturing setup move at ply ${move + 1}.`,
     );
-    nowMs += 100;
     state = applyAuditedAction(
       state,
       state.turn,
@@ -1049,6 +1423,10 @@ export function runThreefoldTrace() {
     state.phase === "augment_draft" && state.augment?.draft.activeRound === 2,
     "invariantFailures",
     "Known threefold trace did not enter the production second draft at move 9.",
+  );
+  state = constrainActiveDraftToSimulationPool(
+    state,
+    `${THREEFOLD_TRACE_SEED}:round-two`,
   );
   for (const side of ["black", "white"] as const) {
     const round = projectGame(state, side, nowMs).augment?.draft.rounds.find(
@@ -1073,6 +1451,14 @@ export function runThreefoldTrace() {
       oracle,
     );
   }
+  expect(
+    [
+      ...(state.augment?.draft.loadouts.black ?? []),
+      ...(state.augment?.draft.loadouts.white ?? []),
+    ].every(isSimulationEligibleAugment),
+    "invariantFailures",
+    "Known trace selected an excluded clock augment.",
+  );
   expect(
     state.phase === "playing" &&
       projectGame(state, "black", nowMs).repetition?.currentOccurrences === 1,
@@ -1201,7 +1587,7 @@ function runGame(
   const assertionsBefore = assertionCount;
   const random = new SeededRandom(`${seed}:rules:${gameIndex}`);
   const repetitionOracle = createReferenceRepetitionOracle();
-  let nowMs = 1_000_000;
+  const nowMs = 1_000_000;
   verifySetupPrivacyScenarios(`${seed}:rules:${gameIndex}:setup-privacy`, nowMs);
   let state = createControlledPairGame(
     blackCard,
@@ -1228,7 +1614,6 @@ function runGame(
       expect(state.phase === "playing", "hangs", `Unexpected phase ${state.phase}.`);
       const action = chooseAction(state, random, nowMs);
       expect(action, "hangs", "No visible action exists while the game remains active.");
-      nowMs += 250 + random.int(6_251);
       state = applyAuditedAction(
         state,
         state.turn,
@@ -1240,6 +1625,14 @@ function runGame(
       actionsApplied += 1;
     }
     verifyBoardAndAccounting(state);
+    expect(
+      [
+        ...(state.augment?.draft.loadouts.black ?? []),
+        ...(state.augment?.draft.loadouts.white ?? []),
+      ].every(isSimulationEligibleAugment),
+      "invariantFailures",
+      "Rules simulation selected an excluded clock augment.",
+    );
     verifyProjectionPrivacy(state, nowMs);
     verifyReplay(state);
   }
@@ -1250,12 +1643,12 @@ function runGame(
       state,
       state.turn,
       { type: "resign" },
-      nowMs + 1,
+      nowMs,
       undefined,
       repetitionOracle,
     );
     verifyBoardAndAccounting(state);
-    verifyProjectionPrivacy(state, nowMs + 1);
+    verifyProjectionPrivacy(state, nowMs);
     verifyReplay(state);
   }
   return { state, actionsApplied, capped, assertions: assertionCount - assertionsBefore };
@@ -1276,7 +1669,7 @@ async function run() {
   );
   let completedUnit = false;
   let stopped = false;
-  const maxMoves = args.profile === "smoke" ? 18 : 140;
+  const maxMoves = args.profile === "smoke" ? 18 : 300;
   const traceAssertionsBefore = assertionCount;
   let traceAssertions = 0;
   try {
@@ -1339,4 +1732,4 @@ if (process.argv[1] && resolve(process.argv[1]) === resolve(fileURLToPath(import
   });
 }
 
-export { coveragePairs };
+export { coveragePairs, verifyProjectionPrivacy };

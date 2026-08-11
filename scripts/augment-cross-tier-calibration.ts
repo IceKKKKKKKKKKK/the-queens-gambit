@@ -17,12 +17,13 @@ import {
 import {
   BALANCE_ALGORITHM_VERSION,
   BALANCE_ENGINE_RULES_FINGERPRINT,
+  normalizeTournamentOptions,
   type TournamentOptions,
 } from "./balance/tournament.ts";
 import { catalogFingerprint, stableStringify } from "./balance/visible-policy.ts";
 
 export interface CrossCheckpoint {
-  schemaVersion: 4;
+  schemaVersion: 5;
   algorithmVersion: typeof BALANCE_ALGORITHM_VERSION;
   engineRulesFingerprint: typeof BALANCE_ENGINE_RULES_FINGERPRINT;
   catalogFingerprint: string;
@@ -69,16 +70,18 @@ function parseCli(argv: readonly string[]): CliOptions {
     return parsed;
   };
   const soak = mode === "soak";
-  const thinkTimeMinMs = number("think-min-ms", 2_500);
+  if (values.has("think-min-ms") || values.has("think-max-ms")) {
+    throw new Error("Bot think-time options were removed; simulations always run at 0 ms.");
+  }
   const tournament: TournamentOptions = {
     seed: number("seed", 20260809),
-    maxActions: number("max-actions", soak ? 180 : 40, 1),
-    thinkTimeMinMs,
-    thinkTimeMaxMs: number("think-max-ms", 6_500, thinkTimeMinMs),
+    maxActions: number("max-actions", 300, 1),
+    thinkTimeMinMs: 0,
+    thinkTimeMaxMs: 0,
     search: {
-      determinizations: number("determinizations", soak ? 4 : 1, 1),
-      branching: number("branching", soak ? 8 : 3, 1),
-      rolloutDepth: number("rollout-depth", soak ? 3 : 1, 1),
+      determinizations: number("determinizations", 1, 1),
+      branching: number("branching", 3, 1),
+      rolloutDepth: number("rollout-depth", 1, 1),
     },
     refreshMargin: 4,
   };
@@ -97,15 +100,16 @@ function parseCli(argv: readonly string[]): CliOptions {
 }
 
 export function createCrossTierCheckpoint(options: TournamentOptions): CrossCheckpoint {
+  const normalizedOptions = normalizeTournamentOptions(options);
   return {
-    schemaVersion: 4,
+    schemaVersion: 5,
     algorithmVersion: BALANCE_ALGORITHM_VERSION,
     engineRulesFingerprint: BALANCE_ENGINE_RULES_FINGERPRINT,
     catalogFingerprint: catalogFingerprint(),
-    configFingerprint: crossTierConfigFingerprint(options),
+    configFingerprint: crossTierConfigFingerprint(normalizedOptions),
     scheduleFingerprint: crossTierScheduleFingerprint(),
-    seed: options.seed,
-    options: structuredClone(options),
+    seed: normalizedOptions.seed,
+    options: normalizedOptions,
     cursor: { cycle: 0, groupIndex: 0 },
     completedGroupKeys: [],
     elapsedActiveMs: 0,
@@ -118,23 +122,24 @@ export function validateCrossTierCheckpoint(
   checkpoint: CrossCheckpoint,
   options: TournamentOptions,
 ) {
+  const normalizedOptions = normalizeTournamentOptions(options);
   if (checkpoint.algorithmVersion !== BALANCE_ALGORITHM_VERSION) {
     throw new Error(
       `Cross-tier balance algorithm ${String(checkpoint.algorithmVersion)} is not supported.`,
     );
   }
-  if (checkpoint.schemaVersion !== 4) throw new Error("Unsupported cross-tier checkpoint schema.");
+  if (checkpoint.schemaVersion !== 5) throw new Error("Unsupported cross-tier checkpoint schema.");
   if (checkpoint.engineRulesFingerprint !== BALANCE_ENGINE_RULES_FINGERPRINT) {
     throw new Error("Cross-tier engine rules fingerprint is not supported.");
   }
   if (checkpoint.catalogFingerprint !== catalogFingerprint()) throw new Error("Cross-tier catalog changed.");
-  if (checkpoint.configFingerprint !== crossTierConfigFingerprint(options)) {
+  if (checkpoint.configFingerprint !== crossTierConfigFingerprint(normalizedOptions)) {
     throw new Error("Cross-tier search configuration changed.");
   }
-  if (stableStringify(checkpoint.options) !== stableStringify(options)) {
+  if (stableStringify(checkpoint.options) !== stableStringify(normalizedOptions)) {
     throw new Error("Cross-tier checkpoint options do not match the current tournament options.");
   }
-  if (checkpoint.seed !== options.seed) {
+  if (checkpoint.seed !== normalizedOptions.seed) {
     throw new Error("Cross-tier checkpoint seed does not match the current tournament options.");
   }
   if (checkpoint.scheduleFingerprint !== crossTierScheduleFingerprint()) {
@@ -204,13 +209,13 @@ export function crossTierMarkdown(report: CrossTierReport) {
   const milliseconds = (value: number | null | undefined) =>
     value === null || value === undefined ? "—" : `${Math.round(value)} ms`;
   return [
-    "# 军令全目录跨档校正实验",
+    "# 军令跨档诊断实验（非验收强度证据）",
     "",
     `证据配置：seed ${report.seed}；maxActions ${report.options.maxActions}；思考 ${report.options.thinkTimeMinMs}–${report.options.thinkTimeMaxMs} ms；搜索 ${report.options.search.determinizations}×${report.options.search.branching}×${report.options.search.rolloutDepth}；refreshMargin ${report.options.refreshMargin}；engine ${report.engineRulesFingerprint}；config ${report.configFingerprint}；schedule ${report.scheduleFingerprint}。`,
     `计划镜像组 ${report.global.plannedGroups ?? "持续模式"}；已执行镜像组 ${report.global.executedGroups}；完整镜像组 ${report.global.completeMirrorGroups}；对局 ${report.global.games}；三次重复和棋 ${report.global.threefoldDraws}；搜索节点 ${report.global.searchNodes}；异常 ${report.global.exceptions}；卡死 ${report.global.stuck}；封顶 ${report.global.capped}。`,
     `第二轮时序：到达 ${report.global.draftTiming.reachedLegs} 腿；公开 ${report.global.draftTiming.revealedLegs} 腿；第二焦点选择 ${report.global.draftTiming.roundTwoFocalSelections} 次；违规 ${report.global.draftTiming.timingViolations}。`,
     "",
-    `已执行目录覆盖：${report.coverage.executedCards}/${report.catalogSize}；纯轮次层至少一个完整样本 ${report.coverage.roundOrderCompleteCards} 张；非 setup 双轮次完整覆盖 ${report.coverage.nonSetupBothOrdersCompleteCards}/${report.coverage.requiredNonSetupCards}；setup 焦点完整覆盖 ${report.coverage.setupFocalCompleteCards}/${report.coverage.requiredSetupCards}；缺失：${report.coverage.missingCards.join("、") || "无"}。`,
+    `产品目录：${report.catalogSize}；模拟 eligible：${report.simulationEligibleSize}；排除计时卡：${report.excludedClockAugmentIds.length}（${report.excludedClockAugmentIds.join("、")}）。已执行 eligible 覆盖：${report.coverage.executedCards}/${report.coverage.eligibleCards}；纯轮次层至少一个完整样本 ${report.coverage.roundOrderCompleteCards} 张；非 setup 双轮次完整覆盖 ${report.coverage.nonSetupBothOrdersCompleteCards}/${report.coverage.requiredNonSetupCards}；setup 焦点完整覆盖 ${report.coverage.setupFocalCompleteCards}/${report.coverage.requiredSetupCards}；缺失：${report.coverage.missingCards.join("、") || "无"}。`,
     "",
     "## 非 setup：轮次交叉平衡层",
     "",
@@ -230,8 +235,8 @@ export function crossTierMarkdown(report: CrossTierReport) {
         `| ${row.higher} | ${row.lower} | ${row.executedGroups} | ${row.completeMirrorGroups} | ${percent(row.higherScore?.estimate)} | ${row.exceptions}/${row.stuck}/${row.capped} | ${Object.entries(row.finishReasons).map(([reason, count]) => `${reason}:${count}`).join("；") || "—"} |`,
     ),
     "",
-    `方法学验收：${report.acceptancePass ? "通过" : "不通过"}。只有计划组全部执行并在每腿真实到达第 10 手选择后形成完整镜像、无异常/卡死/封顶/时序违规、50 张卡完成对应层覆盖且每个纯轮次比较达到样本门槛时才通过；短样本或未完成赛程一律不通过。`,
-    `描述性平衡结果：预期方向 ${report.ordering.expected}；六组纯轮次点估计符合：${report.ordering.pointEstimatePass ? "是" : "否"}；卡等权档位均值递减：${report.ordering.tierPointEstimatePass ? "是" : "否"}；样本门槛全部达到：${report.ordering.sampleSufficient ? "是" : "否"}；bootstrap 区间均高于 50%：${report.ordering.intervalsAllAboveParity ? "是" : "否"}。点估计仅作描述，不作为方法学验收门槛。`,
+    `技术完整性门槛：${report.acceptancePass ? "通过" : "不通过"}。它只检查计划组/四腿/第二轮时序、eligible 覆盖与异常，不检查任何档位胜率或排序。`,
+    `描述性结果（永不作为 gate）：预期方向 ${report.ordering.expected}；六组纯轮次点估计符合：${report.ordering.pointEstimatePass ? "是" : "否"}；卡等权档位均值递减：${report.ordering.tierPointEstimatePass ? "是" : "否"}；样本门槛全部达到：${report.ordering.sampleSufficient ? "是" : "否"}；bootstrap 区间均高于 50%：${report.ordering.intervalsAllAboveParity ? "是" : "否"}。`,
     "",
     ...report.limitations.map((line) => `- ${line}`),
     "",

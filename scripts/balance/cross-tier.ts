@@ -1,5 +1,4 @@
 import {
-  AUGMENT_CATALOG,
   AUGMENT_SUITS,
   getAugmentDefinition,
   type AugmentId,
@@ -14,11 +13,21 @@ import {
 import {
   BALANCE_ALGORITHM_VERSION,
   BALANCE_ENGINE_RULES_FINGERPRINT,
+  constrainActiveDraftToSimulationPool,
   createControlledPairGame,
+  normalizeTournamentOptions,
+  pendingPassAugmentId,
   withDeterministicEngineRandom,
   type ConfidenceInterval,
   type TournamentOptions,
 } from "./tournament.ts";
+import {
+  EXCLUDED_CLOCK_AUGMENT_IDS,
+  SIMULATION_CATALOG_SIZE,
+  SIMULATION_ELIGIBLE_AUGMENT_IDS,
+  SIMULATION_ELIGIBLE_AUGMENTS,
+  SIMULATION_ELIGIBLE_COUNT,
+} from "./simulation-pool.ts";
 import {
   catalogFingerprint,
   chooseVisibleAction,
@@ -221,7 +230,8 @@ interface ComparisonReportRow {
 }
 
 export interface CrossTierReport {
-  schemaVersion: 4;
+  purpose: "diagnostic_only";
+  schemaVersion: 5;
   algorithmVersion: typeof BALANCE_ALGORITHM_VERSION;
   engineRulesFingerprint: typeof BALANCE_ENGINE_RULES_FINGERPRINT;
   generatedAt: string;
@@ -231,6 +241,8 @@ export interface CrossTierReport {
   seed: number;
   options: TournamentOptions;
   catalogSize: number;
+  simulationEligibleSize: number;
+  excludedClockAugmentIds: AugmentId[];
   intervalMethod: "deterministic mirror-group percentile bootstrap";
   acceptancePass: boolean;
   global: {
@@ -281,6 +293,7 @@ export interface CrossTierReport {
     intervalsAllAboveParity: boolean;
   };
   coverage: {
+    eligibleCards: number;
     executedCards: number;
     roundOrderCompleteCards: number;
     setupCompleteCards: number;
@@ -297,7 +310,7 @@ export interface CrossTierReport {
 
 export function selectTierRepresentatives(): TierRepresentative[] {
   return TIER_ORDER.map((suit) => {
-    const candidates = AUGMENT_CATALOG.filter(
+    const candidates = SIMULATION_ELIGIBLE_AUGMENTS.filter(
       (card) =>
         card.suit === suit && card.activation === "active" && card.effect.kind === "movement",
     ).map((card) => card.id);
@@ -325,10 +338,10 @@ export function buildCrossTierComparisons(): CrossTierComparison[] {
 export function buildCrossTierCardSchedule(cycle = 0): CrossTierCardPair[] {
   if (!Number.isSafeInteger(cycle) || cycle < 0) throw new Error("Cross-tier cycle must be non-negative.");
   return buildCrossTierComparisons().flatMap((comparison) => {
-    const higherCards = AUGMENT_CATALOG.filter((card) => card.suit === comparison.higher)
+    const higherCards = SIMULATION_ELIGIBLE_AUGMENTS.filter((card) => card.suit === comparison.higher)
       .map((card) => card.id)
       .sort();
-    const lowerCards = AUGMENT_CATALOG.filter((card) => card.suit === comparison.lower)
+    const lowerCards = SIMULATION_ELIGIBLE_AUGMENTS.filter((card) => card.suit === comparison.lower)
       .map((card) => card.id)
       .sort();
     const length = Math.max(higherCards.length, lowerCards.length);
@@ -386,7 +399,7 @@ export function crossTierScheduleFingerprint() {
   return String(
     hashSeed(
       stableStringify({
-        algorithm: "production-timing-stratified-cross-tier-v11-threefold",
+        algorithm: "diagnostic-cross-tier-v13-v3-no-clock-zero-time-deterministic-ids",
         engineRulesFingerprint: BALANCE_ENGINE_RULES_FINGERPRINT,
         cycleZero: buildCrossTierExperimentSchedule(0),
       }),
@@ -411,7 +424,7 @@ function representativeMap(representatives: readonly TierRepresentative[]) {
 }
 
 function dummyCard(suit: AugmentSuit, focal: AugmentId) {
-  const dummy = AUGMENT_CATALOG.find(
+  const dummy = SIMULATION_ELIGIBLE_AUGMENTS.find(
     (card) =>
       card.suit === suit &&
       card.id !== focal &&
@@ -530,7 +543,7 @@ export function crossTierPairedSeed(
   >,
 ) {
   return hashSeed(
-    `${options.seed}:cross-tier-v11:${BALANCE_ENGINE_RULES_FINGERPRINT}:${group.cycle}:${group.key}:${group.scheduleOrdinal}:${group.roundOrder}`,
+    `${options.seed}:cross-tier-v13:${BALANCE_ENGINE_RULES_FINGERPRINT}:${group.cycle}:${group.key}:${group.scheduleOrdinal}:${group.roundOrder}`,
   );
 }
 
@@ -577,7 +590,9 @@ function seedForDesiredSecondSuit(
   const eligible = AUGMENT_SUITS.filter(
     (suit) =>
       suit !== openingSuit &&
-      AUGMENT_CATALOG.filter((card) => card.suit === suit && card.activation !== "setup").length >= 3,
+      SIMULATION_ELIGIBLE_AUGMENTS.filter(
+        (card) => card.suit === suit && card.activation !== "setup",
+      ).length >= 3,
   );
   const desiredIndex = eligible.indexOf(desiredSuit);
   if (desiredIndex < 0) throw new Error(`${desiredSuit} is not a legal second-round suit.`);
@@ -596,7 +611,10 @@ function completeForcedSecondDraft(
   leg: CrossTierLeg,
   nowMs: number,
 ) {
-  let state = initial;
+  let state = constrainActiveDraftToSimulationPool(
+    initial,
+    `${group.groupKey}:forced-second-draft`,
+  );
   forceSecondRoundOffers(state, group, leg);
   for (const side of SIDES) {
     const selected = selectedForRound(group, leg, side, 2);
@@ -655,6 +673,7 @@ export function playCrossTierScheduledLeg(
   leg: CrossTierLeg,
   options: TournamentOptions,
 ): CrossTierLegResult {
+  options = normalizeTournamentOptions(options);
   const pairedSeed = crossTierPairedSeed(options, group);
   const opportunities: Record<Side, Set<AugmentId>> = {
     black: new Set<AugmentId>(),
@@ -668,7 +687,7 @@ export function playCrossTierScheduledLeg(
     black: {},
     white: {},
   };
-  let nowMs = 1_000_000;
+  const nowMs = 1_000_000;
   let diagnosticState: GameState | null = null;
   let searchNodes = 0;
   let stuck = false;
@@ -678,7 +697,6 @@ export function playCrossTierScheduledLeg(
     return withDeterministicEngineRandom(pairedSeed, () => {
       let state = createInitialCrossTierGame(group, leg, pairedSeed, nowMs);
       diagnosticState = state;
-      const random = new SeededRandom(`${pairedSeed}:clock`);
       const captureTriggerChanges = (
         previous: Record<Side, Partial<Record<AugmentId, number>>> | null,
         next: GameState,
@@ -738,13 +756,11 @@ export function playCrossTierScheduledLeg(
           stuck = true;
           break;
         }
-        const spread = options.thinkTimeMaxMs - options.thinkTimeMinMs + 1;
-        nowMs += options.thinkTimeMinMs + (spread > 1 ? random.int(spread) : 0);
         const beforeTriggers = structuredClone(
           state.augment?.triggerCounts ?? { black: {}, white: {} },
         );
         if (decision.action.type === "pass_extra_move") {
-          const augmentId = state.augment?.extraMove[side]?.augmentId;
+          const augmentId = pendingPassAugmentId(state, side);
           if (!augmentId) throw new Error(`${side} passed an extra move without a granting augment.`);
           passExtraMoveCounts[side][augmentId] =
             (passExtraMoveCounts[side][augmentId] ?? 0) + 1;
@@ -1211,15 +1227,8 @@ export function validateCrossTierLegResult(
       }
     }
   }
-  if (result.finalClockMs === null) {
-    if (result.exception === null) throw new Error("A non-exception cross-tier leg is missing its clock.");
-  } else {
-    const clock = strictRecord(result.finalClockMs, SIDES, "Cross-tier final clock");
-    for (const side of SIDES) {
-      if (typeof clock[side] !== "number" || !Number.isFinite(clock[side]) || clock[side] < 0) {
-        throw new Error(`Cross-tier ${side} final clock is invalid.`);
-      }
-    }
+  if (result.finalClockMs !== null) {
+    throw new Error("A product-stability cross-tier leg must not retain a simulation clock.");
   }
   strictRecord(result.focal, SIDES, "Cross-tier focal metrics");
   for (const side of SIDES) {
@@ -1248,9 +1257,11 @@ export function validateCrossTierLegResult(
     if (typeof metric.selected !== "boolean" || typeof metric.opportunity !== "boolean") {
       throw new Error(`Cross-tier ${side} focal flags must be boolean.`);
     }
+    const focalDefinition = getAugmentDefinition(metric.augmentId);
     if (
       !finiteNonNegativeInteger(metric.triggers) ||
-      metric.triggers > getAugmentDefinition(metric.augmentId).charges
+      (focalDefinition.activation !== "passive" &&
+        metric.triggers > focalDefinition.charges)
     ) {
       throw new Error(`Cross-tier ${side} focal trigger count is invalid.`);
     }
@@ -1273,7 +1284,7 @@ export function validateCrossTierLegResult(
     }
   }
   strictRecord(result.passExtraMoveCounts, SIDES, "Cross-tier pass-extra-move counts");
-  const catalogIds = new Set(AUGMENT_CATALOG.map((card) => card.id));
+  const catalogIds = new Set(SIMULATION_ELIGIBLE_AUGMENT_IDS);
   for (const side of SIDES) {
     const counts = plainRecord(
       result.passExtraMoveCounts[side],
@@ -1473,8 +1484,17 @@ export function crossTierConfigFingerprint(
   algorithmVersion: string = BALANCE_ALGORITHM_VERSION,
   engineRulesFingerprint: string = BALANCE_ENGINE_RULES_FINGERPRINT,
 ) {
+  const normalizedOptions = normalizeTournamentOptions(options);
   return String(
-    hashSeed(stableStringify({ algorithmVersion, engineRulesFingerprint, options })),
+    hashSeed(
+      stableStringify({
+        algorithmVersion,
+        engineRulesFingerprint,
+        options: normalizedOptions,
+        simulationEligibleAugmentIds: SIMULATION_ELIGIBLE_AUGMENT_IDS,
+        excludedClockAugmentIds: EXCLUDED_CLOCK_AUGMENT_IDS,
+      }),
+    ),
   );
 }
 
@@ -1705,16 +1725,22 @@ export function buildCrossTierReport(
     (estimate, index) =>
       estimate !== null && (index === 0 || (tierEstimates[index - 1] ?? -Infinity) > estimate),
   );
-  const nonSetupCards = AUGMENT_CATALOG.filter((card) => card.activation !== "setup");
-  const setupCards = AUGMENT_CATALOG.filter((card) => card.activation === "setup");
+  const nonSetupCards = SIMULATION_ELIGIBLE_AUGMENTS.filter(
+    (card) => card.activation !== "setup",
+  );
+  const setupCards = SIMULATION_ELIGIBLE_AUGMENTS.filter(
+    (card) => card.activation === "setup",
+  );
   const sampleContainsCard = (sample: CrossTierMirrorSample, id: AugmentId) =>
     sample.higherCard === id || sample.lowerCard === id;
-  const executedCards = AUGMENT_CATALOG.filter((card) => (aggregate.cardGroups[card.id] ?? 0) > 0)
+  const executedCards = SIMULATION_ELIGIBLE_AUGMENTS.filter(
+    (card) => (aggregate.cardGroups[card.id] ?? 0) > 0,
+  )
     .length;
-  const roundOrderCompleteCards = AUGMENT_CATALOG.filter(
+  const roundOrderCompleteCards = SIMULATION_ELIGIBLE_AUGMENTS.filter(
     (card) => (aggregate.cardScores[card.id]?.length ?? 0) > 0,
   ).length;
-  const setupCompleteCards = AUGMENT_CATALOG.filter(
+  const setupCompleteCards = SIMULATION_ELIGIBLE_AUGMENTS.filter(
     (card) => (aggregate.setupCardScores[card.id]?.length ?? 0) > 0,
   ).length;
   const nonSetupBothOrdersCompleteCards = nonSetupCards.filter((card) =>
@@ -1727,9 +1753,9 @@ export function buildCrossTierReport(
   const setupFocalCompleteCards = setupCards.filter((card) =>
     setupSamples.some((sample) => sampleContainsCard(sample, card.id)),
   ).length;
-  const missingCards = AUGMENT_CATALOG.filter((card) => !(aggregate.cardGroups[card.id] ?? 0)).map(
-    (card) => card.id,
-  );
+  const missingCards = SIMULATION_ELIGIBLE_AUGMENTS.filter(
+    (card) => !(aggregate.cardGroups[card.id] ?? 0),
+  ).map((card) => card.id);
   const sampleSufficient = comparisons.every((comparison) => comparison.sampleSufficient);
   const plannedAndComplete =
     plannedGroups !== null &&
@@ -1747,17 +1773,17 @@ export function buildCrossTierReport(
     aggregate.draftTiming.reachedLegs === aggregate.games &&
     aggregate.draftTiming.revealedLegs === aggregate.games &&
     aggregate.draftTiming.roundTwoFocalSelections === aggregate.games &&
-    executedCards === AUGMENT_CATALOG.length &&
+    executedCards === SIMULATION_ELIGIBLE_COUNT &&
     missingCards.length === 0 &&
     nonSetupBothOrdersCompleteCards === nonSetupCards.length &&
     setupFocalCompleteCards === setupCards.length &&
     aggregate.strata.round_order.scheduledGroups ===
       aggregate.strata.round_order.completeMirrorGroups &&
     aggregate.strata.setup.scheduledGroups === aggregate.strata.setup.completeMirrorGroups &&
-    comparisons.length === buildCrossTierComparisons().length &&
-    sampleSufficient;
+    comparisons.length === buildCrossTierComparisons().length;
   return {
-    schemaVersion: 4,
+    purpose: "diagnostic_only",
+    schemaVersion: 5,
     algorithmVersion: BALANCE_ALGORITHM_VERSION,
     engineRulesFingerprint: BALANCE_ENGINE_RULES_FINGERPRINT,
     generatedAt: new Date().toISOString(),
@@ -1765,8 +1791,10 @@ export function buildCrossTierReport(
     configFingerprint: crossTierConfigFingerprint(options),
     scheduleFingerprint: crossTierScheduleFingerprint(),
     seed: options.seed,
-    options: structuredClone(options),
-    catalogSize: AUGMENT_CATALOG.length,
+    options: normalizeTournamentOptions(options),
+    catalogSize: SIMULATION_CATALOG_SIZE,
+    simulationEligibleSize: SIMULATION_ELIGIBLE_COUNT,
+    excludedClockAugmentIds: [...EXCLUDED_CLOCK_AUGMENT_IDS],
     intervalMethod: "deterministic mirror-group percentile bootstrap",
     acceptancePass,
     global: {
@@ -1807,7 +1835,7 @@ export function buildCrossTierReport(
     },
     comparisons,
     setupComparisons,
-    cards: AUGMENT_CATALOG.map((definition) => ({
+    cards: SIMULATION_ELIGIBLE_AUGMENTS.map((definition) => ({
       id: definition.id,
       suit: definition.suit,
       role: "focal" as const,
@@ -1835,6 +1863,7 @@ export function buildCrossTierReport(
       ),
     },
     coverage: {
+      eligibleCards: SIMULATION_ELIGIBLE_COUNT,
       executedCards,
       roundOrderCompleteCards,
       setupCompleteCards,
@@ -1846,6 +1875,8 @@ export function buildCrossTierReport(
     },
     legs: structuredClone(aggregate.legResults),
     limitations: [
+      "Cross-tier estimates are optional diagnostics only; neither ordering nor parity confidence is an acceptance gate or an automatic tuning signal.",
+      "Clock augments are excluded from matches and from every coverage denominator; focused product tests retain clock-rule coverage.",
       "Non-setup focal cards are tested in both higher-first and lower-first orders. The engine plays nine legal moves before the formal move-10 draft selects and reveals the second focal card.",
       "Setup-only focal cards are legal only in round one and are reported in a separate setup stratum; they are excluded from pure tier-order estimates.",
       "Tier point estimates weight represented cards equally. Intervals use deterministic mirror-group percentile bootstrap resampling rather than per-game normal approximations.",

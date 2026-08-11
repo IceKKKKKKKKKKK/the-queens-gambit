@@ -403,6 +403,35 @@ summary:focus-visible {
   cursor: pointer;
 }
 
+@keyframes augment-piece-vanish {
+  0% {
+    opacity: 1;
+    transform: translate(-50%, -50%) scale(1);
+  }
+  55% {
+    opacity: 0.82;
+    transform: translate(-50%, -50%) scale(0.88);
+  }
+  100% {
+    opacity: 0;
+    transform: translate(-50%, -50%) scale(0.58);
+  }
+}
+
+@keyframes augment-effect-ring {
+  0% {
+    opacity: 0;
+    transform: scale(0.55);
+  }
+  35% {
+    opacity: 1;
+  }
+  100% {
+    opacity: 0;
+    transform: scale(1.18);
+  }
+}
+
 .room-identity {
   display: flex;
   align-items: center;
@@ -884,6 +913,104 @@ summary:focus-visible {
   opacity: 0.35;
 }
 
+.board-command-strip {
+  display: grid;
+  width: 100%;
+  padding: 12px 13px;
+  gap: 10px;
+  border: 1px double var(--black);
+  border-radius: 4px;
+  background: var(--paper);
+  box-shadow: 3px 3px 0 color-mix(in srgb, var(--black) 12%, transparent);
+}
+
+.board-command-strip > div:not(.board-command-actions):not(.extra-move-pass) {
+  display: grid;
+  gap: 3px;
+}
+
+.board-command-strip strong {
+  font-family: "Iowan Old Style", Baskerville, "Times New Roman", serif;
+  font-size: 14px;
+  letter-spacing: 0.04em;
+}
+
+.board-command-strip span {
+  color: var(--muted);
+  font-size: 10px;
+  line-height: 1.5;
+}
+
+.board-command-actions {
+  display: flex;
+  gap: 8px;
+}
+
+.board-command-actions button {
+  min-width: 104px;
+  min-height: 46px;
+  padding: 9px 13px;
+  border: 1px solid var(--black);
+  border-radius: 3px;
+  background: var(--black);
+  color: var(--white);
+  cursor: pointer;
+  font-size: 11px;
+  font-weight: 700;
+}
+
+.board-command-actions button.is-secondary {
+  background: var(--paper);
+  color: var(--black);
+}
+
+.board-command-actions button:disabled {
+  cursor: not-allowed;
+  opacity: 0.35;
+}
+
+.board-command-strip > .extra-move-pass {
+  padding: 0;
+  border: 0;
+}
+
+.augment-rule-status {
+  display: grid;
+  padding: 12px;
+  gap: 9px;
+  border: 1px solid var(--black);
+  border-radius: 4px;
+  background: var(--paper);
+}
+
+.augment-rule-status dl,
+.augment-rule-status dl > div {
+  display: grid;
+  margin: 0;
+}
+
+.augment-rule-status dl {
+  gap: 8px;
+}
+
+.augment-rule-status dl > div {
+  padding-top: 7px;
+  gap: 2px;
+  border-top: 1px dotted var(--line);
+}
+
+.augment-rule-status dt {
+  font-size: 10px;
+  font-weight: 750;
+}
+
+.augment-rule-status dd {
+  margin: 0;
+  color: var(--muted);
+  font-size: 9px;
+  line-height: 1.45;
+}
+
 .quiet-menu summary,
 .rules-card summary {
   cursor: pointer;
@@ -1182,6 +1309,52 @@ summary:focus-visible {
 
 .exchange-animation-cell[data-exchange-leg="second"] {
   z-index: 21;
+}
+
+.augment-relocation-cell {
+  z-index: 23;
+}
+
+.augment-relocation-visual {
+  animation-duration: 300ms;
+  animation-name: battle-piece-move;
+}
+
+.augment-effect-cell {
+  position: relative;
+  z-index: 24;
+  min-width: 0;
+  min-height: 0;
+  pointer-events: none;
+}
+
+.augment-effect-cell,
+.augment-effect-cell * {
+  pointer-events: none;
+}
+
+.augment-effect-piece {
+  position: absolute;
+  z-index: 2;
+  top: 50%;
+  left: 50%;
+  width: 90%;
+  height: 90%;
+  animation: augment-piece-vanish 320ms cubic-bezier(0.4, 0, 1, 1) both;
+}
+
+.augment-effect-ring {
+  position: absolute;
+  z-index: 4;
+  inset: 14%;
+  border: 2px double var(--black);
+  border-radius: 50%;
+  animation: augment-effect-ring 320ms ease-out both;
+}
+
+.augment-effect-cell.is-pulse .augment-effect-ring {
+  inset: 8%;
+  border-style: dashed;
 }
 
 .battle-defender-ghost {
@@ -1506,6 +1679,29 @@ summary:focus-visible {
   color: var(--white);
 }
 
+.headquarters-gate-badge {
+  position: absolute;
+  z-index: 7;
+  bottom: 0;
+  left: 0;
+  min-width: 30px;
+  padding: 2px 4px;
+  border: 1px double var(--black);
+  border-radius: 999px;
+  background: var(--white);
+  color: var(--black);
+  font-size: clamp(7px, 1.2vw, 9px);
+  font-weight: 800;
+  line-height: 1;
+  letter-spacing: 0.06em;
+  pointer-events: none;
+}
+
+.station-hit.is-gate-unlocked .headquarters-gate-badge {
+  background: var(--black);
+  color: var(--white);
+}
+
 .is-flipped .headquarters-mark {
   transform: translate(-50%, -50%) rotate(180deg);
 }
@@ -1513,6 +1709,14 @@ summary:focus-visible {
 .is-flipped .headquarters-badge {
   top: auto;
   bottom: 0;
+  transform: rotate(180deg);
+}
+
+.is-flipped .headquarters-gate-badge {
+  top: 0;
+  right: 0;
+  bottom: auto;
+  left: auto;
   transform: rotate(180deg);
 }
 
@@ -1581,6 +1785,39 @@ summary:focus-visible {
 .piece-model.side-white {
   --piece-fill: var(--white);
   --piece-ink: var(--black);
+}
+
+.augment-piece-badge {
+  position: absolute;
+  z-index: 9;
+  display: grid;
+  min-width: 20px;
+  min-height: 18px;
+  padding: 2px 3px;
+  place-items: center;
+  border: 1px solid var(--black);
+  border-radius: 999px;
+  background: var(--white);
+  color: var(--black);
+  font-size: clamp(7px, 1.25vw, 9px);
+  font-weight: 850;
+  line-height: 1;
+  pointer-events: none;
+}
+
+.augment-piece-badge.is-promoted {
+  top: -2px;
+  left: -2px;
+}
+
+.augment-piece-badge.is-damaged-mine {
+  right: -2px;
+  bottom: -2px;
+  border-style: double;
+}
+
+.is-flipped .augment-piece-badge {
+  transform: rotate(180deg);
 }
 
 .station-hit.is-last-move-from {
@@ -2733,6 +2970,25 @@ body:has(.augment-draft-overlay) {
   .side-panel {
     width: 100%;
   }
+
+  .board-command-strip {
+    position: sticky;
+    z-index: 30;
+    top: 8px;
+    padding: 10px;
+  }
+
+  .board-command-actions {
+    display: grid;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  .board-command-actions button,
+  .board-command-strip .extra-move-pass button {
+    min-width: 0;
+    min-height: 48px;
+    touch-action: manipulation;
+  }
 }
 
 @media (max-width: 780px) {
@@ -2842,7 +3098,8 @@ body:has(.augment-draft-overlay) {
 
   .battle-animation-cell,
   .battle-defender-ghost,
-  .battle-impact {
+  .battle-impact,
+  .augment-effect-cell {
     visibility: hidden !important;
   }
 

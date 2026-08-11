@@ -24,7 +24,6 @@ import {
 import {
   SeededRandom,
   catalogFingerprint,
-  cardsBySuit,
   chooseDraftCard,
   chooseVisibleAction,
   hashSeed,
@@ -33,13 +32,23 @@ import {
   type DraftStrengthModel,
   type SearchOptions,
 } from "./visible-policy.ts";
+import {
+  EXCLUDED_CLOCK_AUGMENT_IDS,
+  SIMULATION_CATALOG_SIZE,
+  SIMULATION_ELIGIBLE_AUGMENT_IDS,
+  SIMULATION_ELIGIBLE_AUGMENTS,
+  SIMULATION_ELIGIBLE_COUNT,
+  assertSimulationPoolReady,
+  isSimulationEligibleAugment,
+  simulationIdsBySuit,
+} from "./simulation-pool.ts";
 
 const SIDES = ["black", "white"] as const;
-const SCHEMA_VERSION = 4 as const;
+const SCHEMA_VERSION = 5 as const;
 export const BALANCE_ENGINE_RULES_FINGERPRINT =
   THREEFOLD_REPETITION_RULES_FINGERPRINT;
 export const BALANCE_ALGORITHM_VERSION =
-  "hidden-info-balance-v11-threefold-public-occurrence" as const;
+  "product-stability-v13-v3-no-clock-zero-time-deterministic-ids" as const;
 
 export interface TournamentOptions {
   seed: number;
@@ -48,6 +57,25 @@ export interface TournamentOptions {
   thinkTimeMaxMs: number;
   search: SearchOptions;
   refreshMargin: number;
+}
+
+/** Bot matches never advance wall-clock time, regardless of legacy CLI input. */
+export function normalizeTournamentOptions(
+  options: TournamentOptions,
+): TournamentOptions {
+  return {
+    ...structuredClone(options),
+    thinkTimeMinMs: 0,
+    thinkTimeMaxMs: 0,
+  };
+}
+
+export function pendingPassAugmentId(state: GameState, side: Side) {
+  return (
+    state.augment?.extraMove[side]?.augmentId ??
+    state.augment?.ruleState?.multiMove[side]?.augmentId ??
+    null
+  );
 }
 
 export interface MirrorLeg {
@@ -222,6 +250,7 @@ export interface TuningSuggestion {
 }
 
 export interface BalanceReport {
+  purpose: "product_stability";
   schemaVersion: typeof SCHEMA_VERSION;
   algorithmVersion: typeof BALANCE_ALGORITHM_VERSION;
   engineRulesFingerprint: typeof BALANCE_ENGINE_RULES_FINGERPRINT;
@@ -229,6 +258,13 @@ export interface BalanceReport {
   runId: string;
   catalogFingerprint: string;
   catalogSize: number;
+  simulationEligibleSize: number;
+  excludedClockAugmentIds: AugmentId[];
+  simulationCoverage: {
+    covered: number;
+    total: number;
+    missing: AugmentId[];
+  };
   configFingerprint: string;
   scheduleFingerprint: string;
   seed: number;
@@ -313,7 +349,7 @@ export function mirrorLegs(cardA: AugmentId, cardB: AugmentId): MirrorLeg[] {
 }
 
 export function buildRoundRobinPairings(): Pairing[] {
-  const grouped = cardsBySuit();
+  const grouped = simulationIdsBySuit();
   const result: Pairing[] = [];
   for (const suit of AUGMENT_SUITS) {
     const cards = [...grouped[suit]].sort();
@@ -326,6 +362,33 @@ export function buildRoundRobinPairings(): Pairing[] {
           pairKey: `${suit}:${cards[first]}::${cards[second]}`,
         });
       }
+    }
+  }
+  return result;
+}
+
+/**
+ * Lightweight same-suit ring used by the long product-stability worker.
+ * Every eligible card appears in two neighboring pairings per cycle without
+ * paying the Cartesian cost of a balance-calibration round robin.
+ */
+export function buildProductStabilityPairings(): Pairing[] {
+  const grouped = simulationIdsBySuit();
+  const result: Pairing[] = [];
+  for (const suit of AUGMENT_SUITS) {
+    const cards = [...grouped[suit]].sort();
+    if (cards.length < 2) continue;
+    for (let index = 0; index < cards.length; index += 1) {
+      const pair = [cards[index], cards[(index + 1) % cards.length]].sort() as [
+        AugmentId,
+        AugmentId,
+      ];
+      result.push({
+        suit,
+        cardA: pair[0],
+        cardB: pair[1],
+        pairKey: `stability:${suit}:${pair[0]}::${pair[1]}`,
+      });
     }
   }
   return result;
@@ -415,8 +478,17 @@ export function tournamentConfigFingerprint(
   algorithmVersion: string = BALANCE_ALGORITHM_VERSION,
   engineRulesFingerprint: string = BALANCE_ENGINE_RULES_FINGERPRINT,
 ) {
+  const normalizedOptions = normalizeTournamentOptions(options);
   return String(
-    hashSeed(stableStringify({ algorithmVersion, engineRulesFingerprint, options })),
+    hashSeed(
+      stableStringify({
+        algorithmVersion,
+        engineRulesFingerprint,
+        options: normalizedOptions,
+        simulationEligibleAugmentIds: SIMULATION_ELIGIBLE_AUGMENT_IDS,
+        excludedClockAugmentIds: EXCLUDED_CLOCK_AUGMENT_IDS,
+      }),
+    ),
   );
 }
 
@@ -521,8 +593,13 @@ export function validateCheckpoint(
 
 export function withDeterministicEngineRandom<T>(seed: number | string, task: () => T): T {
   const random = new SeededRandom(seed);
+  const uuidRandom = new SeededRandom(`${String(seed)}:uuid`);
   const originalMathRandom = Math.random;
   const originalGetRandomValues = globalThis.crypto.getRandomValues;
+  const originalRandomUuidDescriptor = Object.getOwnPropertyDescriptor(
+    globalThis.crypto,
+    "randomUUID",
+  );
   Object.defineProperty(Math, "random", { configurable: true, value: () => random.next() });
   Object.defineProperty(globalThis.crypto, "getRandomValues", {
     configurable: true,
@@ -535,6 +612,23 @@ export function withDeterministicEngineRandom<T>(seed: number | string, task: ()
       return array;
     },
   });
+  Object.defineProperty(globalThis.crypto, "randomUUID", {
+    configurable: true,
+    value: () => {
+      const bytes = Array.from(
+        { length: 16 },
+        () => uuidRandom.nextUint32() & 0xff,
+      );
+      bytes[6] = (bytes[6] & 0x0f) | 0x40;
+      bytes[8] = (bytes[8] & 0x3f) | 0x80;
+      const hex = bytes.map((byte) => byte.toString(16).padStart(2, "0"));
+      return (
+        `${hex.slice(0, 4).join("")}-${hex.slice(4, 6).join("")}-` +
+        `${hex.slice(6, 8).join("")}-${hex.slice(8, 10).join("")}-` +
+        hex.slice(10).join("")
+      );
+    },
+  });
   try {
     return task();
   } finally {
@@ -543,11 +637,23 @@ export function withDeterministicEngineRandom<T>(seed: number | string, task: ()
       configurable: true,
       value: originalGetRandomValues,
     });
+    if (originalRandomUuidDescriptor) {
+      Object.defineProperty(
+        globalThis.crypto,
+        "randomUUID",
+        originalRandomUuidDescriptor,
+      );
+    } else {
+      delete (globalThis.crypto as unknown as { randomUUID?: () => string }).randomUUID;
+    }
   }
 }
 
 function optionsForForcedPick(suit: AugmentSuit, pick: AugmentId) {
-  const candidates = AUGMENT_CATALOG.filter((card) => card.suit === suit)
+  if (!isSimulationEligibleAugment(pick)) {
+    throw new Error(`${pick} is excluded from automated match simulation.`);
+  }
+  const candidates = SIMULATION_ELIGIBLE_AUGMENTS.filter((card) => card.suit === suit)
     .map((card) => card.id)
     .filter((id) => id !== pick)
     .sort();
@@ -555,10 +661,92 @@ function optionsForForcedPick(suit: AugmentSuit, pick: AugmentId) {
   return [pick, candidates[0], candidates[1]] as [AugmentId, AugmentId, AugmentId];
 }
 
+function shuffleWithSeed<T>(values: T[], seed: number | string) {
+  const random = new SeededRandom(seed);
+  for (let index = values.length - 1; index > 0; index -= 1) {
+    const swapIndex = random.int(index + 1);
+    [values[index], values[swapIndex]] = [values[swapIndex], values[index]];
+  }
+  return values;
+}
+
+/**
+ * Replaces any clock card produced by the product draft RNG with an unseen,
+ * same-suit, round-legal simulation card. The authoritative draft shape and
+ * encountered-card history remain valid, including after a refresh.
+ */
+export function constrainActiveDraftToSimulationPool(
+  initial: GameState,
+  seed: number | string,
+) {
+  if (
+    (initial.phase !== "setup" && initial.phase !== "augment_draft") ||
+    !initial.augment?.draft.activeRound
+  ) {
+    return initial;
+  }
+  const next = structuredClone(initial);
+  const draft = next.augment!.draft;
+  const roundNumber = draft.activeRound!;
+  const round = draft.rounds.find((candidate) => candidate.number === roundNumber);
+  if (!round) throw new Error("Simulation draft is missing its active round.");
+
+  for (const side of SIDES) {
+    const player = round.players[side];
+    if (player.locked) {
+      if (player.options.some((id) => !isSimulationEligibleAugment(id))) {
+        throw new Error(`${side} locked an excluded clock augment before simulation filtering.`);
+      }
+      continue;
+    }
+    const originalOptions = [...round.players[side].options];
+    const currentOptionSet = new Set(originalOptions);
+    const priorSeen = [...new Set(
+      draft.seenBySide[side].filter(
+        (id) => isSimulationEligibleAugment(id) && !currentOptionSet.has(id),
+      ),
+    )];
+    const loadout = new Set(draft.loadouts[side]);
+    const roundEligible = (id: AugmentId) => {
+      const definition = getAugmentDefinition(id);
+      return (
+        isSimulationEligibleAugment(id) &&
+        definition.suit === round.suit &&
+        (roundNumber === 1 || definition.activation !== "setup") &&
+        !loadout.has(id)
+      );
+    };
+    const retained = originalOptions.filter(
+      (id, index) =>
+        roundEligible(id) &&
+        originalOptions.indexOf(id) === index &&
+        !priorSeen.includes(id),
+    );
+    const retainedSet = new Set(retained);
+    const replacementPool = shuffleWithSeed(
+      SIMULATION_ELIGIBLE_AUGMENTS
+        .filter((definition) => roundEligible(definition.id))
+        .map((definition) => definition.id)
+        .filter((id) => !priorSeen.includes(id) && !retainedSet.has(id)),
+      `${String(seed)}:${side}`,
+    );
+    const options = [...retained, ...replacementPool].slice(0, 3);
+    if (options.length !== 3) {
+      throw new Error(`${side} has fewer than three eligible simulation draft options.`);
+    }
+    round.players[side].options = options as [AugmentId, AugmentId, AugmentId];
+    draft.seenBySide[side] = [...new Set([...priorSeen, ...options])];
+  }
+  return next;
+}
+
 function forceOpeningOffers(state: GameState, blackCard: AugmentId, whiteCard: AugmentId) {
   if (!state.augment) throw new Error("Controlled game has no augment runtime.");
   const blackDefinition = getAugmentDefinition(blackCard);
   const whiteDefinition = getAugmentDefinition(whiteCard);
+  if (!isSimulationEligibleAugment(blackCard) || !isSimulationEligibleAugment(whiteCard)) {
+    throw new Error("Controlled simulation pairs cannot contain clock augments.");
+  }
   if (blackDefinition.suit !== whiteDefinition.suit) {
     throw new Error("A controlled pair must belong to one suit/tier.");
   }
@@ -659,7 +847,9 @@ export function createControlledPairGame(
     // controls that coin so every card/color assignment is tested with both openers.
     state.firstTurn = firstTurn;
     state.turn = firstTurn;
-    if (state.clock) state.clock.turnStartedAt = nowMs;
+    // Product ranked rooms retain their clock. Automated matches intentionally
+    // remove it so zero-think simulations cannot end on timing artifacts.
+    state.clock = null;
     const startEvent = [...state.events].reverse().find((event) => event.result === "game_started");
     if (startEvent) startEvent.actor = firstTurn;
     return state;
@@ -674,13 +864,14 @@ function modelCardScore(
   return chooseDraftCard([id], opponentCards, model).score;
 }
 
-function completeActiveDraft(
+export function completeActiveDraft(
   initial: GameState,
   model: DraftStrengthModel,
   refreshMargin: number,
   nowMs: number,
+  draftSeed: number | string,
 ) {
-  let state = initial;
+  let state = constrainActiveDraftToSimulationPool(initial, draftSeed);
   const records: DraftChoiceRecord[] = [];
   const activeRound = state.augment?.draft.activeRound;
   if (!activeRound) throw new Error("No active draft to complete.");
@@ -699,9 +890,10 @@ function completeActiveDraft(
         score: modelCardScore(id, opponentCards, model),
       }));
       scored.sort((first, second) => first.score - second.score || first.id.localeCompare(second.id));
-      const unseen = AUGMENT_CATALOG.filter(
+      const unseen = SIMULATION_ELIGIBLE_AUGMENTS.filter(
         (card) =>
           card.suit === round!.suit &&
+          (activeRound === 1 || card.activation !== "setup") &&
           !view.augment!.draft.seenIds!.includes(card.id) &&
           !view.augment!.draft.loadouts[side].includes(card.id),
       );
@@ -715,6 +907,10 @@ function completeActiveDraft(
           side,
           { type: "augment_refresh", slot: scored[0].slot },
           nowMs,
+        );
+        state = constrainActiveDraftToSimulationPool(
+          state,
+          `${String(draftSeed)}:${side}:refresh`,
         );
         refreshed = true;
         view = projectGame(state, side, nowMs);
@@ -771,11 +967,27 @@ export function playLeg(
   options: TournamentOptions,
   model: DraftStrengthModel = {},
 ): LegResult {
+  options = normalizeTournamentOptions(options);
   const pairedSeed = groupSeed(options, group);
   const gameSeed = pairedSeed;
+  let diagnosticState: GameState | null = null;
+  const draftChoices: DraftChoiceRecord[] = [];
+  const opportunitySets: Record<Side, Set<AugmentId>> = {
+    black: new Set<AugmentId>(),
+    white: new Set<AugmentId>(),
+  };
+  const firstTriggerMoves: Record<Side, Partial<Record<AugmentId, number>>> = {
+    black: {},
+    white: {},
+  };
+  const passExtraMoveCounts: Record<Side, Partial<Record<AugmentId, number>>> = {
+    black: {},
+    white: {},
+  };
+  let searchNodes = 0;
   try {
     return withDeterministicEngineRandom(gameSeed, () => {
-      let nowMs = 1_000_000;
+      const nowMs = 1_000_000;
       let state = createControlledPairGame(
         leg.blackCard,
         leg.whiteCard,
@@ -783,21 +995,7 @@ export function playLeg(
         `${gameSeed}:setup`,
         nowMs,
       );
-      const random = new SeededRandom(`${gameSeed}:clock`);
-      const draftChoices: DraftChoiceRecord[] = [];
-      const opportunitySets: Record<Side, Set<AugmentId>> = {
-        black: new Set<AugmentId>(),
-        white: new Set<AugmentId>(),
-      };
-      const firstTriggerMoves: Record<Side, Partial<Record<AugmentId, number>>> = {
-        black: {},
-        white: {},
-      };
-      const passExtraMoveCounts: Record<Side, Partial<Record<AugmentId, number>>> = {
-        black: {},
-        white: {},
-      };
-      let searchNodes = 0;
+      diagnosticState = state;
       let decisionOrdinal = 0;
       let stuck = false;
       const captureTriggerChanges = (
@@ -829,8 +1027,15 @@ export function playLeg(
           const beforeTriggers = structuredClone(
             state.augment?.triggerCounts ?? { black: {}, white: {} },
           );
-          const completed = completeActiveDraft(state, model, options.refreshMargin, nowMs);
+          const completed = completeActiveDraft(
+            state,
+            model,
+            options.refreshMargin,
+            nowMs,
+            `${gameSeed}:draft:${state.moveNumber}:${draftChoices.length}`,
+          );
           state = completed.state;
+          diagnosticState = state;
           draftChoices.push(...completed.records);
           captureTriggerChanges(beforeTriggers, state);
           assertStateInvariants(state);
@@ -858,18 +1063,17 @@ export function playLeg(
           stuck = true;
           break;
         }
-        const spread = options.thinkTimeMaxMs - options.thinkTimeMinMs + 1;
-        nowMs += options.thinkTimeMinMs + (spread > 1 ? random.int(spread) : 0);
         const beforeTriggers = structuredClone(
           state.augment?.triggerCounts ?? { black: {}, white: {} },
         );
         if (decision.action.type === "pass_extra_move") {
-          const augmentId = state.augment?.extraMove[side]?.augmentId;
+          const augmentId = pendingPassAugmentId(state, side);
           if (!augmentId) throw new Error(`${side} passed an extra move without a granting augment.`);
           passExtraMoveCounts[side][augmentId] =
             (passExtraMoveCounts[side][augmentId] ?? 0) + 1;
         }
         state = applyPlayerAction(state, side, decision.action, nowMs);
+        diagnosticState = state;
         captureTriggerChanges(beforeTriggers, state);
         assertStateInvariants(state);
       }
@@ -906,6 +1110,7 @@ export function playLeg(
       };
     });
   } catch (error) {
+    const state = diagnosticState as GameState | null;
     return {
       groupKey: group.groupKey,
       leg,
@@ -919,14 +1124,24 @@ export function playLeg(
       capped: false,
       stuck: false,
       exception: error instanceof Error ? error.message : String(error),
-      moves: 0,
-      searchNodes: 0,
-      passExtraMoveCounts: { black: {}, white: {} },
-      triggerCounts: { black: {}, white: {} },
-      loadouts: { black: [leg.blackCard], white: [leg.whiteCard] },
-      opportunityAugments: { black: [], white: [] },
-      firstTriggerMoves: { black: {}, white: {} },
-      draftChoices: [],
+      moves: state?.moveNumber ?? 0,
+      searchNodes,
+      passExtraMoveCounts,
+      triggerCounts: structuredClone(
+        state?.augment?.triggerCounts ?? { black: {}, white: {} },
+      ),
+      loadouts: structuredClone(
+        state?.augment?.draft.loadouts ?? {
+          black: [leg.blackCard],
+          white: [leg.whiteCard],
+        },
+      ),
+      opportunityAugments: {
+        black: [...opportunitySets.black].sort(),
+        white: [...opportunitySets.white].sort(),
+      },
+      firstTriggerMoves,
+      draftChoices,
     };
   }
 }
@@ -1117,7 +1332,7 @@ export function recordMirrorGroup(
 export function strengthModelFromAggregate(aggregate: TournamentAggregate): DraftStrengthModel {
   const ratings: Partial<Record<AugmentId, number>> = {};
   const counters: Partial<Record<AugmentId, Partial<Record<AugmentId, number>>>> = {};
-  for (const id of AUGMENT_IDS) {
+  for (const id of SIMULATION_ELIGIBLE_AUGMENT_IDS) {
     const interval = meanConfidenceInterval(aggregate.cards[id].mirrorScores);
     if (interval) ratings[id] = (interval.estimate - 0.5) * 80;
   }
@@ -1131,7 +1346,7 @@ export function strengthModelFromAggregate(aggregate: TournamentAggregate): Draf
 }
 
 function bestResponseRows(aggregate: TournamentAggregate) {
-  return AUGMENT_IDS.map((card) => {
+  return SIMULATION_ELIGIBLE_AUGMENT_IDS.map((card) => {
     const matchups = Object.values(aggregate.pairs)
       .filter((pair) => pair.cardA === card || pair.cardB === card)
       .map((pair) => {
@@ -1227,10 +1442,10 @@ function adjustedNumericValue(value: number, direction: "buff" | "nerf") {
 export function suggestTuning(aggregate: TournamentAggregate): TuningSuggestion[] {
   const suggestions: TuningSuggestion[] = [];
   for (const suit of AUGMENT_SUITS) {
-    const reports = AUGMENT_CATALOG.filter((card) => card.suit === suit)
+    const reports = SIMULATION_ELIGIBLE_AUGMENTS.filter((card) => card.suit === suit)
       .map((card) => ({ card, interval: meanConfidenceInterval(aggregate.cards[card.id].mirrorScores) }))
       .filter(
-        (entry): entry is { card: (typeof AUGMENT_CATALOG)[number]; interval: ConfidenceInterval } =>
+        (entry): entry is { card: (typeof SIMULATION_ELIGIBLE_AUGMENTS)[number]; interval: ConfidenceInterval } =>
           Boolean(entry.interval && entry.interval.n >= 8),
       );
     if (reports.length < 3) continue;
@@ -1280,7 +1495,7 @@ export function buildBalanceReport(
   const aggregate = checkpoint.aggregate;
   const decisive = aggregate.global.blackWins + aggregate.global.whiteWins;
   const firstDecisive = aggregate.global.firstPlayerWins + aggregate.global.secondPlayerWins;
-  const cards = AUGMENT_CATALOG.map((definition) => {
+  const cards = SIMULATION_ELIGIBLE_AUGMENTS.map((definition) => {
     const stats = aggregate.cards[definition.id];
     const decided = stats.wins + stats.losses;
     return {
@@ -1306,14 +1521,25 @@ export function buildBalanceReport(
       cardAScore: meanConfidenceInterval(pair.cardAMirrorScores),
     }))
     .sort((first, second) => `${first.suit}:${first.cardA}:${first.cardB}`.localeCompare(`${second.suit}:${second.cardA}:${second.cardB}`));
+  const missingEligible = SIMULATION_ELIGIBLE_AUGMENT_IDS.filter(
+    (id) => aggregate.cards[id].games <= 0,
+  );
   return {
+    purpose: "product_stability",
     schemaVersion: SCHEMA_VERSION,
     algorithmVersion: BALANCE_ALGORITHM_VERSION,
     engineRulesFingerprint: BALANCE_ENGINE_RULES_FINGERPRINT,
     generatedAt: new Date().toISOString(),
     runId: checkpoint.runId,
     catalogFingerprint: checkpoint.catalogFingerprint,
-    catalogSize: AUGMENT_CATALOG.length,
+    catalogSize: SIMULATION_CATALOG_SIZE,
+    simulationEligibleSize: SIMULATION_ELIGIBLE_COUNT,
+    excludedClockAugmentIds: [...EXCLUDED_CLOCK_AUGMENT_IDS],
+    simulationCoverage: {
+      covered: SIMULATION_ELIGIBLE_COUNT - missingEligible.length,
+      total: SIMULATION_ELIGIBLE_COUNT,
+      missing: missingEligible,
+    },
     configFingerprint: checkpoint.configFingerprint,
     scheduleFingerprint: checkpoint.scheduleFingerprint,
     seed: checkpoint.seed,
@@ -1327,14 +1553,18 @@ export function buildBalanceReport(
     cards,
     pairs,
     bestResponses: bestResponseRows(aggregate),
-    tuningSuggestions: suggestTuning(aggregate),
-    unsupportedActiveEffects,
+    // Human telemetry, not bot calibration, now owns product balance changes.
+    tuningSuggestions: [],
+    unsupportedActiveEffects: unsupportedActiveEffects.filter(({ id }) =>
+      isSimulationEligibleAugment(id)
+    ),
     limitations: [
       "The policy searches sampled hidden-information worlds and never reads a hidden opposing piece type, but its belief model is an approximation of human inference.",
       "Mirror groups control card color and first move; games within a group are correlated, so mirror-group confidence intervals are preferred over raw per-game intervals.",
       "Finite-depth rollout and empirical best-response selection do not prove a globally optimal strategy or equilibrium.",
-      "Only the v2 product engine's adjudicated threefold repetition is scored as a finished 0.5 draw; action-limit exits remain unfinished capped evidence.",
-      "Automated win rates are balance signals, not a substitute for blind human playtests and telemetry.",
+      "Only the v3 product engine's adjudicated threefold repetition is scored as a finished 0.5 draw; action-limit exits remain unfinished capped evidence.",
+      "Clock augments are deliberately excluded from automated matches and from the coverage denominator while product clock behavior remains covered by focused tests.",
+      "Tier and card win rates are diagnostics only. They are not acceptance gates and do not generate automatic tuning suggestions; human playtests and telemetry own balance changes.",
     ],
     errorSamples: [...aggregate.errorSamples],
   };
@@ -1345,7 +1575,8 @@ export function summarizeReport(report: BalanceReport) {
   const first = report.global.firstPlayerWinRate;
   const black = report.global.blackWinRate;
   const lines = [
-    `catalog=${report.catalogSize} games=${report.global.games} groups=${report.global.groups} finished=${report.global.finished} unfinished=${report.global.unfinished}`,
+    `purpose=${report.purpose} catalog=${report.catalogSize} eligible=${report.simulationEligibleSize} excludedClock=${report.excludedClockAugmentIds.length} coverage=${report.simulationCoverage.covered}/${report.simulationCoverage.total} games=${report.global.games} groups=${report.global.groups} finished=${report.global.finished} unfinished=${report.global.unfinished}`,
+    `excludedClockAugmentIds=${report.excludedClockAugmentIds.join(",")}`,
     `moves=${report.global.moves} searchNodes=${report.global.searchNodes} passExtraMoves=${report.global.passExtraMoves} exceptions=${report.global.exceptions} stuck=${report.global.stuck} capped=${report.global.capped} threefoldDraws=${report.global.threefoldDraws}`,
     `first-player=${format(first?.estimate ?? null)} [${format(first?.low ?? null)}, ${format(first?.high ?? null)}] black=${format(black?.estimate ?? null)}`,
     "suit card games mirror-score[95% CI] pick-rate trigger-rate no-opportunity",
@@ -1357,18 +1588,19 @@ export function summarizeReport(report: BalanceReport) {
         `${format(card.pickRate)} ${format(card.triggerRate)} ${format(card.heldWithoutOpportunityRate)}`,
     );
   }
-  lines.push(`reviewable tuning suggestions=${report.tuningSuggestions.length}`);
+  lines.push("tier/card win rates are diagnostic only; automatic tuning is disabled");
   return lines.join("\n");
 }
 
 export function assertCatalogReadyForTournament() {
+  assertSimulationPoolReady();
   const ids = new Set(AUGMENT_CATALOG.map((card) => card.id));
   if (ids.size !== AUGMENT_CATALOG.length || ids.size !== AUGMENT_IDS.length) {
     throw new Error("Augment catalog IDs are duplicated or inconsistent.");
   }
   for (const suit of AUGMENT_SUITS) {
-    if (AUGMENT_CATALOG.filter((card) => card.suit === suit).length < 3) {
-      throw new Error(`${suit} must contain at least three cards.`);
+    if (SIMULATION_ELIGIBLE_AUGMENTS.filter((card) => card.suit === suit).length < 3) {
+      throw new Error(`${suit} must contain at least three simulation-eligible cards.`);
     }
   }
 }

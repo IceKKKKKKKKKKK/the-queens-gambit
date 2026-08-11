@@ -100,12 +100,18 @@ function cardContents(
   }
 
   const suitLabel = AUGMENT_SUIT_META[augment.suit].label;
-  const usageLabel = augment.charges === 1 ? "一次" : `${augment.charges} 次`;
+  const usageLabel = augment.activation === "passive"
+    ? "持续"
+    : augment.charges === 1
+      ? "一次"
+      : `${augment.charges} 次`;
   const activationLabel = augment.activation === "setup"
     ? "布阵"
-    : ["movement", "exchange", "reconnaissance"].includes(augment.effect.kind)
-      ? "主动"
-      : "自动";
+    : augment.activation === "passive"
+      ? "持续"
+      : augment.activation === "active"
+        ? "主动"
+        : "自动";
 
   return (
     <>
@@ -154,7 +160,7 @@ export default function AugmentCard({
   const suitLabel = augment ? AUGMENT_SUIT_META[augment.suit].label : "未知花色";
   const accessibleName = hidden
     ? `${ownerLabel ? `${ownerLabel}，` : ""}强化尚未公开`
-    : `${ownerLabel ? `${ownerLabel}，` : ""}${augment.name}，${suitLabel}，${status}。${augment.description}，${augment.timing}，可触发 ${augment.charges} 次`;
+    : `${ownerLabel ? `${ownerLabel}，` : ""}${augment.name}，${suitLabel}，${status}。${augment.description}，${augment.timing}，${augment.activation === "passive" ? "持续生效" : `可触发 ${augment.charges} 次`}`;
   const className = joinClasses(
     styles.card,
     compact && styles.cardCompact,

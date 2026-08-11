@@ -1,10 +1,10 @@
 import assert from "node:assert/strict";
-import { spawn } from "node:child_process";
 import { randomBytes } from "node:crypto";
-import net from "node:net";
 import path from "node:path";
 import test from "node:test";
 import { fileURLToPath } from "node:url";
+
+import { openPort, spawnIntegrationServer, waitForServer } from "./integration-server.mjs";
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 let hostIdentity = {};
@@ -19,42 +19,6 @@ function opaqueToken() {
 function uniqueTestIp() {
   const words = Array.from({ length: 6 }, () => randomBytes(2).toString("hex"));
   return `2001:db8:${words.join(":")}`;
-}
-
-async function openPort() {
-  return new Promise((resolve, reject) => {
-    const listener = net.createServer();
-    listener.once("error", reject);
-    listener.listen(0, "127.0.0.1", () => {
-      const address = listener.address();
-      listener.close(() => resolve(address.port));
-    });
-  });
-}
-
-async function waitForServer(origin, child, logs) {
-  const deadline = Date.now() + 45_000;
-  while (Date.now() < deadline) {
-    if (child.exitCode !== null) throw new Error(`dev server exited early: ${logs.value.slice(-600)}`);
-    try {
-      const response = await fetch(origin);
-      if (response.ok) return;
-    } catch {
-      // The server is still starting.
-    }
-    await new Promise((resolve) => setTimeout(resolve, 100));
-  }
-  throw new Error(`dev server did not start: ${logs.value.slice(-600)}`);
-}
-
-async function stopServer(child) {
-  if (child.exitCode !== null) return;
-  child.kill();
-  await Promise.race([
-    new Promise((resolve) => child.once("exit", resolve)),
-    new Promise((resolve) => setTimeout(resolve, 3_000)),
-  ]);
-  if (child.exitCode === null) child.kill("SIGKILL");
 }
 
 function inferredIdentity(url, init = {}) {
@@ -133,19 +97,9 @@ function ownLayout(snapshot, side) {
 test("room API preserves role-based visibility, identity, concurrency, and limits", { timeout: 90_000 }, async (t) => {
   const port = await openPort();
   const origin = `http://localhost:${port}`;
-  const logs = { value: "" };
-  const child = spawn(
-    process.execPath,
-    [path.join(root, "node_modules", "vinext", "dist", "cli.js"), "dev", "--host", "127.0.0.1", "--port", String(port)],
-    { cwd: root, env: { ...process.env, NO_COLOR: "1" }, stdio: ["ignore", "pipe", "pipe"] },
-  );
-  for (const stream of [child.stdout, child.stderr]) {
-    stream.setEncoding("utf8");
-    stream.on("data", (chunk) => {
-      logs.value = `${logs.value}${chunk}`.slice(-4_000);
-    });
-  }
-  t.after(() => stopServer(child));
+  const server = spawnIntegrationServer(root, port, 4_000);
+  const { child, logs } = server;
+  t.after(() => server.stop());
   await waitForServer(origin, child, logs);
 
   const identityNonce = randomBytes(6).toString("hex");

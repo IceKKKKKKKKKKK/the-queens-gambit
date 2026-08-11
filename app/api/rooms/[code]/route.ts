@@ -66,18 +66,25 @@ function redactRankedSpectatorSnapshot(
   const knownOpponentPieceIds = new Set([
     ...(state.augment?.permanentReveals[perspective] ?? []),
     ...(state.augment?.temporaryReveals[perspective] ?? []),
+    ...(state.augment?.ruleState?.publiclyRevealedPieceIds ?? []),
+    ...(state.augment?.ruleState?.promotedPublicIds ?? []),
+    ...Object.keys(state.augment?.ruleState?.mineHits ?? {}),
   ]);
   return {
     ...snapshot,
-    pieces: snapshot.pieces.map((piece) => ({
-      ...piece,
-      type:
-        piece.side === perspective ||
-        piece.flagRevealed ||
-        knownOpponentPieceIds.has(piece.id)
-          ? piece.type
-          : null,
-    })),
+    pieces: snapshot.pieces.map((piece) => {
+      const { originalType, ...publicPiece } = piece;
+      return {
+        ...publicPiece,
+        type:
+          piece.side === perspective ||
+          piece.flagRevealed ||
+          knownOpponentPieceIds.has(piece.id)
+            ? piece.type
+            : null,
+        ...(piece.side === perspective && originalType ? { originalType } : {}),
+      };
+    }),
     replay: null,
   };
 }

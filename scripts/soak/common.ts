@@ -6,10 +6,11 @@ import { promisify } from "node:util";
 import { performance } from "node:perf_hooks";
 
 import { AUGMENT_IDS, type AugmentId } from "../../lib/augments.ts";
+import { SIMULATION_ELIGIBLE_AUGMENT_IDS } from "../balance/simulation-pool.ts";
 
 const execFileAsync = promisify(execFile);
 
-export const SOAK_SCHEMA_VERSION = 1 as const;
+export const SOAK_SCHEMA_VERSION = 2 as const;
 export const SOAK_WORKERS = ["balance", "rules", "api", "animation"] as const;
 export type SoakWorkerName = (typeof SOAK_WORKERS)[number];
 export type SoakProfile = "soak" | "smoke";
@@ -518,9 +519,9 @@ export async function workspaceFingerprint(repositoryRoot: string): Promise<Work
 }
 
 export function allCardsCovered(coverage: Record<AugmentId, number>) {
-  return AUGMENT_IDS.every((id) => coverage[id] > 0);
+  return SIMULATION_ELIGIBLE_AUGMENT_IDS.every((id) => coverage[id] > 0);
 }
 
 export function uncoveredCards(coverage: Record<AugmentId, number>) {
-  return AUGMENT_IDS.filter((id) => coverage[id] <= 0);
+  return SIMULATION_ELIGIBLE_AUGMENT_IDS.filter((id) => coverage[id] <= 0);
 }

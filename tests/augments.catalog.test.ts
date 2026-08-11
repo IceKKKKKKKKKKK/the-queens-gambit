@@ -1,12 +1,16 @@
 import assert from "node:assert/strict";
+import { createHash } from "node:crypto";
 import test from "node:test";
 
 import {
   AUGMENT_CATALOG,
   AUGMENT_CATALOG_VERSION,
   AUGMENT_IDS,
+  AUGMENT_PROMOTION_LADDER,
   AUGMENT_SUITS,
   AUGMENT_SUIT_META,
+  FIFTY_CARD_AUGMENT_CATALOG_VERSION,
+  FIFTY_CARD_AUGMENT_IDS,
   LEGACY_AUGMENT_CATALOG_VERSION,
   LEGACY_AUGMENT_IDS,
   AugmentRuleError,
@@ -47,22 +51,46 @@ function lockBoth(state: AugmentDraftState): AugmentDraftState {
   return next;
 }
 
-test("the catalog has fifty stable, executable definitions in descending poker-suit tiers", () => {
-  assert.equal(AUGMENT_CATALOG_VERSION, "junqi-augments-v2");
+const NEW_V3_AUGMENT_IDS = [
+  "spade-last-headquarters",
+  "spade-cherry-bomb",
+  "spade-lightning-doctrine",
+  "spade-iron-fortress",
+  "spade-volatile-mines",
+  "heart-battalion-ascent",
+  "heart-heavenly-exchange",
+  "heart-sacrifice-aura",
+  "heart-steady-advance",
+  "heart-shadow-redeploy",
+  "club-division-sapper",
+  "club-bombardier",
+  "club-surprise-double-move",
+  "club-bitter-ruse",
+  "club-screened-strike",
+  "diamond-camp-assault",
+  "diamond-command-fusion",
+  "diamond-deep-breath",
+  "diamond-hidden-flag",
+  "diamond-engineer-mutiny",
+] as const satisfies readonly AugmentId[];
+
+test("the catalog has seventy stable, executable definitions in descending poker-suit tiers", () => {
+  assert.equal(AUGMENT_CATALOG_VERSION, "junqi-augments-v3");
+  assert.equal(FIFTY_CARD_AUGMENT_CATALOG_VERSION, "junqi-augments-v2");
   assert.equal(LEGACY_AUGMENT_CATALOG_VERSION, "junqi-augments-v1");
-  assert.equal(AUGMENT_CATALOG.length, 50);
-  assert.equal(AUGMENT_IDS.length, 50);
-  assert.equal(new Set(AUGMENT_IDS).size, 50);
+  assert.equal(AUGMENT_CATALOG.length, 70);
+  assert.equal(AUGMENT_IDS.length, 70);
+  assert.equal(new Set(AUGMENT_IDS).size, 70);
   assert.deepEqual(
     AUGMENT_SUITS.map((suit) => AUGMENT_SUIT_META[suit].strength),
     [4, 3, 2, 1],
   );
 
   const expectedSuitSizes: Record<AugmentSuit, number> = {
-    spades: 13,
-    hearts: 13,
-    clubs: 12,
-    diamonds: 12,
+    spades: 18,
+    hearts: 18,
+    clubs: 17,
+    diamonds: 17,
   };
   for (const suit of AUGMENT_SUITS) {
     const definitions = getAugmentsBySuit(suit);
@@ -124,6 +152,26 @@ test("the catalog has fifty stable, executable definitions in descending poker-s
       "diamond-drill:clock:move_increment",
       "diamond-forward-pair:setup:forward_bomb",
       "diamond-deep-pair:setup:deep_mine",
+      "spade-last-headquarters:objective:last_headquarters",
+      "spade-cherry-bomb:combat:bomb_death_splash",
+      "spade-lightning-doctrine:doctrine:lightning_rank_boost",
+      "spade-iron-fortress:combat:fortress_ties",
+      "spade-volatile-mines:combat:durable_mines",
+      "heart-battalion-ascent:promotion:battalion_on_capture",
+      "heart-heavenly-exchange:exchange:cross_frontline",
+      "heart-sacrifice-aura:promotion:platoon_loss_threshold",
+      "heart-steady-advance:multi_move:two_single_edge_moves",
+      "heart-shadow-redeploy:redeployment:own_region_permutation",
+      "club-division-sapper:combat:division_defuses_mine",
+      "club-bombardier:combat:bomb_second_fuse",
+      "club-surprise-double-move:multi_move:same_piece_twice",
+      "club-bitter-ruse:sacrifice_reconnaissance:sacrifice_frontline_random",
+      "club-screened-strike:combat:screened_division_attack",
+      "diamond-camp-assault:combat:brigade_camp_assault",
+      "diamond-command-fusion:combat:command_fusion",
+      "diamond-deep-breath:setup:rear_three_row_mines",
+      "diamond-hidden-flag:setup:flexible_flag",
+      "diamond-engineer-mutiny:combat:engineer_mutiny",
     ],
   );
 
@@ -138,6 +186,165 @@ test("the catalog has fifty stable, executable definitions in descending poker-s
   assert.equal(isAugmentId("spade-not-a-real-card"), false);
 });
 
+test("v1 and v2 catalog snapshots remain byte-for-byte stable while v3 appends twenty ids", () => {
+  assert.equal(LEGACY_AUGMENT_IDS.length, 20);
+  assert.equal(FIFTY_CARD_AUGMENT_IDS.length, 50);
+  assert.deepEqual(AUGMENT_IDS.slice(0, 50), FIFTY_CARD_AUGMENT_IDS);
+  assert.deepEqual(AUGMENT_IDS.slice(50), NEW_V3_AUGMENT_IDS);
+  assert.ok(LEGACY_AUGMENT_IDS.every((id) => FIFTY_CARD_AUGMENT_IDS.includes(id)));
+
+  const v2Ids = new Set<AugmentId>(FIFTY_CARD_AUGMENT_IDS);
+  const frozenDefinitions = AUGMENT_CATALOG.filter((definition) => v2Ids.has(definition.id));
+  const digest = createHash("sha256")
+    .update(JSON.stringify(frozenDefinitions))
+    .digest("hex");
+  assert.equal(digest, "17aaef454e12d1796a780a7bcd21f35929c7aac2704e51d0730c605e1e586f5e");
+});
+
+test("the twenty v3 cards expose exact activation, charge, and effect discriminants", () => {
+  assert.deepEqual(AUGMENT_PROMOTION_LADDER, [
+    "engineer",
+    "platoon",
+    "company",
+    "battalion",
+    "regiment",
+    "brigade",
+    "division",
+    "general",
+    "commander",
+  ]);
+  assert.deepEqual(
+    NEW_V3_AUGMENT_IDS.map((id) => {
+      const definition = getAugmentDefinition(id);
+      return [id, definition.suit, definition.activation, definition.charges,
+        definition.effect.kind, definition.effect.mode];
+    }),
+    [
+      ["spade-last-headquarters", "spades", "passive", 1, "objective", "last_headquarters"],
+      ["spade-cherry-bomb", "spades", "passive", 1, "combat", "bomb_death_splash"],
+      ["spade-lightning-doctrine", "spades", "passive", 1, "doctrine", "lightning_rank_boost"],
+      ["spade-iron-fortress", "spades", "passive", 1, "combat", "fortress_ties"],
+      ["spade-volatile-mines", "spades", "passive", 1, "combat", "durable_mines"],
+      ["heart-battalion-ascent", "hearts", "passive", 1, "promotion", "battalion_on_capture"],
+      ["heart-heavenly-exchange", "hearts", "active", 2, "exchange", "cross_frontline"],
+      ["heart-sacrifice-aura", "hearts", "passive", 1, "promotion", "platoon_loss_threshold"],
+      ["heart-steady-advance", "hearts", "passive", 1, "multi_move", "two_single_edge_moves"],
+      ["heart-shadow-redeploy", "hearts", "active", 1, "redeployment", "own_region_permutation"],
+      ["club-division-sapper", "clubs", "passive", 1, "combat", "division_defuses_mine"],
+      ["club-bombardier", "clubs", "automatic", 1, "combat", "bomb_second_fuse"],
+      ["club-surprise-double-move", "clubs", "active", 1, "multi_move", "same_piece_twice"],
+      ["club-bitter-ruse", "clubs", "active", 2, "sacrifice_reconnaissance", "sacrifice_frontline_random"],
+      ["club-screened-strike", "clubs", "passive", 1, "combat", "screened_division_attack"],
+      ["diamond-camp-assault", "diamonds", "passive", 1, "combat", "brigade_camp_assault"],
+      ["diamond-command-fusion", "diamonds", "passive", 1, "combat", "command_fusion"],
+      ["diamond-deep-breath", "diamonds", "setup", 1, "setup", "rear_three_row_mines"],
+      ["diamond-hidden-flag", "diamonds", "setup", 1, "setup", "flexible_flag"],
+      ["diamond-engineer-mutiny", "diamonds", "passive", 1, "combat", "engineer_mutiny"],
+    ],
+  );
+
+  assert.deepEqual(getAugmentDefinition("spade-last-headquarters").effect, {
+    kind: "objective",
+    mode: "last_headquarters",
+    flagCaptureRequires: "enemy_has_occupied_other_defender_headquarters",
+    lockedFlagAttack: {
+      result: "flag_protected",
+      consumesAction: true,
+      attackerOutcome: "survives_at_origin",
+      defenderOutcome: "survives_at_target",
+      flagReveal: "permanent_public",
+    },
+  });
+  const lastHeadquarters = getAugmentDefinition("spade-last-headquarters");
+  assert.match(lastHeadquarters.description, /军旗受保护/);
+  assert.match(lastHeadquarters.description, /消耗本次行动/);
+  assert.match(lastHeadquarters.description, /双方原位存活/);
+  assert.match(lastHeadquarters.description, /军旗永久公开/);
+  assert.match(lastHeadquarters.timing, /行动照常消耗/);
+  assert.deepEqual(getAugmentDefinition("spade-lightning-doctrine").effect, {
+    kind: "doctrine",
+    mode: "lightning_rank_boost",
+    rankSteps: 1,
+    excluded: ["commander", "engineer", "mine", "bomb", "flag"],
+    expiresAfterOwnCompletedTurns: 12,
+    expiry: "destroy_own_flag_and_lose",
+    rankAppliesTo: "combat_only",
+  });
+  assert.deepEqual(getAugmentDefinition("spade-volatile-mines").effect, {
+    kind: "combat",
+    mode: "durable_mines",
+    hitsToDestroy: 2,
+    revealAfterHits: 1,
+    revealTo: "both",
+    nonBombAttackerOutcome: "removed",
+    finalMineOutcome: "removed",
+    bombOutcome: "both_removed",
+    trackBy: "piece_id",
+  });
+  assert.deepEqual(getAugmentDefinition("heart-battalion-ascent").effect, {
+    kind: "promotion",
+    mode: "battalion_on_capture",
+    trackedBy: "original_piece_type",
+    pieceType: "battalion",
+    trigger: "successful_capture",
+    steps: 1,
+    maxRank: "division",
+    rankAppliesTo: "combat_only",
+    visibility: "public",
+  });
+  assert.deepEqual(getAugmentDefinition("heart-heavenly-exchange").effect, {
+    kind: "exchange",
+    mode: "cross_frontline",
+    friendlyRowsFromFront: 3,
+    enemyRowsFromFront: 3,
+    friendlyEligible: "alive_non_flag_piece",
+    enemyEligible: "alive_piece",
+    consumesTurn: true,
+  });
+  assert.match(
+    getAugmentDefinition("heart-heavenly-exchange").description,
+    /己方前线三排的非军旗棋子.*敌方前线三排的任意存活棋子（包括军旗）.*不额外公开身份/,
+  );
+  assert.deepEqual(getAugmentDefinition("heart-sacrifice-aura").effect, {
+    kind: "promotion",
+    mode: "platoon_loss_threshold",
+    trackedBy: "original_piece_type",
+    pieceType: "platoon",
+    trigger: "friendly_piece_removed",
+    lossesPerStep: 4,
+    steps: 1,
+    maxRank: "commander",
+    rankAppliesTo: "combat_only",
+    visibility: "public",
+  });
+  assert.deepEqual(getAugmentDefinition("heart-shadow-redeploy").effect, {
+    kind: "redeployment",
+    mode: "own_region_permutation",
+    eligible: "all_alive_non_flag_friendly_pieces_in_home_half",
+    destination: "same_friendly_occupied_position_set",
+    minimumChangedPieces: 2,
+    consumesTurn: true,
+  });
+  assert.deepEqual(getAugmentDefinition("club-bitter-ruse").effect, {
+    kind: "sacrifice_reconnaissance",
+    mode: "sacrifice_frontline_random",
+    sacrifice: "alive_friendly_non_flag_piece",
+    enemyCount: 2,
+    enemyRowsFromFront: 3,
+    enemySelection: "server_random",
+    enemyReveal: "permanent_to_owner",
+    sacrificeReveal: "permanent_public",
+    consumesTurn: true,
+  });
+  assert.deepEqual(getAugmentDefinition("diamond-command-fusion").effect, {
+    kind: "combat",
+    mode: "command_fusion",
+    trigger: "friendly_general_removed",
+    ownerCommanderVsEnemyCommander: "owner_wins",
+    mutualOutcome: "normal_tie",
+  });
+});
+
 test("no two cards are canonical activation, charge, and effect duplicates", () => {
   const signatures = new Map<string, AugmentId>();
   for (const definition of AUGMENT_CATALOG) {
@@ -150,7 +357,7 @@ test("no two cards are canonical activation, charge, and effect duplicates", () 
     assert.equal(duplicate, undefined, `${definition.id} duplicates ${duplicate}`);
     signatures.set(signature, definition.id);
   }
-  assert.equal(signatures.size, 50);
+  assert.equal(signatures.size, 70);
 });
 
 test("seeded drafts are reproducible and give both players independent offers of one suit", () => {
@@ -402,6 +609,51 @@ test("random suit selection never repeats the first-round tier or offers setup c
   }
 });
 
+test("v3 draw indexing reaches every card fairly and round two excludes setup cards one by one", () => {
+  const nextSuit: Record<AugmentSuit, AugmentSuit> = {
+    spades: "hearts",
+    hearts: "clubs",
+    clubs: "diamonds",
+    diamonds: "spades",
+  };
+
+  for (const suit of AUGMENT_SUITS) {
+    const firstRoundPool = getAugmentsBySuit(suit).map((definition) => definition.id);
+    const reachedFirstSlots: AugmentId[] = [];
+    for (let index = 0; index < firstRoundPool.length; index += 1) {
+      let calls = 0;
+      const state = createAugmentDraftState({
+        initialSuit: suit,
+        random: () => calls++ === 0 ? (index + 0.25) / firstRoundPool.length : 0,
+      });
+      reachedFirstSlots.push(state.rounds[0].players.black.options[0]);
+    }
+    assert.deepEqual(reachedFirstSlots.sort(), [...firstRoundPool].sort(), `${suit} round one`);
+
+    let base = createAugmentDraftState({
+      initialSuit: nextSuit[suit],
+      random: createSeededAugmentRandom(`second-round-base:${suit}`),
+    });
+    base = revealCurrentAugmentRound(lockBoth(base));
+    const secondRoundPool = getAugmentsBySuit(suit)
+      .filter((definition) => definition.activation !== "setup")
+      .map((definition) => definition.id);
+    const reachedSecondSlots: AugmentId[] = [];
+    for (let index = 0; index < secondRoundPool.length; index += 1) {
+      let calls = 0;
+      const state = beginSecondAugmentDraft(base, {
+        suit,
+        random: () => calls++ === 0 ? (index + 0.25) / secondRoundPool.length : 0,
+      });
+      reachedSecondSlots.push(state.rounds[1].players.black.options[0]);
+    }
+    assert.deepEqual(reachedSecondSlots.sort(), [...secondRoundPool].sort(), `${suit} round two`);
+    assert.ok(
+      reachedSecondSlots.every((id) => getAugmentDefinition(id).activation !== "setup"),
+    );
+  }
+});
+
 test("persisted v1 rooms retain the old twenty-card pool and projection semantics", () => {
   const persisted = JSON.stringify({
     catalogVersion: LEGACY_AUGMENT_CATALOG_VERSION,
@@ -480,6 +732,92 @@ test("persisted v1 rooms retain the old twenty-card pool and projection semantic
   assert.equal(validateAugmentDraftState(contaminated), false);
 });
 
+test("persisted v2 rooms round-trip through the frozen fifty-card pool without v3 contamination", () => {
+  const persisted = JSON.stringify({
+    catalogVersion: FIFTY_CARD_AUGMENT_CATALOG_VERSION,
+    activeRound: null,
+    rounds: [
+      {
+        number: 1,
+        trigger: "setup",
+        suit: "spades",
+        revealed: true,
+        players: {
+          black: {
+            options: [
+              "spade-rail-dominion",
+              "spade-serpentine-offensive",
+              "spade-deep-strike",
+            ],
+            selectedId: "spade-rail-dominion",
+            locked: true,
+            refreshedSlot: null,
+          },
+          white: {
+            options: [
+              "spade-global-redeployment",
+              "spade-command-chain",
+              "spade-counteroffensive",
+            ],
+            selectedId: "spade-command-chain",
+            locked: true,
+            refreshedSlot: null,
+          },
+        },
+      },
+    ],
+    seenBySide: {
+      black: [
+        "spade-rail-dominion",
+        "spade-serpentine-offensive",
+        "spade-deep-strike",
+      ],
+      white: [
+        "spade-global-redeployment",
+        "spade-command-chain",
+        "spade-counteroffensive",
+      ],
+    },
+    loadouts: {
+      black: ["spade-rail-dominion"],
+      white: ["spade-command-chain"],
+    },
+  });
+  const restored = JSON.parse(persisted) as AugmentDraftState;
+  assertValidAugmentDraftState(restored);
+  assert.deepEqual(JSON.parse(JSON.stringify(restored)), restored);
+  assert.equal(
+    projectAugmentDraft(restored, "spectator").catalogVersion,
+    FIFTY_CARD_AUGMENT_CATALOG_VERSION,
+  );
+
+  const second = beginSecondAugmentDraft(restored, {
+    random: createSeededAugmentRandom("v2-room-resume"),
+    suit: "diamonds",
+  });
+  const v2Ids = new Set<AugmentId>(FIFTY_CARD_AUGMENT_IDS);
+  const v3Ids = new Set<AugmentId>(NEW_V3_AUGMENT_IDS);
+  for (const side of ["black", "white"] as const) {
+    assert.ok(second.rounds[1].players[side].options.every((id) => v2Ids.has(id)));
+    assert.ok(second.rounds[1].players[side].options.every((id) => !v3Ids.has(id)));
+    assert.ok(
+      second.rounds[1].players[side].options.every(
+        (id) => getAugmentDefinition(id).activation !== "setup",
+      ),
+    );
+  }
+  const refreshed = refreshAugmentOption(second, "black", 1, () => 0);
+  assert.ok(v2Ids.has(refreshed.rounds[1].players.black.options[1]));
+  assert.equal(v3Ids.has(refreshed.rounds[1].players.black.options[1]), false);
+
+  const contaminated = structuredClone(restored);
+  contaminated.rounds[0].players.black.options[0] = "spade-last-headquarters";
+  contaminated.rounds[0].players.black.selectedId = "spade-last-headquarters";
+  contaminated.seenBySide.black[0] = "spade-last-headquarters";
+  contaminated.loadouts.black[0] = "spade-last-headquarters";
+  assert.equal(validateAugmentDraftState(contaminated), false);
+});
+
 test("stable ids cover the catalog exactly", () => {
   const idsFromCatalog = AUGMENT_CATALOG.map((definition) => definition.id).sort();
   const declaredIds = [...AUGMENT_IDS].sort();
@@ -488,5 +826,5 @@ test("stable ids cover the catalog exactly", () => {
 
   const allIds = new Set<AugmentId>();
   for (const definition of AUGMENT_CATALOG) allIds.add(definition.id);
-  assert.equal(allIds.size, 50);
+  assert.equal(allIds.size, 70);
 });

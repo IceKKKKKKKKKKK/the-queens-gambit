@@ -1,18 +1,17 @@
 import { fileURLToPath } from "node:url";
 import { resolve } from "node:path";
 
-import { AUGMENT_IDS } from "../../lib/augments.ts";
 import {
-  buildRoundRobinPairings,
+  buildProductStabilityPairings,
   createEmptyAggregate,
   playMirrorGroup,
   recordMirrorGroup,
   scheduleGroup,
-  strengthModelFromAggregate,
   type Pairing,
   type TournamentAggregate,
   type TournamentOptions,
 } from "../balance/tournament.ts";
+import { SIMULATION_ELIGIBLE_AUGMENT_IDS } from "../balance/simulation-pool.ts";
 import {
   WorkerJournal,
   emptyCounters,
@@ -37,7 +36,7 @@ export function balanceWorkerStopDecision(input: {
   durationSeconds: number;
   segmentActiveMs: number;
   segmentCompletedGroups: number;
-  requiredRoundRobinGroups: number;
+  requiredScheduleGroups: number;
   stopRequested: boolean;
   failed: boolean;
 }): BalanceWorkerStopReason {
@@ -48,16 +47,16 @@ export function balanceWorkerStopDecision(input: {
   if (input.segmentActiveMs < requiredActiveMs) return "continue";
 
   const formalSoak = input.profile === "soak" && requiredActiveMs >= FORMAL_SOAK_MINIMUM_ACTIVE_MS;
-  const requiredGroups = formalSoak ? input.requiredRoundRobinGroups : 1;
+  const requiredGroups = formalSoak ? input.requiredScheduleGroups : 1;
   return input.segmentCompletedGroups >= requiredGroups ? "complete" : "continue";
 }
 
 function orderedPairingsForEarlyCoverage() {
-  const remaining = buildRoundRobinPairings().sort((first, second) =>
+  const remaining = buildProductStabilityPairings().sort((first, second) =>
     first.pairKey.localeCompare(second.pairKey)
   );
   const ordered: Pairing[] = [];
-  const uncovered = new Set(AUGMENT_IDS);
+  const uncovered = new Set(SIMULATION_ELIGIBLE_AUGMENT_IDS);
   while (remaining.length && uncovered.size) {
     let bestIndex = 0;
     let bestScore = -1;
@@ -78,26 +77,17 @@ function orderedPairingsForEarlyCoverage() {
 }
 
 export function balanceTournamentOptions(
-  profile: "soak" | "smoke",
+  _profile: "soak" | "smoke",
   seed: number,
 ): TournamentOptions {
-  return profile === "smoke"
-    ? {
-        seed,
-        maxActions: 20,
-        thinkTimeMinMs: 250,
-        thinkTimeMaxMs: 1_000,
-        search: { determinizations: 1, branching: 3, rolloutDepth: 1 },
-        refreshMargin: 4,
-      }
-    : {
-        seed,
-        maxActions: 180,
-        thinkTimeMinMs: 2_500,
-        thinkTimeMaxMs: 6_500,
-        search: { determinizations: 4, branching: 8, rolloutDepth: 3 },
-        refreshMargin: 4,
-      };
+  return {
+    seed,
+    maxActions: 300,
+    thinkTimeMinMs: 0,
+    thinkTimeMaxMs: 0,
+    search: { determinizations: 1, branching: 3, rolloutDepth: 1 },
+    refreshMargin: 4,
+  };
 }
 
 function validateState(value: unknown): BalanceWorkerState {
@@ -140,7 +130,7 @@ async function run() {
       durationSeconds: args.durationSeconds,
       segmentActiveMs: journal.segmentActiveMs(),
       segmentCompletedGroups: journal.segment.loops,
-      requiredRoundRobinGroups: pairings.length,
+      requiredScheduleGroups: pairings.length,
       stopRequested: await stopWasRequested(args.stopPath),
       failed: totalFailures(journal.segment) > 0,
     });
@@ -153,7 +143,6 @@ async function run() {
     const results = playMirrorGroup(
       group,
       journal.state.tournament,
-      strengthModelFromAggregate(journal.state.aggregate),
     );
     recordMirrorGroup(journal.state.aggregate, group, results);
 

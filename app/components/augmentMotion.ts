@@ -1,5 +1,6 @@
 import {
   getAugmentDefinition,
+  type AugmentActivation,
   type AugmentDefinition,
   type AugmentId,
 } from "../../lib/augments.ts";
@@ -19,14 +20,17 @@ export const AUGMENT_DRAFT_MOTION_MS = {
 export const AUGMENT_BURN_MOTION_MS = 1_280;
 
 export function shouldAnimateAugmentBurn(
+  activation: AugmentActivation,
   charges: number,
   previousCount: number | undefined,
   nextCount: number,
 ) {
-  return charges === 1
+  return activation !== "passive"
+    && activation !== "setup"
+    && charges > 0
     && previousCount !== undefined
-    && previousCount < 1
-    && nextCount >= 1;
+    && previousCount < charges
+    && nextCount >= charges;
 }
 
 export interface AugmentInteractionContext {
@@ -40,7 +44,13 @@ export function canInteractWithAugment(
   context: AugmentInteractionContext,
 ) {
   if (!context.enabled || augment.activation !== "active") return false;
-  if (augment.effect.kind === "movement" || augment.effect.kind === "exchange") {
+  if (
+    augment.effect.kind === "movement" ||
+    augment.effect.kind === "exchange" ||
+    augment.effect.kind === "multi_move" ||
+    augment.effect.kind === "redeployment" ||
+    augment.effect.kind === "sacrifice_reconnaissance"
+  ) {
     return context.isOwnTurn;
   }
   return augment.effect.kind === "reconnaissance"

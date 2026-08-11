@@ -62,7 +62,9 @@ export default function AugmentRail({
   const publicCount = visibleCount - privateLockedCount;
   const exhaustedCount = items.filter((item) => {
     if (!item.augment || item.hidden) return false;
-    return Math.max(0, item.triggerCount ?? 0) >= item.augment.charges;
+    return item.augment.activation !== "passive" &&
+      item.augment.activation !== "setup" &&
+      Math.max(0, item.triggerCount ?? 0) >= item.augment.charges;
   }).length;
 
   useEffect(() => {
@@ -104,12 +106,15 @@ export default function AugmentRail({
       nextCounts.set(item.augment.id, nextCount);
       const augmentId = item.augment.id;
       const previousCount = previousCountsRef.current.get(augmentId);
-      if (item.augment.charges === 1 && nextCount >= 1 && previousCount === undefined) {
+      const consumable = item.augment.activation !== "passive" &&
+        item.augment.activation !== "setup";
+      if (consumable && nextCount >= item.augment.charges && previousCount === undefined) {
         burntIdsRef.current.add(augmentId);
         silentlyBurnt.add(augmentId);
         continue;
       }
       const shouldBurn = initializedRef.current && shouldAnimateAugmentBurn(
+        item.augment.activation,
         item.augment.charges,
         previousCount,
         nextCount,
@@ -192,8 +197,13 @@ export default function AugmentRail({
             const triggerCount = item.augment
               ? Math.min(charges, Math.max(0, item.triggerCount ?? 0))
               : 0;
-            const exhausted = Boolean(item.augment && triggerCount >= charges);
-            const partiallyTriggered = Boolean(item.augment && triggerCount > 0 && !exhausted);
+            const consumable = Boolean(
+              item.augment &&
+              item.augment.activation !== "passive" &&
+              item.augment.activation !== "setup",
+            );
+            const exhausted = Boolean(item.augment && consumable && triggerCount >= charges);
+            const partiallyTriggered = Boolean(item.augment && consumable && triggerCount > 0 && !exhausted);
             const state: AugmentCardState = hidden
               ? "hidden"
               : exhausted
@@ -207,6 +217,9 @@ export default function AugmentRail({
               (
                 item.augment.effect.kind === "movement" ||
                 item.augment.effect.kind === "exchange" ||
+                item.augment.effect.kind === "multi_move" ||
+                item.augment.effect.kind === "redeployment" ||
+                item.augment.effect.kind === "sacrifice_reconnaissance" ||
                 (
                   item.augment.effect.kind === "reconnaissance" &&
                   item.augment.effect.mode === "choose_enemy"
@@ -241,6 +254,8 @@ export default function AugmentRail({
                     ? "已启用"
                     : item.augment?.activation === "setup"
                       ? "布阵生效"
+                      : item.augment?.activation === "passive"
+                        ? "持续生效"
                       : !supportsManualActivation
                         ? "等待触发"
                         : item.augment?.effect.kind === "reconnaissance"

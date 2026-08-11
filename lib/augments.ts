@@ -1,7 +1,10 @@
 export const LEGACY_AUGMENT_CATALOG_VERSION = "junqi-augments-v1" as const;
-export const AUGMENT_CATALOG_VERSION = "junqi-augments-v2" as const;
+/** The immutable 50-card catalog used by rooms created before the v3 expansion. */
+export const FIFTY_CARD_AUGMENT_CATALOG_VERSION = "junqi-augments-v2" as const;
+export const AUGMENT_CATALOG_VERSION = "junqi-augments-v3" as const;
 export type AugmentCatalogVersion =
   | typeof LEGACY_AUGMENT_CATALOG_VERSION
+  | typeof FIFTY_CARD_AUGMENT_CATALOG_VERSION
   | typeof AUGMENT_CATALOG_VERSION;
 export const SECOND_AUGMENT_MOVE_NUMBER = 10 as const;
 
@@ -27,6 +30,21 @@ export const AUGMENT_SUIT_META: Readonly<Record<AugmentSuit, AugmentSuitMetadata
   clubs: { label: "梅花", symbol: "♣", strength: 2, color: "black" },
   diamonds: { label: "方块", symbol: "♦", strength: 1, color: "red" },
 };
+
+/** Canonical low-to-high combat ladder used by every v3 promotion effect. */
+export const AUGMENT_PROMOTION_LADDER = [
+  "engineer",
+  "platoon",
+  "company",
+  "battalion",
+  "regiment",
+  "brigade",
+  "division",
+  "general",
+  "commander",
+] as const;
+
+export type AugmentPromotableRank = (typeof AUGMENT_PROMOTION_LADDER)[number];
 
 export type MovementAugmentEffect =
   | {
@@ -102,6 +120,81 @@ export type CombatAugmentEffect =
       trigger: "engineer_would_lose_non_mine_combat";
       attackerOutcome: "removed";
       defenderOutcome: "removed";
+    }
+  | {
+      kind: "combat";
+      mode: "bomb_death_splash";
+      trigger: "friendly_bomb_removed_by_combat";
+      adjacency: "connected_board_edge";
+      affected: "all_alive_non_flag_pieces";
+      chainReaction: true;
+    }
+  | {
+      kind: "combat";
+      mode: "fortress_ties";
+      immobilePiece: "commander";
+      tieOutcome: "owner_wins";
+      excluded: "bomb";
+      mutualOutcome: "normal_tie";
+    }
+  | {
+      kind: "combat";
+      mode: "durable_mines";
+      hitsToDestroy: 2;
+      revealAfterHits: 1;
+      revealTo: "both";
+      nonBombAttackerOutcome: "removed";
+      finalMineOutcome: "removed";
+      bombOutcome: "both_removed";
+      trackBy: "piece_id";
+    }
+  | {
+      kind: "combat";
+      mode: "division_defuses_mine";
+      trigger: "original_division_attacks_mine";
+      attackerOutcome: "survives_on_target";
+      defenderOutcome: "removed";
+    }
+  | {
+      kind: "combat";
+      mode: "bomb_second_fuse";
+      binding: "first_friendly_bomb_in_explosive_combat";
+      survivalUses: 1;
+      bombOutcome: "survives";
+      opponentOutcome: "removed";
+      subsequentOutcome: "normal";
+    }
+  | {
+      kind: "combat";
+      mode: "screened_division_attack";
+      attacker: "original_division";
+      replacesNormalAttacks: true;
+      screen: "exactly_one_alive_piece_either_side";
+      screenOutcome: "unchanged";
+      route: "straight_rail_or_two_road_edges";
+      otherIntermediate: "empty";
+    }
+  | {
+      kind: "combat";
+      mode: "brigade_camp_assault";
+      attacker: "original_brigade";
+      target: "enemy_in_camp";
+      path: "otherwise_normal";
+    }
+  | {
+      kind: "combat";
+      mode: "command_fusion";
+      trigger: "friendly_general_removed";
+      ownerCommanderVsEnemyCommander: "owner_wins";
+      mutualOutcome: "normal_tie";
+    }
+  | {
+      kind: "combat";
+      mode: "engineer_mutiny";
+      requires: "friendly_commander_removed";
+      trigger: "original_engineer_attacks_enemy_commander";
+      attackerOutcome: "survives_on_target";
+      defenderOutcome: "removed";
     };
 
 export type ReconnaissanceAugmentEffect =
@@ -121,6 +214,18 @@ export type ReconnaissanceAugmentEffect =
       reveal: "until_piece_moves";
       trigger: "after_round_reveal";
     };
+
+export type SacrificeReconnaissanceAugmentEffect = {
+  kind: "sacrifice_reconnaissance";
+  mode: "sacrifice_frontline_random";
+  sacrifice: "alive_friendly_non_flag_piece";
+  enemyCount: 2;
+  enemyRowsFromFront: 3;
+  enemySelection: "server_random";
+  enemyReveal: "permanent_to_owner";
+  sacrificeReveal: "permanent_public";
+  consumesTurn: true;
+};
 
 export type ClockAugmentEffect =
   | {
@@ -157,6 +262,15 @@ export type ExchangeAugmentEffect =
       eligible: "two_adjacent_mobile_friendly_pieces";
       adjacency: "road_edge";
       consumesTurn: true;
+    }
+  | {
+      kind: "exchange";
+      mode: "cross_frontline";
+      friendlyRowsFromFront: 3;
+      enemyRowsFromFront: 3;
+      friendlyEligible: "alive_non_flag_piece";
+      enemyEligible: "alive_piece";
+      consumesTurn: true;
     };
 
 export type SetupAugmentEffect =
@@ -171,18 +285,114 @@ export type SetupAugmentEffect =
       mode: "deep_mine";
       allowance: 1 | 2;
       destination: "third_row_from_home";
+    }
+  | {
+      kind: "setup";
+      mode: "rear_three_row_mines";
+      allowance: 3;
+      destination: "rear_three_setup_rows";
+    }
+  | {
+      kind: "setup";
+      mode: "flexible_flag";
+      allowance: 1;
+      destination: "any_home_back_row_station";
     };
+
+export type ObjectiveAugmentEffect = {
+  kind: "objective";
+  mode: "last_headquarters";
+  flagCaptureRequires: "enemy_has_occupied_other_defender_headquarters";
+  lockedFlagAttack: {
+    result: "flag_protected";
+    consumesAction: true;
+    attackerOutcome: "survives_at_origin";
+    defenderOutcome: "survives_at_target";
+    flagReveal: "permanent_public";
+  };
+};
+
+export type DoctrineAugmentEffect = {
+  kind: "doctrine";
+  mode: "lightning_rank_boost";
+  rankSteps: 1;
+  excluded: readonly ["commander", "engineer", "mine", "bomb", "flag"];
+  expiresAfterOwnCompletedTurns: 12;
+  expiry: "destroy_own_flag_and_lose";
+  rankAppliesTo: "combat_only";
+};
+
+export type PromotionAugmentEffect =
+  | {
+      kind: "promotion";
+      mode: "battalion_on_capture";
+      trackedBy: "original_piece_type";
+      pieceType: "battalion";
+      trigger: "successful_capture";
+      steps: 1;
+      maxRank: "division";
+      rankAppliesTo: "combat_only";
+      visibility: "public";
+    }
+  | {
+      kind: "promotion";
+      mode: "platoon_loss_threshold";
+      trackedBy: "original_piece_type";
+      pieceType: "platoon";
+      trigger: "friendly_piece_removed";
+      lossesPerStep: 4;
+      steps: 1;
+      maxRank: "commander";
+      rankAppliesTo: "combat_only";
+      visibility: "public";
+    };
+
+export type MultiMoveAugmentEffect =
+  | {
+      kind: "multi_move";
+      mode: "two_single_edge_moves";
+      movesPerTurn: 2;
+      eachMoveMaxEdges: 1;
+      mayUseDifferentPieces: true;
+      normalMovesOnly: true;
+      secondMoveOptional: true;
+      canChain: false;
+    }
+  | {
+      kind: "multi_move";
+      mode: "same_piece_twice";
+      eligible: "non_engineer_mobile_piece";
+      moves: 2;
+      normalMovesOnly: true;
+      secondMoveOptional: true;
+      canChain: false;
+    };
+
+export type RedeploymentAugmentEffect = {
+  kind: "redeployment";
+  mode: "own_region_permutation";
+  eligible: "all_alive_non_flag_friendly_pieces_in_home_half";
+  destination: "same_friendly_occupied_position_set";
+  minimumChangedPieces: 2;
+  consumesTurn: true;
+};
 
 export type AugmentEffect =
   | MovementAugmentEffect
   | ExtraTurnAugmentEffect
   | CombatAugmentEffect
   | ReconnaissanceAugmentEffect
+  | SacrificeReconnaissanceAugmentEffect
   | ClockAugmentEffect
   | ExchangeAugmentEffect
-  | SetupAugmentEffect;
+  | SetupAugmentEffect
+  | ObjectiveAugmentEffect
+  | DoctrineAugmentEffect
+  | PromotionAugmentEffect
+  | MultiMoveAugmentEffect
+  | RedeploymentAugmentEffect;
 
-export type AugmentActivation = "active" | "automatic" | "setup";
+export type AugmentActivation = "active" | "automatic" | "setup" | "passive";
 
 export const AUGMENT_IDS = [
   "spade-grand-maneuver",
@@ -235,6 +445,26 @@ export const AUGMENT_IDS = [
   "diamond-drill",
   "diamond-forward-pair",
   "diamond-deep-pair",
+  "spade-last-headquarters",
+  "spade-cherry-bomb",
+  "spade-lightning-doctrine",
+  "spade-iron-fortress",
+  "spade-volatile-mines",
+  "heart-battalion-ascent",
+  "heart-heavenly-exchange",
+  "heart-sacrifice-aura",
+  "heart-steady-advance",
+  "heart-shadow-redeploy",
+  "club-division-sapper",
+  "club-bombardier",
+  "club-surprise-double-move",
+  "club-bitter-ruse",
+  "club-screened-strike",
+  "diamond-camp-assault",
+  "diamond-command-fusion",
+  "diamond-deep-breath",
+  "diamond-hidden-flag",
+  "diamond-engineer-mutiny",
 ] as const;
 
 export type AugmentId = (typeof AUGMENT_IDS)[number];
@@ -1177,6 +1407,404 @@ export const AUGMENT_CATALOG = [
       destination: "third_row_from_home",
     },
   },
+  {
+    id: "spade-last-headquarters",
+    name: "濒死悟道",
+    shortName: "濒死悟道",
+    suit: "spades",
+    suitSymbol: "♠",
+    description: "持续：另一座大本营未曾被敌方棋子占领时，敌方进攻你的军旗会触发「军旗受保护」：消耗本次行动，双方原位存活，军旗永久公开；大本营一旦失守，吃旗永久解锁。",
+    timing: "敌方进攻尚未解锁的军旗时（行动照常消耗）",
+    activation: "passive",
+    charges: 1,
+    effect: {
+      kind: "objective",
+      mode: "last_headquarters",
+      flagCaptureRequires: "enemy_has_occupied_other_defender_headquarters",
+      lockedFlagAttack: {
+        result: "flag_protected",
+        consumesAction: true,
+        attackerOutcome: "survives_at_origin",
+        defenderOutcome: "survives_at_target",
+        flagReveal: "permanent_public",
+      },
+    },
+  },
+  {
+    id: "spade-cherry-bomb",
+    name: "樱桃炸弹",
+    shortName: "樱桃炸弹",
+    suit: "spades",
+    suitSymbol: "♠",
+    description: "持续：你的炸弹因战斗阵亡时，移除与其站点直接相连的所有非军旗棋子；被波及的炸弹会继续连锁，军旗免疫。",
+    timing: "你的炸弹战斗阵亡后",
+    activation: "passive",
+    charges: 1,
+    effect: {
+      kind: "combat",
+      mode: "bomb_death_splash",
+      trigger: "friendly_bomb_removed_by_combat",
+      adjacency: "connected_board_edge",
+      affected: "all_alive_non_flag_pieces",
+      chainReaction: true,
+    },
+  },
+  {
+    id: "spade-lightning-doctrine",
+    name: "兵贵神速",
+    shortName: "兵贵神速",
+    suit: "spades",
+    suitSymbol: "♠",
+    description: "持续：除司令、工兵、炸弹、地雷和军旗外，你的棋子战斗军阶升一级；你完成第12个己方回合后军旗自毁并落败。",
+    timing: "本强化公开后至你完成12个己方回合",
+    activation: "passive",
+    charges: 1,
+    effect: {
+      kind: "doctrine",
+      mode: "lightning_rank_boost",
+      rankSteps: 1,
+      excluded: ["commander", "engineer", "mine", "bomb", "flag"],
+      expiresAfterOwnCompletedTurns: 12,
+      expiry: "destroy_own_flag_and_lose",
+      rankAppliesTo: "combat_only",
+    },
+  },
+  {
+    id: "spade-iron-fortress",
+    name: "固若金汤",
+    shortName: "固若金汤",
+    suit: "spades",
+    suitSymbol: "♠",
+    description: "持续：你的司令不能移动；除炸弹外，你在同军阶战斗中获胜。双方都有此效果时，同军阶仍按普通平局结算。",
+    timing: "移动校验与同军阶战斗时",
+    activation: "passive",
+    charges: 1,
+    effect: {
+      kind: "combat",
+      mode: "fortress_ties",
+      immobilePiece: "commander",
+      tieOutcome: "owner_wins",
+      excluded: "bomb",
+      mutualOutcome: "normal_tie",
+    },
+  },
+  {
+    id: "spade-volatile-mines",
+    name: "易燃易爆",
+    shortName: "易燃易爆",
+    suit: "spades",
+    suitSymbol: "♠",
+    description: "持续：你的地雷免疫工兵拆除。首次受非炸弹攻击时攻击者阵亡、地雷存活并永久公开；第二次双方阵亡。炸弹仍会直接与地雷同归于尽。",
+    timing: "你的地雷受到攻击时",
+    activation: "passive",
+    charges: 1,
+    effect: {
+      kind: "combat",
+      mode: "durable_mines",
+      hitsToDestroy: 2,
+      revealAfterHits: 1,
+      revealTo: "both",
+      nonBombAttackerOutcome: "removed",
+      finalMineOutcome: "removed",
+      bombOutcome: "both_removed",
+      trackBy: "piece_id",
+    },
+  },
+  {
+    id: "heart-battalion-ascent",
+    name: "步步为营",
+    shortName: "步步为营",
+    suit: "hearts",
+    suitSymbol: "♥",
+    description: "持续：每枚原始营长每次成功吃子后，公开提升一级战斗军阶，最高升至师长；其原始兵种与移动规则不变。",
+    timing: "原始营长成功吃子后",
+    activation: "passive",
+    charges: 1,
+    effect: {
+      kind: "promotion",
+      mode: "battalion_on_capture",
+      trackedBy: "original_piece_type",
+      pieceType: "battalion",
+      trigger: "successful_capture",
+      steps: 1,
+      maxRank: "division",
+      rankAppliesTo: "combat_only",
+      visibility: "public",
+    },
+  },
+  {
+    id: "heart-heavenly-exchange",
+    name: "乾坤挪移",
+    shortName: "乾坤挪移",
+    suit: "hearts",
+    suitSymbol: "♥",
+    description: "两次：交换一枚位于己方前线三排的非军旗棋子与一枚位于敌方前线三排的任意存活棋子（包括军旗），不额外公开身份，然后结束回合。",
+    timing: "你的行动阶段",
+    activation: "active",
+    charges: 2,
+    effect: {
+      kind: "exchange",
+      mode: "cross_frontline",
+      friendlyRowsFromFront: 3,
+      enemyRowsFromFront: 3,
+      friendlyEligible: "alive_non_flag_piece",
+      enemyEligible: "alive_piece",
+      consumesTurn: true,
+    },
+  },
+  {
+    id: "heart-sacrifice-aura",
+    name: "献祭光环",
+    shortName: "献祭光环",
+    suit: "hearts",
+    suitSymbol: "♥",
+    description: "持续：每累计失去4枚己方棋子，所有仍存活的原始排长公开提升一级战斗军阶，最高升至司令。",
+    timing: "第4、8、12枚等己方棋子阵亡后",
+    activation: "passive",
+    charges: 1,
+    effect: {
+      kind: "promotion",
+      mode: "platoon_loss_threshold",
+      trackedBy: "original_piece_type",
+      pieceType: "platoon",
+      trigger: "friendly_piece_removed",
+      lossesPerStep: 4,
+      steps: 1,
+      maxRank: "commander",
+      rankAppliesTo: "combat_only",
+      visibility: "public",
+    },
+  },
+  {
+    id: "heart-steady-advance",
+    name: "稳步推进",
+    shortName: "稳步推进",
+    suit: "hearts",
+    suitSymbol: "♥",
+    description: "持续：你的每次普通移动最多走一条相连边，但每回合可进行两次普通移动，可使用同一枚或不同棋子，也可放弃第二次。",
+    timing: "你的每个行动回合",
+    activation: "passive",
+    charges: 1,
+    effect: {
+      kind: "multi_move",
+      mode: "two_single_edge_moves",
+      movesPerTurn: 2,
+      eachMoveMaxEdges: 1,
+      mayUseDifferentPieces: true,
+      normalMovesOnly: true,
+      secondMoveOptional: true,
+      canChain: false,
+    },
+  },
+  {
+    id: "heart-shadow-redeploy",
+    name: "暗度陈仓",
+    shortName: "暗度陈仓",
+    suit: "hearts",
+    suitSymbol: "♥",
+    description: "一次：将己方半场内全部存活的非军旗己子，在它们当前占据的站点集合中重新排列；至少两子换位，随后结束回合。",
+    timing: "你的行动阶段",
+    activation: "active",
+    charges: 1,
+    effect: {
+      kind: "redeployment",
+      mode: "own_region_permutation",
+      eligible: "all_alive_non_flag_friendly_pieces_in_home_half",
+      destination: "same_friendly_occupied_position_set",
+      minimumChangedPieces: 2,
+      consumesTurn: true,
+    },
+  },
+  {
+    id: "club-division-sapper",
+    name: "狗头军师",
+    shortName: "狗头军师",
+    suit: "clubs",
+    suitSymbol: "♣",
+    description: "持续：你的原始师长主动攻击地雷时，可拆除地雷并存活在目标位置。",
+    timing: "原始师长攻击地雷时",
+    activation: "passive",
+    charges: 1,
+    effect: {
+      kind: "combat",
+      mode: "division_defuses_mine",
+      trigger: "original_division_attacks_mine",
+      attackerOutcome: "survives_on_target",
+      defenderOutcome: "removed",
+    },
+  },
+  {
+    id: "club-bombardier",
+    name: "英勇投弹手",
+    shortName: "英勇投弹手",
+    suit: "clubs",
+    suitSymbol: "♣",
+    description: "一次：首枚参与爆炸战斗的己方炸弹不会在该次战斗中阵亡，并消灭对手；该炸弹之后恢复普通炸弹规则，无需预先指定。",
+    timing: "首枚己方炸弹参与爆炸战斗时",
+    activation: "automatic",
+    charges: 1,
+    effect: {
+      kind: "combat",
+      mode: "bomb_second_fuse",
+      binding: "first_friendly_bomb_in_explosive_combat",
+      survivalUses: 1,
+      bombOutcome: "survives",
+      opponentOutcome: "removed",
+      subsequentOutcome: "normal",
+    },
+  },
+  {
+    id: "club-surprise-double-move",
+    name: "出其不意",
+    shortName: "出其不意",
+    suit: "clubs",
+    suitSymbol: "♣",
+    description: "一次：选择一枚非工兵可移动棋子，使其在本回合连续进行至多两次普通移动；不可串联其他追加行动。",
+    timing: "你的行动阶段、首次移动前",
+    activation: "active",
+    charges: 1,
+    effect: {
+      kind: "multi_move",
+      mode: "same_piece_twice",
+      eligible: "non_engineer_mobile_piece",
+      moves: 2,
+      normalMovesOnly: true,
+      secondMoveOptional: true,
+      canChain: false,
+    },
+  },
+  {
+    id: "club-bitter-ruse",
+    name: "苦肉计",
+    shortName: "苦肉计",
+    suit: "clubs",
+    suitSymbol: "♣",
+    description: "两次：弃掉一枚非军旗己子并向双方永久公开其身份；随机永久侦察敌方前线三排中至多两枚仍未知棋子，然后结束回合。",
+    timing: "你的行动阶段",
+    activation: "active",
+    charges: 2,
+    effect: {
+      kind: "sacrifice_reconnaissance",
+      mode: "sacrifice_frontline_random",
+      sacrifice: "alive_friendly_non_flag_piece",
+      enemyCount: 2,
+      enemyRowsFromFront: 3,
+      enemySelection: "server_random",
+      enemyReveal: "permanent_to_owner",
+      sacrificeReveal: "permanent_public",
+      consumesTurn: true,
+    },
+  },
+  {
+    id: "club-screened-strike",
+    name: "隔山打牛",
+    shortName: "隔山打牛",
+    suit: "clubs",
+    suitSymbol: "♣",
+    description: "持续：原始师长仍可普通空移，但进攻必须与目标隔恰好一枚任意棋子；铁路须直线，公路须相连两段，中间棋子不受影响。",
+    timing: "原始师长尝试进攻时",
+    activation: "passive",
+    charges: 1,
+    effect: {
+      kind: "combat",
+      mode: "screened_division_attack",
+      attacker: "original_division",
+      replacesNormalAttacks: true,
+      screen: "exactly_one_alive_piece_either_side",
+      screenOutcome: "unchanged",
+      route: "straight_rail_or_two_road_edges",
+      otherIntermediate: "empty",
+    },
+  },
+  {
+    id: "diamond-camp-assault",
+    name: "旅进旅退",
+    shortName: "旅进旅退",
+    suit: "diamonds",
+    suitSymbol: "♦",
+    description: "持续：你的原始旅长可以按普通路径进攻军营中的敌子；其他棋子仍不能进攻被军营保护的目标。",
+    timing: "原始旅长进攻军营时",
+    activation: "passive",
+    charges: 1,
+    effect: {
+      kind: "combat",
+      mode: "brigade_camp_assault",
+      attacker: "original_brigade",
+      target: "enemy_in_camp",
+      path: "otherwise_normal",
+    },
+  },
+  {
+    id: "diamond-command-fusion",
+    name: "合二为一",
+    shortName: "合二为一",
+    suit: "diamonds",
+    suitSymbol: "♦",
+    description: "持续：你的军长因任何原因阵亡后，你仍存活的司令与敌方司令交战时获胜；双方都触发时仍按普通平局结算。",
+    timing: "己方军长阵亡后",
+    activation: "passive",
+    charges: 1,
+    effect: {
+      kind: "combat",
+      mode: "command_fusion",
+      trigger: "friendly_general_removed",
+      ownerCommanderVsEnemyCommander: "owner_wins",
+      mutualOutcome: "normal_tie",
+    },
+  },
+  {
+    id: "diamond-deep-breath",
+    name: "深呼吸",
+    shortName: "深呼吸",
+    suit: "diamonds",
+    suitSymbol: "♦",
+    description: "布阵时，你的全部三枚地雷都可放在己方后方三排中的任意合法站点。",
+    timing: "布阵阶段",
+    activation: "setup",
+    charges: 1,
+    effect: {
+      kind: "setup",
+      mode: "rear_three_row_mines",
+      allowance: 3,
+      destination: "rear_three_setup_rows",
+    },
+  },
+  {
+    id: "diamond-hidden-flag",
+    name: "偷梁换柱",
+    shortName: "偷梁换柱",
+    suit: "diamonds",
+    suitSymbol: "♦",
+    description: "布阵时，你的军旗可放在己方底线任意站点；军旗仍不能移动，被敌方吃掉时立即落败。",
+    timing: "布阵阶段",
+    activation: "setup",
+    charges: 1,
+    effect: {
+      kind: "setup",
+      mode: "flexible_flag",
+      allowance: 1,
+      destination: "any_home_back_row_station",
+    },
+  },
+  {
+    id: "diamond-engineer-mutiny",
+    name: "工兵哗变",
+    shortName: "工兵哗变",
+    suit: "diamonds",
+    suitSymbol: "♦",
+    description: "持续：你的司令阵亡后，原始工兵主动攻击敌方司令时可将其消灭并存活在目标位置。",
+    timing: "己方司令阵亡后的工兵进攻时",
+    activation: "passive",
+    charges: 1,
+    effect: {
+      kind: "combat",
+      mode: "engineer_mutiny",
+      requires: "friendly_commander_removed",
+      trigger: "original_engineer_attacks_enemy_commander",
+      attackerOutcome: "survives_on_target",
+      defenderOutcome: "removed",
+    },
+  },
 ] as const satisfies readonly AugmentDefinition[];
 
 /** The immutable 20-card pool used by rooms persisted before the v2 expansion. */
@@ -1203,8 +1831,63 @@ export const LEGACY_AUGMENT_IDS = [
   "diamond-time-cache",
 ] as const satisfies readonly AugmentId[];
 
+/** The immutable 50-card pool used by rooms persisted before the v3 expansion. */
+export const FIFTY_CARD_AUGMENT_IDS = [
+  "spade-grand-maneuver",
+  "spade-relentless-assault",
+  "spade-tactical-retreat",
+  "spade-total-intelligence",
+  "spade-strategic-reserve",
+  "spade-rail-dominion",
+  "spade-serpentine-offensive",
+  "spade-deep-strike",
+  "spade-global-redeployment",
+  "spade-command-chain",
+  "spade-counteroffensive",
+  "spade-shadow-retreat",
+  "spade-supreme-recon",
+  "heart-rail-turn",
+  "heart-initiative",
+  "heart-remote-exchange",
+  "heart-bomb-disposal",
+  "heart-targeted-recon",
+  "heart-mobile-rail",
+  "heart-double-turn",
+  "heart-breakthrough",
+  "heart-camp-network",
+  "heart-victory-momentum",
+  "heart-orderly-withdrawal",
+  "heart-wide-recon",
+  "heart-reserve-clock",
+  "club-forced-march",
+  "club-line-hop",
+  "club-field-exchange",
+  "club-steady-tempo",
+  "club-frontline-scout",
+  "club-rail-passage",
+  "club-rail-switch",
+  "club-road-patrol",
+  "club-camp-relay",
+  "club-local-recon",
+  "club-pocket-time",
+  "club-engineer-oath",
+  "diamond-camp-transfer",
+  "diamond-forward-bomb",
+  "diamond-deep-mine",
+  "diamond-engineer-screen",
+  "diamond-time-cache",
+  "diamond-road-step",
+  "diamond-camp-relay",
+  "diamond-front-watch",
+  "diamond-pocket-watch",
+  "diamond-drill",
+  "diamond-forward-pair",
+  "diamond-deep-pair",
+] as const satisfies readonly AugmentId[];
+
 const AUGMENT_ID_SET = new Set<string>(AUGMENT_CATALOG.map((augment) => augment.id));
 const LEGACY_AUGMENT_ID_SET = new Set<string>(LEGACY_AUGMENT_IDS);
+const FIFTY_CARD_AUGMENT_ID_SET = new Set<string>(FIFTY_CARD_AUGMENT_IDS);
 const AUGMENT_BY_ID = new Map<AugmentId, AugmentDefinition>(
   AUGMENT_CATALOG.map((augment) => [augment.id, augment]),
 );
@@ -1556,6 +2239,7 @@ export function assertValidAugmentDraftState(state: AugmentDraftState): void {
   };
   if (
     state.catalogVersion !== AUGMENT_CATALOG_VERSION &&
+    state.catalogVersion !== FIFTY_CARD_AUGMENT_CATALOG_VERSION &&
     state.catalogVersion !== LEGACY_AUGMENT_CATALOG_VERSION
   ) {
     invalid("Unknown augment catalog version.");
@@ -1592,8 +2276,7 @@ export function assertValidAugmentDraftState(state: AugmentDraftState): void {
       seen.some(
         (id) =>
           !isAugmentId(id) ||
-          (state.catalogVersion === LEGACY_AUGMENT_CATALOG_VERSION &&
-            !LEGACY_AUGMENT_ID_SET.has(id)),
+          !isAugmentAvailableInCatalogVersion(id, state.catalogVersion),
       ) ||
       new Set(seen).size !== seen.length
     ) {
@@ -1712,10 +2395,7 @@ function isAugmentEligibleForVersionAndRound(
   catalogVersion: AugmentCatalogVersion,
   roundNumber: AugmentDraftRoundNumber,
 ) {
-  if (
-    catalogVersion === LEGACY_AUGMENT_CATALOG_VERSION &&
-    !LEGACY_AUGMENT_ID_SET.has(augmentId)
-  ) {
+  if (!isAugmentAvailableInCatalogVersion(augmentId, catalogVersion)) {
     return false;
   }
   if (roundNumber === 1) return true;
@@ -1723,6 +2403,19 @@ function isAugmentEligibleForVersionAndRound(
     return getAugmentDefinition(augmentId).suit !== "diamonds";
   }
   return getAugmentDefinition(augmentId).activation !== "setup";
+}
+
+function isAugmentAvailableInCatalogVersion(
+  augmentId: AugmentId,
+  catalogVersion: AugmentCatalogVersion,
+) {
+  if (catalogVersion === LEGACY_AUGMENT_CATALOG_VERSION) {
+    return LEGACY_AUGMENT_ID_SET.has(augmentId);
+  }
+  if (catalogVersion === FIFTY_CARD_AUGMENT_CATALOG_VERSION) {
+    return FIFTY_CARD_AUGMENT_ID_SET.has(augmentId);
+  }
+  return true;
 }
 
 function chooseRandomSuit(

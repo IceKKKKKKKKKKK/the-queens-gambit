@@ -2,10 +2,12 @@ import { env } from "cloudflare:workers";
 import {
   AUGMENT_RULES_VERSION,
   DEFAULT_TIME_CONTROL_MINUTES,
+  FIFTY_CARD_AUGMENT_RULES_VERSION,
   LEGACY_AUGMENT_RULES_VERSION,
   MAX_TIME_CONTROL_MINUTES,
   MIN_TIME_CONTROL_MINUTES,
   RULES_VERSION,
+  isValidAugmentRuleStateForState,
   isValidRepetitionTrackerForState,
   type GameState,
   type Side,
@@ -375,6 +377,7 @@ export function parseRoomState(row: RoomRow) {
     typeof state.rulesVersion !== "string" ||
     (state.rulesVersion !== RULES_VERSION &&
       state.rulesVersion !== LEGACY_AUGMENT_RULES_VERSION &&
+      state.rulesVersion !== FIFTY_CARD_AUGMENT_RULES_VERSION &&
       state.rulesVersion !== AUGMENT_RULES_VERSION)
   ) {
     throw new Error("INVALID_RULES_VERSION");
@@ -430,7 +433,10 @@ export function parseRoomState(row: RoomRow) {
         ? state.augment.draftDeadlineAt
         : null;
   }
-  if (state.rulesVersion === AUGMENT_RULES_VERSION) {
+  if (
+    state.rulesVersion === FIFTY_CARD_AUGMENT_RULES_VERSION ||
+    state.rulesVersion === AUGMENT_RULES_VERSION
+  ) {
     if (
       state.drawReason !== undefined &&
       state.drawReason !== null &&
@@ -451,6 +457,9 @@ export function parseRoomState(row: RoomRow) {
   } else {
     state.drawReason = null;
     delete state.repetitionTracker;
+  }
+  if (!isValidAugmentRuleStateForState(state)) {
+    throw new Error("INVALID_AUGMENT_RULE_STATE");
   }
   delete state.noCombatPly;
   return state as GameState;

@@ -1,12 +1,12 @@
 import assert from "node:assert/strict";
-import { spawn } from "node:child_process";
 import { randomBytes } from "node:crypto";
 import { readdirSync } from "node:fs";
-import net from "node:net";
 import path from "node:path";
 import { DatabaseSync } from "node:sqlite";
 import test from "node:test";
 import { fileURLToPath } from "node:url";
+
+import { openPort, spawnIntegrationServer, waitForServer } from "./integration-server.mjs";
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const OPENING_TEST_EXCLUDED_AUGMENTS = new Set([
@@ -16,41 +16,6 @@ const OPENING_TEST_EXCLUDED_AUGMENTS = new Set([
   "club-steady-tempo",
   "diamond-drill",
 ]);
-
-async function openPort() {
-  return new Promise((resolve, reject) => {
-    const listener = net.createServer();
-    listener.once("error", reject);
-    listener.listen(0, "127.0.0.1", () => {
-      const address = listener.address();
-      listener.close(() => resolve(address.port));
-    });
-  });
-}
-
-async function waitForServer(origin, child, logs) {
-  const deadline = Date.now() + 45_000;
-  while (Date.now() < deadline) {
-    if (child.exitCode !== null) throw new Error(`dev server exited early: ${logs.value.slice(-800)}`);
-    try {
-      if ((await fetch(`${origin}/api/account`)).status >= 200) return;
-    } catch {
-      // The dev server is still starting.
-    }
-    await new Promise((resolve) => setTimeout(resolve, 100));
-  }
-  throw new Error(`dev server did not start: ${logs.value.slice(-800)}`);
-}
-
-async function stopServer(child) {
-  if (child.exitCode !== null) return;
-  child.kill();
-  await Promise.race([
-    new Promise((resolve) => child.once("exit", resolve)),
-    new Promise((resolve) => setTimeout(resolve, 3_000)),
-  ]);
-  if (child.exitCode === null) child.kill("SIGKILL");
-}
 
 function identityHeaders(subject, email) {
   return {
@@ -136,9 +101,16 @@ function assertNoRepetitionSecrets(value) {
 
 const REPETITION_TEST_UNSAFE_AUGMENTS = new Set([
   "spade-command-chain",
+  // v3: the countdown is part of the strategic digest, while the fortress can
+  // make the camp-loop's preselected commander immobile.
+  "spade-lightning-doctrine",
+  "spade-iron-fortress",
   "spade-total-intelligence",
   "spade-supreme-recon",
   "heart-initiative",
+  // v3: a normal move opens a same-turn continuation instead of handing over
+  // the turn, so it cannot participate in this one-move-per-side fixture.
+  "heart-steady-advance",
   "heart-targeted-recon",
   "heart-wide-recon",
   "club-steady-tempo",
@@ -146,6 +118,12 @@ const REPETITION_TEST_UNSAFE_AUGMENTS = new Set([
   "club-local-recon",
   "diamond-front-watch",
   "diamond-drill",
+]);
+
+const REQUIRED_V3_QUIET_LOOP_EXCLUSIONS = Object.freeze([
+  "spade-lightning-doctrine",
+  "spade-iron-fortress",
+  "heart-steady-advance",
 ]);
 
 const REPETITION_CAMPS = [
@@ -492,6 +470,21 @@ function mutatePersistedRoomState(code, mutate) {
   }
 }
 
+function makeOpponentPiecePublic(code, perspective) {
+  let publicPiece = null;
+  mutatePersistedRoomState(code, (state) => {
+    assert.equal(state.phase, "setup");
+    const opponent = perspective === "black" ? "white" : "black";
+    const piece = state.pieces.find(
+      (candidate) => candidate.alive && candidate.side === opponent && candidate.type !== "flag",
+    );
+    assert.ok(piece);
+    state.augment.ruleState.publiclyRevealedPieceIds.push(piece.id);
+    publicPiece = { id: piece.id, type: piece.type };
+  });
+  return publicPiece;
+}
+
 function insertCompletedHistoryFixtures(authSubjectA, authSubjectB, prefix, count = 11) {
   const database = new DatabaseSync(localD1Path());
   try {
@@ -620,6 +613,9 @@ function spectatorKnownOpponentPieceIds(code, perspective) {
     return new Set([
       ...(state.augment?.permanentReveals[perspective] ?? []),
       ...(state.augment?.temporaryReveals[perspective] ?? []),
+      ...(state.augment?.ruleState?.publiclyRevealedPieceIds ?? []),
+      ...(state.augment?.ruleState?.promotedPublicIds ?? []),
+      ...Object.keys(state.augment?.ruleState?.mineHits ?? {}),
     ]);
   } finally {
     database.close();
@@ -627,22 +623,16 @@ function spectatorKnownOpponentPieceIds(code, perspective) {
 }
 
 test("authenticated rooms, identity seats, spectator policy, provisioning, and settlement", { timeout: 120_000 }, async (t) => {
+  assert.deepEqual(
+    REQUIRED_V3_QUIET_LOOP_EXCLUSIONS.filter((id) => REPETITION_TEST_UNSAFE_AUGMENTS.has(id)),
+    REQUIRED_V3_QUIET_LOOP_EXCLUSIONS,
+  );
   const port = await openPort();
   const origin = `http://localhost:${port}`;
-  const logs = { value: "" };
-  const child = spawn(
-    process.execPath,
-    [path.join(root, "node_modules", "vinext", "dist", "cli.js"), "dev", "--host", "127.0.0.1", "--port", String(port)],
-    { cwd: root, env: { ...process.env, NO_COLOR: "1" }, stdio: ["ignore", "pipe", "pipe"] },
-  );
-  for (const stream of [child.stdout, child.stderr]) {
-    stream.setEncoding("utf8");
-    stream.on("data", (chunk) => {
-      logs.value = `${logs.value}${chunk}`.slice(-8_000);
-    });
-  }
-  t.after(() => stopServer(child));
-  await waitForServer(origin, child, logs);
+  const server = spawnIntegrationServer(root, port);
+  const { child, logs } = server;
+  t.after(() => server.stop());
+  await waitForServer(origin, child, logs, "/api/account");
 
   assert.equal((await requestJson(`${origin}/api/rooms`, { method: "POST" })).status, 401);
 
@@ -728,6 +718,54 @@ test("authenticated rooms, identity seats, spectator policy, provisioning, and s
   mutatePersistedRoomState(legacyAugmentRoom.body.code, (state) => {
     state.rulesVersion = "augment-duel-dark-v1";
     delete state.repetitionTracker;
+    delete state.augment.ruleState;
+    state.augment.draft = {
+      catalogVersion: "junqi-augments-v1",
+      activeRound: 1,
+      rounds: [
+        {
+          number: 1,
+          trigger: "setup",
+          suit: "spades",
+          revealed: false,
+          players: {
+            black: {
+              options: [
+                "spade-grand-maneuver",
+                "spade-relentless-assault",
+                "spade-tactical-retreat",
+              ],
+              selectedId: null,
+              locked: false,
+              refreshedSlot: null,
+            },
+            white: {
+              options: [
+                "spade-tactical-retreat",
+                "spade-total-intelligence",
+                "spade-strategic-reserve",
+              ],
+              selectedId: null,
+              locked: false,
+              refreshedSlot: null,
+            },
+          },
+        },
+      ],
+      seenBySide: {
+        black: [
+          "spade-grand-maneuver",
+          "spade-relentless-assault",
+          "spade-tactical-retreat",
+        ],
+        white: [
+          "spade-tactical-retreat",
+          "spade-total-intelligence",
+          "spade-strategic-reserve",
+        ],
+      },
+      loadouts: { black: [], white: [] },
+    };
   });
   const legacyAugmentRecovery = await requestJson(
     `${origin}/api/rooms/${legacyAugmentRoom.body.code}`,
@@ -867,7 +905,7 @@ test("authenticated rooms, identity seats, spectator policy, provisioning, and s
   });
   assert.equal(hiddenSpectator.status, 200);
   assert.equal(hiddenSpectator.body.snapshot.mode, "augment");
-  assert.equal(hiddenSpectator.body.snapshot.rulesVersion, "augment-duel-dark-v2");
+  assert.equal(hiddenSpectator.body.snapshot.rulesVersion, "augment-duel-dark-v3");
   assert.equal(hiddenSpectator.body.snapshot.pieces.filter((piece) => piece.type).length, 0);
 
   async function prepareSecondDraftRoom() {
@@ -1231,6 +1269,8 @@ test("authenticated rooms, identity seats, spectator policy, provisioning, and s
   assert.equal(rankedFriend.body.snapshot.replay, null);
   const watchedSide = rankedFriend.body.spectatorPerspective;
   const opponentSide = watchedSide === "black" ? "white" : "black";
+  const publiclyRevealedOpponent = makeOpponentPiecePublic(rankedCode, watchedSide);
+  assert.ok(publiclyRevealedOpponent);
   const watchedDraft = rankedFriend.body.snapshot.augment.draft.rounds[0].players;
   assert.equal(Array.isArray(watchedDraft[watchedSide].options), true);
   assert.equal(watchedDraft[watchedSide].options.length, 3);
@@ -1271,6 +1311,25 @@ test("authenticated rooms, identity seats, spectator policy, provisioning, and s
   assert.equal(rankedPlaying.status, 200);
   assert.equal(rankedPlaying.body.snapshot.phase, "playing");
   assert.equal(rankedPlaying.body.setupDeadlineAt, null);
+  const rankedFriendPlaying = await requestJson(`${origin}/api/rooms/${rankedCode}`, {
+    headers: friend.headers,
+  });
+  assert.equal(rankedFriendPlaying.status, 200);
+  assert.equal(rankedFriendPlaying.body.snapshot.phase, "playing");
+  assert.equal(rankedFriendPlaying.body.snapshot.replay, null);
+  assert.equal(
+    rankedFriendPlaying.body.snapshot.pieces.find(
+      (piece) => piece.id === publiclyRevealedOpponent.id,
+    )?.type,
+    publiclyRevealedOpponent.type,
+  );
+  assert.equal(
+    rankedFriendPlaying.body.snapshot.pieces
+      .filter((piece) => piece.side === opponentSide)
+      .every((piece) => !("originalType" in piece)),
+    true,
+  );
+  assert.equal(JSON.stringify(rankedFriendPlaying.body.snapshot).includes('"baseTypes"'), false);
   const startedCancel = await requestJson(`${origin}/api/rooms/${rankedCode}`, {
     method: "DELETE",
     headers: bySide.black.headers,
@@ -1334,6 +1393,19 @@ test("authenticated rooms, identity seats, spectator policy, provisioning, and s
   assert.equal(rankedFriendAfterFinish.body.snapshot.replay, null);
   assertNoRepetitionSecrets(rankedFriendAfterFinish.body.snapshot);
   assert.equal(rankedFriendAfterFinish.body.snapshot.events.length > 0, true);
+  assert.equal(
+    rankedFriendAfterFinish.body.snapshot.pieces.find(
+      (piece) => piece.id === publiclyRevealedOpponent.id,
+    )?.type,
+    publiclyRevealedOpponent.type,
+  );
+  assert.equal(
+    rankedFriendAfterFinish.body.snapshot.pieces
+      .filter((piece) => piece.side === opponentSide)
+      .every((piece) => !("originalType" in piece)),
+    true,
+  );
+  assert.equal(JSON.stringify(rankedFriendAfterFinish.body.snapshot).includes('"baseTypes"'), false);
   assert.equal(
     rankedFriendAfterFinish.body.snapshot.pieces
       .filter((piece) => piece.side === watchedSide)

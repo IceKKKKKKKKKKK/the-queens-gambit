@@ -1,50 +1,14 @@
 import assert from "node:assert/strict";
-import { spawn } from "node:child_process";
 import { randomBytes } from "node:crypto";
 import { readdirSync } from "node:fs";
-import net from "node:net";
 import path from "node:path";
 import { DatabaseSync } from "node:sqlite";
 import test from "node:test";
 import { fileURLToPath } from "node:url";
 
+import { openPort, spawnIntegrationServer, waitForServer } from "./integration-server.mjs";
+
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
-
-async function openPort() {
-  return new Promise((resolve, reject) => {
-    const listener = net.createServer();
-    listener.once("error", reject);
-    listener.listen(0, "127.0.0.1", () => {
-      const address = listener.address();
-      listener.close(() => resolve(address.port));
-    });
-  });
-}
-
-async function waitForServer(origin, child, logs) {
-  const deadline = Date.now() + 45_000;
-  while (Date.now() < deadline) {
-    if (child.exitCode !== null) throw new Error(`dev server exited early: ${logs.value.slice(-800)}`);
-    try {
-      const response = await fetch(`${origin}/api/account`);
-      if (response.status >= 200) return;
-    } catch {
-      // The server is still starting.
-    }
-    await new Promise((resolve) => setTimeout(resolve, 100));
-  }
-  throw new Error(`dev server did not start: ${logs.value.slice(-800)}`);
-}
-
-async function stopServer(child) {
-  if (child.exitCode !== null) return;
-  child.kill();
-  await Promise.race([
-    new Promise((resolve) => child.once("exit", resolve)),
-    new Promise((resolve) => setTimeout(resolve, 3_000)),
-  ]);
-  if (child.exitCode === null) child.kill("SIGKILL");
-}
 
 function identityHeaders(subject, email) {
   return {
@@ -141,20 +105,10 @@ function insertPendingRankedMatch(authSubjectA, authSubjectB, matchId) {
 test("platform APIs auto-register accounts and support friends, presence, and safe matching", { timeout: 90_000 }, async (t) => {
   const port = await openPort();
   const origin = `http://localhost:${port}`;
-  const logs = { value: "" };
-  const child = spawn(
-    process.execPath,
-    [path.join(root, "node_modules", "vinext", "dist", "cli.js"), "dev", "--host", "127.0.0.1", "--port", String(port)],
-    { cwd: root, env: { ...process.env, NO_COLOR: "1" }, stdio: ["ignore", "pipe", "pipe"] },
-  );
-  for (const stream of [child.stdout, child.stderr]) {
-    stream.setEncoding("utf8");
-    stream.on("data", (chunk) => {
-      logs.value = `${logs.value}${chunk}`.slice(-8_000);
-    });
-  }
-  t.after(() => stopServer(child));
-  await waitForServer(origin, child, logs);
+  const server = spawnIntegrationServer(root, port);
+  const { child, logs } = server;
+  t.after(() => server.stop());
+  await waitForServer(origin, child, logs, "/api/account");
 
   const unauthorized = await requestJson(`${origin}/api/account`);
   assert.equal(unauthorized.status, 401);
