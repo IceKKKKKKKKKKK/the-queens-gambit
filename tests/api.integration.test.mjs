@@ -110,7 +110,6 @@ function ownLayout(snapshot, side) {
 
 test("room API preserves role-based visibility, identity, concurrency, and limits", { timeout: 120_000 }, async (t) => {
   const port = await openPort();
-  const origin = `http://localhost:${port}`;
   const server = spawnIntegrationServer(root, port, { logLimit: 4_000, persistState: "memory" });
   activeServer = server;
   t.after(async () => {
@@ -120,7 +119,7 @@ test("room API preserves role-based visibility, identity, concurrency, and limit
       activeServer = null;
     }
   });
-  await waitForJsonApi(origin, server);
+  const origin = await waitForJsonApi(server);
 
   const identityNonce = randomBytes(6).toString("hex");
   hostIdentity = {

@@ -1,5 +1,5 @@
 import vinext from "vinext";
-import { defineConfig } from "vite";
+import { defineConfig, type Plugin } from "vite";
 import hostingConfig from "./.openai/hosting.json";
 import { sites } from "./build/sites-vite-plugin";
 
@@ -10,6 +10,34 @@ const { d1, r2 } = hostingConfig;
 
 // macOS Seatbelt blocks FSEvents, so Codex previews need polling for HMR.
 const isCodexSeatbeltSandbox = process.env.CODEX_SANDBOX === "seatbelt";
+const integrationNonce = process.env.JUNQI_INTEGRATION_NONCE;
+const integrationListeningPlugin: Plugin | null =
+  process.env.JUNQI_INTEGRATION_TEST === "1" &&
+  typeof integrationNonce === "string" &&
+  /^[0-9a-f]{32}$/.test(integrationNonce)
+    ? {
+        name: "junqi-integration-listening-ipc",
+        configureServer(server) {
+          const notifyParent = () => {
+            const address = server.httpServer?.address();
+            if (
+              typeof process.send === "function" &&
+              address &&
+              typeof address === "object"
+            ) {
+              process.send({
+                type: "junqi-integration-server-listening",
+                nonce: integrationNonce,
+                pid: process.pid,
+                port: address.port,
+              });
+            }
+          };
+          if (server.httpServer?.listening) notifyParent();
+          else server.httpServer?.once("listening", notifyParent);
+        },
+      }
+    : null;
 
 const localBindingConfig = {
   main: "./worker/index.ts",
@@ -59,6 +87,7 @@ export default defineConfig(async () => {
     plugins: [
       vinext(),
       sites(),
+      integrationListeningPlugin,
       cloudflare({
         persistState,
         viteEnvironment: { name: "rsc", childEnvironments: ["ssr"] },

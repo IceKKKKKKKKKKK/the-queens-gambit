@@ -7,6 +7,10 @@ import test from "node:test";
 import { fileURLToPath } from "node:url";
 
 import {
+  canBindPort,
+  childIsAlive,
+  INTEGRATION_LISTENING_MESSAGE,
+  isOwnedListeningMessage,
   openPort,
   readJsonResponse,
   spawnIntegrationServer,
@@ -32,10 +36,12 @@ async function withHttpServer(handler, run) {
   }
 }
 
-function runningServer(log = "") {
+function runningServer(actualPort, log = "", requestedPort = actualPort) {
   return {
     child: { pid: 4242, exitCode: null, signalCode: null },
     logs: { value: log },
+    actualPort,
+    requestedPort,
   };
 }
 
@@ -53,23 +59,24 @@ test("JSON readiness ignores HTML errors until the authenticated API sentinel su
     response.writeHead(200, { "Content-Type": "application/json; charset=utf-8" });
     response.end(JSON.stringify({ account: { handle: "ready" } }));
   }, async (origin) => {
-    await waitForJsonApi(origin, runningServer(), 1_000);
+    const server = runningServer(null);
+    const readiness = waitForJsonApi(server, 1_000);
+    await new Promise((resolve) => setTimeout(resolve, 40));
+    assert.equal(requests, 0);
+    server.actualPort = Number(new URL(origin).port);
+    assert.equal(await readiness, origin);
   });
   assert.equal(requests, 3);
 
   const stalledPort = await openPort();
   await assert.rejects(
-    waitForJsonApi(
-      `http://127.0.0.1:${stalledPort}`,
-      runningServer("startup stalled before listening"),
-      20,
-    ),
+    waitForJsonApi(runningServer(stalledPort, "startup stalled before listening"), 20),
     (error) => {
       assert.match(error.message, /elapsed-ms=\d+/);
       assert.match(error.message, /child-alive=true/);
       assert.match(error.message, /pid=4242/);
-      assert.match(error.message, new RegExp(`port=${stalledPort}`));
-      assert.match(error.message, /port-bindable=true/);
+      assert.match(error.message, new RegExp(`actual-port=${stalledPort}`));
+      assert.match(error.message, /actual-port-bindable=true/);
       assert.match(error.message, /startup stalled before listening/);
       return true;
     },
@@ -89,7 +96,7 @@ test("non-JSON API responses fail once with request and dev-server evidence", as
       readJsonResponse(response, {
         method: "POST",
         url,
-        server: runningServer("Internal Server Error from Vite"),
+        server: runningServer(null, "Internal Server Error from Vite"),
       }),
       (error) => {
         assert.match(error.message, /POST \/api\/rooms/);
@@ -129,14 +136,76 @@ test("an explicitly shared integration state survives one server restart and is 
   };
   let firstServer = null;
   let secondServer = null;
+  let blocker = null;
   let statePath = null;
   try {
-    const firstPort = await openPort();
-    const firstOrigin = `http://localhost:${firstPort}`;
+    let blockerRequests = 0;
+    blocker = http.createServer((_request, response) => {
+      blockerRequests += 1;
+      response.writeHead(200, { "Content-Type": "application/json" });
+      response.end(JSON.stringify({ account: { handle: "not-the-owned-server" } }));
+    });
+    await new Promise((resolve, reject) => {
+      blocker.once("error", reject);
+      blocker.listen(0, "127.0.0.1", resolve);
+    });
+    const blockerAddress = blocker.address();
+    assert.ok(blockerAddress && typeof blockerAddress === "object");
+    const firstPort = blockerAddress.port;
     firstServer = spawnIntegrationServer(root, firstPort, { cleanupState: false });
     statePath = firstServer.statePath;
     assert.ok(statePath);
-    await waitForJsonApi(firstOrigin, firstServer);
+    assert.match(firstServer.nonce, /^[0-9a-f]{32}$/);
+    assert.deepEqual(firstServer.args.slice(1), [
+      "dev",
+      "--hostname",
+      "127.0.0.1",
+      "--port",
+      String(firstPort),
+    ]);
+    assert.equal(firstServer.args.includes("--host"), false);
+    assert.equal(
+      isOwnedListeningMessage(
+        {
+          type: INTEGRATION_LISTENING_MESSAGE,
+          nonce: `${firstServer.nonce}bad`,
+          pid: firstServer.child.pid,
+          port: firstPort,
+        },
+        firstServer,
+      ),
+      false,
+    );
+    for (const invalidPort of [0, 65_536, 1.5, "56406"]) {
+      assert.equal(
+        isOwnedListeningMessage(
+          {
+            type: INTEGRATION_LISTENING_MESSAGE,
+            nonce: firstServer.nonce,
+            pid: firstServer.child.pid,
+            port: invalidPort,
+          },
+          firstServer,
+        ),
+        false,
+      );
+    }
+    assert.equal(
+      isOwnedListeningMessage(
+        {
+          type: INTEGRATION_LISTENING_MESSAGE,
+          nonce: firstServer.nonce,
+          pid: firstServer.child.pid + 1,
+          port: firstPort,
+        },
+        firstServer,
+      ),
+      false,
+    );
+    const firstOrigin = await waitForJsonApi(firstServer);
+    assert.equal(blockerRequests, 0);
+    assert.notEqual(firstServer.actualPort, firstPort);
+    assert.equal(firstOrigin, `http://127.0.0.1:${firstServer.actualPort}`);
     const createdResponse = await fetch(`${firstOrigin}/api/rooms`, {
       method: "POST",
       headers: { ...identity, "Content-Type": "application/json" },
@@ -151,12 +220,20 @@ test("an explicitly shared integration state survives one server restart and is 
     assert.ok(created.code);
     assert.ok(created.playerToken);
     await firstServer.stop();
+    assert.equal(await canBindPort(firstServer.actualPort), true);
+    assert.equal(blocker.listening, true);
+    assert.equal(await canBindPort(firstPort), false);
+    assert.equal(blockerRequests, 0);
     assert.equal(existsSync(statePath), true);
 
+    await new Promise((resolve, reject) => {
+      blocker.close((error) => (error ? reject(error) : resolve()));
+    });
+    blocker = null;
+
     const secondPort = await openPort();
-    const secondOrigin = `http://localhost:${secondPort}`;
     secondServer = spawnIntegrationServer(root, secondPort, { statePath });
-    await waitForJsonApi(secondOrigin, secondServer);
+    const secondOrigin = await waitForJsonApi(secondServer);
     const recoveredResponse = await fetch(`${secondOrigin}/api/rooms/${created.code}`, {
       headers: { ...identity, Authorization: `Bearer ${created.playerToken}` },
     });
@@ -172,9 +249,28 @@ test("an explicitly shared integration state survives one server restart and is 
     assert.equal(existsSync(statePath), false);
   } finally {
     try {
-      await secondServer?.stop();
+      if (secondServer) {
+        await secondServer.stop();
+      }
     } finally {
-      await firstServer?.stop();
+      try {
+        if (firstServer) {
+          await firstServer.stop();
+        }
+      } finally {
+        try {
+          if (blocker?.listening) {
+            await new Promise((resolve) => blocker.close(resolve));
+          }
+        } finally {
+          const allServersExited =
+            (!firstServer || !childIsAlive(firstServer.child)) &&
+            (!secondServer || !childIsAlive(secondServer.child));
+          if (firstServer && allServersExited) {
+            await firstServer.cleanup();
+          }
+        }
+      }
     }
   }
 });

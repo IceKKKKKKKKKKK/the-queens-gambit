@@ -831,7 +831,6 @@ test("authenticated rooms, identity seats, spectator policy, provisioning, and s
     REQUIRED_V3_QUIET_LOOP_EXCLUSIONS,
   );
   const port = await openPort();
-  const origin = `http://localhost:${port}`;
   const server = spawnIntegrationServer(root, port);
   activeServer = server;
   activeStatePath = server.statePath;
@@ -843,7 +842,7 @@ test("authenticated rooms, identity seats, spectator policy, provisioning, and s
       activeStatePath = null;
     }
   });
-  await waitForJsonApi(origin, server);
+  const origin = await waitForJsonApi(server);
 
   assert.equal((await requestJson(`${origin}/api/rooms`, { method: "POST" })).status, 401);
 

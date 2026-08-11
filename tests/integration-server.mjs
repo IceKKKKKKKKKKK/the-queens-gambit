@@ -4,6 +4,8 @@ import { rm } from "node:fs/promises";
 import net from "node:net";
 import path from "node:path";
 
+const INTEGRATION_LISTENING_MESSAGE = "junqi-integration-server-listening";
+
 function childIsAlive(child) {
   return child.exitCode === null && child.signalCode === null;
 }
@@ -84,7 +86,20 @@ function assertOwnedStatePath(resolvedRoot, statePath) {
   }
 }
 
-async function waitForJsonApi(origin, server, timeoutMs = 90_000) {
+function isOwnedListeningMessage(message, { child, nonce }) {
+  return Boolean(
+    message &&
+      typeof message === "object" &&
+      message.type === INTEGRATION_LISTENING_MESSAGE &&
+      message.nonce === nonce &&
+      message.pid === child.pid &&
+      Number.isInteger(message.port) &&
+      message.port >= 1 &&
+      message.port <= 65_535,
+  );
+}
+
+async function waitForJsonApi(server, timeoutMs = 90_000) {
   const { child, logs } = server;
   const startedAt = Date.now();
   const deadline = Date.now() + timeoutMs;
@@ -93,6 +108,12 @@ async function waitForJsonApi(origin, server, timeoutMs = 90_000) {
     if (!childIsAlive(child)) {
       throw new Error(`dev server exited early: ${logs.value.slice(-800)}`);
     }
+    const actualPort = server.actualPort;
+    if (actualPort === null) {
+      await new Promise((resolve) => setTimeout(resolve, 25));
+      continue;
+    }
+    const origin = `http://127.0.0.1:${actualPort}`;
     try {
       const response = await fetch(new URL("/api/account", origin), {
         cache: "no-store",
@@ -107,7 +128,7 @@ async function waitForJsonApi(origin, server, timeoutMs = 90_000) {
       if (response.status === 200 && /^application\/json\b/i.test(contentType)) {
         try {
           const body = JSON.parse(text);
-          if (body?.account && typeof body.account === "object") return;
+          if (body?.account && typeof body.account === "object") return origin;
         } catch {
           // A partial JSON response is not a ready API.
         }
@@ -118,19 +139,11 @@ async function waitForJsonApi(origin, server, timeoutMs = 90_000) {
     }
     await new Promise((resolve) => setTimeout(resolve, 100));
   }
-  let port = null;
+  const port = server.actualPort;
   let portBindable = null;
-  try {
-    const parsedPort = Number(new URL(origin).port);
-    if (Number.isSafeInteger(parsedPort) && parsedPort > 0) {
-      port = parsedPort;
-      portBindable = await canBindPort(parsedPort);
-    }
-  } catch {
-    // The readiness loop already reports an invalid origin as a fetch failure.
-  }
+  if (port !== null) portBindable = await canBindPort(port);
   throw new Error(
-    `JSON API did not become ready; elapsed-ms=${Date.now() - startedAt}; child-alive=${childIsAlive(child)}; pid=${Number.isSafeInteger(child.pid) ? child.pid : "<missing>"}; port=${port ?? "<unavailable>"}; port-bindable=${portBindable ?? "<unavailable>"}; last=${lastResponse}; dev-server-log=${JSON.stringify(responsePreview(logs.value.slice(-1_200), 1_200))}`,
+    `JSON API did not become ready; elapsed-ms=${Date.now() - startedAt}; child-alive=${childIsAlive(child)}; pid=${Number.isSafeInteger(child.pid) ? child.pid : "<missing>"}; requested-port=${server.requestedPort ?? "<unavailable>"}; actual-port=${port ?? "<unavailable>"}; actual-port-bindable=${portBindable ?? "<unavailable>"}; last=${lastResponse}; dev-server-log=${JSON.stringify(responsePreview(logs.value.slice(-1_200), 1_200))}`,
   );
 }
 
@@ -185,7 +198,8 @@ function spawnIntegrationServer(root, port, options = {}) {
       : null;
   if (statePath) assertOwnedStatePath(resolvedRoot, statePath);
   const cliPath = path.join(resolvedRoot, "node_modules", "vinext", "dist", "cli.js");
-  const args = [cliPath, "dev", "--host", "127.0.0.1", "--port", String(port)];
+  const nonce = randomBytes(16).toString("hex");
+  const args = [cliPath, "dev", "--hostname", "127.0.0.1", "--port", String(port)];
   const child = spawn(process.execPath, args, {
     cwd: resolvedRoot,
     // Each integration lane is strictly serial and receives a fresh dynamic
@@ -196,9 +210,10 @@ function spawnIntegrationServer(root, port, options = {}) {
       NO_COLOR: "1",
       VINEXT_NO_DEV_LOCK: "1",
       JUNQI_INTEGRATION_TEST: "1",
+      JUNQI_INTEGRATION_NONCE: nonce,
       JUNQI_INTEGRATION_PERSIST_STATE: statePath ?? "memory",
     },
-    stdio: ["ignore", "pipe", "pipe"],
+    stdio: ["ignore", "pipe", "pipe", "ipc"],
     windowsHide: true,
   });
   if (!Number.isSafeInteger(child.pid) || child.pid <= 0) {
@@ -214,11 +229,18 @@ function spawnIntegrationServer(root, port, options = {}) {
   const ownership = {
     child,
     pid: child.pid,
-    port,
+    requestedPort: port,
+    actualPort: null,
+    nonce,
     root: resolvedRoot,
     cliPath,
-    args,
+    args: Object.freeze([...args]),
   };
+  const onMessage = (message) => {
+    if (ownership.actualPort !== null || !isOwnedListeningMessage(message, ownership)) return;
+    ownership.actualPort = message.port;
+  };
+  child.on("message", onMessage);
   let stopPromise = null;
   let cleanupPromise = null;
 
@@ -257,18 +279,33 @@ function spawnIntegrationServer(root, port, options = {}) {
       if (childIsAlive(child)) {
         throw new Error(`owned dev-server PID ${ownership.pid} did not exit`);
       }
-      await waitForPortRelease(port);
+      child.off("message", onMessage);
+      if (ownership.actualPort !== null) await waitForPortRelease(ownership.actualPort);
       if (cleanupState) await cleanup();
     })();
     return stopPromise;
   };
 
-  return { child, logs, statePath, stop };
+  return {
+    child,
+    cleanup,
+    logs,
+    statePath,
+    stop,
+    args: Object.freeze([...args]),
+    nonce,
+    requestedPort: port,
+    get actualPort() {
+      return ownership.actualPort;
+    },
+  };
 }
 
 export {
   canBindPort,
   childIsAlive,
+  INTEGRATION_LISTENING_MESSAGE,
+  isOwnedListeningMessage,
   openPort,
   readJsonResponse,
   spawnIntegrationServer,

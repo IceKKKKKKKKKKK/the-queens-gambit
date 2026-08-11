@@ -116,7 +116,6 @@ function insertPendingRankedMatch(authSubjectA, authSubjectB, matchId) {
 
 test("platform APIs auto-register accounts and support friends, presence, and safe matching", { timeout: 120_000 }, async (t) => {
   const port = await openPort();
-  const origin = `http://localhost:${port}`;
   const server = spawnIntegrationServer(root, port);
   activeServer = server;
   activeStatePath = server.statePath;
@@ -128,7 +127,7 @@ test("platform APIs auto-register accounts and support friends, presence, and sa
       activeStatePath = null;
     }
   });
-  await waitForJsonApi(origin, server);
+  const origin = await waitForJsonApi(server);
 
   const unauthorized = await requestJson(`${origin}/api/account`);
   assert.equal(unauthorized.status, 401);
