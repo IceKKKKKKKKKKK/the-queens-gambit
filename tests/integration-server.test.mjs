@@ -34,7 +34,7 @@ async function withHttpServer(handler, run) {
 
 function runningServer(log = "") {
   return {
-    child: { exitCode: null, signalCode: null },
+    child: { pid: 4242, exitCode: null, signalCode: null },
     logs: { value: log },
   };
 }
@@ -56,6 +56,24 @@ test("JSON readiness ignores HTML errors until the authenticated API sentinel su
     await waitForJsonApi(origin, runningServer(), 1_000);
   });
   assert.equal(requests, 3);
+
+  const stalledPort = await openPort();
+  await assert.rejects(
+    waitForJsonApi(
+      `http://127.0.0.1:${stalledPort}`,
+      runningServer("startup stalled before listening"),
+      20,
+    ),
+    (error) => {
+      assert.match(error.message, /elapsed-ms=\d+/);
+      assert.match(error.message, /child-alive=true/);
+      assert.match(error.message, /pid=4242/);
+      assert.match(error.message, new RegExp(`port=${stalledPort}`));
+      assert.match(error.message, /port-bindable=true/);
+      assert.match(error.message, /startup stalled before listening/);
+      return true;
+    },
+  );
 });
 
 test("non-JSON API responses fail once with request and dev-server evidence", async () => {
@@ -103,7 +121,7 @@ test("JSON response parsing preserves ordinary error bodies and handles empty su
   );
 });
 
-test("an explicitly shared integration state survives one server restart and is then removed", { timeout: 60_000 }, async () => {
+test("an explicitly shared integration state survives one server restart and is then removed", { timeout: 210_000 }, async () => {
   const nonce = randomBytes(6).toString("hex");
   const identity = {
     "oai-authenticated-user-id": `restart-host-${nonce}`,

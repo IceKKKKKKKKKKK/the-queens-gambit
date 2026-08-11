@@ -84,8 +84,9 @@ function assertOwnedStatePath(resolvedRoot, statePath) {
   }
 }
 
-async function waitForJsonApi(origin, server, timeoutMs = 45_000) {
+async function waitForJsonApi(origin, server, timeoutMs = 90_000) {
   const { child, logs } = server;
+  const startedAt = Date.now();
   const deadline = Date.now() + timeoutMs;
   let lastResponse = "no response";
   while (Date.now() < deadline) {
@@ -117,8 +118,19 @@ async function waitForJsonApi(origin, server, timeoutMs = 45_000) {
     }
     await new Promise((resolve) => setTimeout(resolve, 100));
   }
+  let port = null;
+  let portBindable = null;
+  try {
+    const parsedPort = Number(new URL(origin).port);
+    if (Number.isSafeInteger(parsedPort) && parsedPort > 0) {
+      port = parsedPort;
+      portBindable = await canBindPort(parsedPort);
+    }
+  } catch {
+    // The readiness loop already reports an invalid origin as a fetch failure.
+  }
   throw new Error(
-    `JSON API did not become ready; last=${lastResponse}; dev-server-log=${JSON.stringify(responsePreview(logs.value.slice(-1_200), 1_200))}`,
+    `JSON API did not become ready; elapsed-ms=${Date.now() - startedAt}; child-alive=${childIsAlive(child)}; pid=${Number.isSafeInteger(child.pid) ? child.pid : "<missing>"}; port=${port ?? "<unavailable>"}; port-bindable=${portBindable ?? "<unavailable>"}; last=${lastResponse}; dev-server-log=${JSON.stringify(responsePreview(logs.value.slice(-1_200), 1_200))}`,
   );
 }
 

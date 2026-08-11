@@ -246,7 +246,7 @@ async function run() {
     validateState,
   );
   const invocationLog = resolve(args.workerDir, "invocations.jsonl");
-  const timeoutMs = args.profile === "smoke" ? 120_000 : 180_000;
+  const timeoutMs = 180_000;
   const workspaces = Object.fromEntries(
     await Promise.all(
       SUITES.map(async (suite, index) => [

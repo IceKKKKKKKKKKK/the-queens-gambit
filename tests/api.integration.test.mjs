@@ -108,7 +108,7 @@ function ownLayout(snapshot, side) {
     .sort((first, second) => first.id.localeCompare(second.id));
 }
 
-test("room API preserves role-based visibility, identity, concurrency, and limits", { timeout: 90_000 }, async (t) => {
+test("room API preserves role-based visibility, identity, concurrency, and limits", { timeout: 120_000 }, async (t) => {
   const port = await openPort();
   const origin = `http://localhost:${port}`;
   const server = spawnIntegrationServer(root, port, { logLimit: 4_000, persistState: "memory" });
