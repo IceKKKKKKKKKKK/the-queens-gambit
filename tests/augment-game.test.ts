@@ -467,6 +467,48 @@ function forceSecondRoundSpades(state: GameState) {
   return round;
 }
 
+function forceSecondRoundReconForBoth(state: GameState) {
+  const round = forceSecondRoundSpades(state);
+  const previousWhiteOptions = [...round.players.white.options];
+  const whiteOptions = optionsWith("spade-supreme-recon", 2);
+  state.augment!.draft.seenBySide.white = state.augment!.draft.seenBySide.white
+    .filter((id) => !previousWhiteOptions.includes(id));
+  round.players.white = {
+    options: whiteOptions,
+    selectedId: null,
+    locked: false,
+    refreshedSlot: null,
+  };
+  state.augment!.draft.seenBySide.white.push(...whiteOptions);
+  return round;
+}
+
+function applyNextPendingReconTarget(state: GameState, side: Side, nowMs = 1_000) {
+  const pending = projectGame(state, side, nowMs).augment?.pendingRecon;
+  assert.ok(pending);
+  assert.ok(pending.legalTargets);
+  assert.ok(pending.legalTargets.length > 0);
+  return applyPlayerAction(state, side, {
+    type: "augment_recon",
+    augmentId: pending.augmentId,
+    target: pending.legalTargets[0],
+  }, nowMs);
+}
+
+function settlePendingReconTargets(
+  state: GameState,
+  side: Side,
+  nowMs = 1_000,
+  afterEach?: (next: GameState) => void,
+) {
+  let next = state;
+  while (next.augment?.pendingRecon[side]) {
+    next = applyNextPendingReconTarget(next, side, nowMs);
+    afterEach?.(next);
+  }
+  return next;
+}
+
 function forceSecondRoundOption(state: GameState, blackId: AugmentId) {
   const round = state.augment!.draft.rounds[1];
   const previousOptions = {
@@ -762,6 +804,57 @@ test("draft and pending reconnaissance phases never count an occurrence", () => 
   assert.equal(recon.repetitionTracker?.currentOccurrences, 0);
   assert.equal(projectGame(recon, "black").repetition?.active, false);
 
+  let dualOpening = createAugmentGame({ repetitionSalt: "dual-opening-recon-salt" });
+  const dualOpeningDraft = openingDraft("spade-total-intelligence");
+  const dualOpeningWhiteOptions = optionsWith("spade-supreme-recon");
+  dualOpeningDraft.rounds[0].players.white.options = dualOpeningWhiteOptions;
+  dualOpeningDraft.seenBySide.white = [...dualOpeningWhiteOptions];
+  dualOpening.augment!.draft = dualOpeningDraft;
+  dualOpening = applyPlayerAction(dualOpening, "black", {
+    type: "augment_select",
+    augmentId: "spade-total-intelligence",
+  });
+  dualOpening = applyPlayerAction(dualOpening, "black", { type: "augment_lock" });
+  dualOpening = applyPlayerAction(dualOpening, "white", {
+    type: "augment_select",
+    augmentId: "spade-supreme-recon",
+  });
+  dualOpening = applyPlayerAction(dualOpening, "white", { type: "augment_lock" });
+  dualOpening = applyPlayerAction(dualOpening, "black", { type: "ready", value: true });
+  dualOpening = applyPlayerAction(dualOpening, "white", { type: "ready", value: true });
+  assert.equal(dualOpening.augment?.pendingRecon.black?.remaining, 2);
+  assert.equal(dualOpening.augment?.pendingRecon.white?.remaining, 3);
+  assert.equal(dualOpening.repetitionTracker?.currentOccurrences, 0);
+  const assertOpeningReconUncounted = (next: GameState) => {
+    assert.equal(next.repetitionTracker?.currentOccurrences, 0);
+    assert.deepEqual(next.repetitionTracker?.counts, {});
+    assert.equal(next.repetitionTracker?.lastCountedDigest, null);
+  };
+  dualOpening = settlePendingReconTargets(
+    dualOpening,
+    "black",
+    1_000,
+    assertOpeningReconUncounted,
+  );
+  assert.equal(dualOpening.augment?.pendingRecon.black, null);
+  assert.ok(dualOpening.augment?.pendingRecon.white);
+  assert.equal(dualOpening.repetitionTracker?.currentOccurrences, 0);
+  dualOpening = settlePendingReconTargets(
+    dualOpening,
+    "white",
+    1_000,
+    assertOpeningReconUncounted,
+  );
+  assert.equal(dualOpening.augment?.pendingRecon.white, null);
+  assert.equal(dualOpening.repetitionTracker?.currentOccurrences, 0);
+  assert.deepEqual(dualOpening.repetitionTracker?.counts, {});
+  assert.equal(dualOpening.repetitionTracker?.lastCountedDigest, null);
+  assert.equal(dualOpening.augment?.triggerCounts.black["spade-total-intelligence"], 1);
+  assert.equal(dualOpening.augment?.triggerCounts.white["spade-supreme-recon"], 1);
+  assert.equal(dualOpening.augment?.permanentReveals.black.length, 2);
+  assert.equal(dualOpening.augment?.permanentReveals.white.length, 3);
+  assert.equal(projectGame(dualOpening, "black").repetition?.active, false);
+
   const continuation = repetitionReadyState();
   continuation.augment!.extraMove.black = {
     augmentId: "heart-initiative",
@@ -831,6 +924,40 @@ test("the final mandatory reconnaissance pick is the first eligible count bounda
   assert.deepEqual(resolved.augment?.permanentReveals.black, ["white-shuttle"]);
   assert.equal(resolved.repetitionTracker?.currentOccurrences, 1);
   assert.equal(projectGame(resolved, "black").repetition?.active, true);
+
+  let dualSecond = advanceFullStateToSecondDraft(
+    startWithOpeningAugment("heart-rail-turn", 20_000),
+    20_000,
+  );
+  forceSecondRoundReconForBoth(dualSecond);
+  dualSecond = applyPlayerAction(dualSecond, "black", {
+    type: "augment_select",
+    augmentId: "spade-total-intelligence",
+  }, 20_010);
+  dualSecond = applyPlayerAction(dualSecond, "black", { type: "augment_lock" }, 20_011);
+  dualSecond = applyPlayerAction(dualSecond, "white", {
+    type: "augment_select",
+    augmentId: "spade-supreme-recon",
+  }, 20_012);
+  dualSecond = applyPlayerAction(dualSecond, "white", { type: "augment_lock" }, 20_013);
+  assert.equal(dualSecond.augment?.pendingRecon.black?.remaining, 2);
+  assert.equal(dualSecond.augment?.pendingRecon.white?.remaining, 3);
+  assert.equal(dualSecond.repetitionTracker?.currentOccurrences, 0);
+  dualSecond = settlePendingReconTargets(dualSecond, "black", 20_100);
+  assert.equal(dualSecond.augment?.pendingRecon.black, null);
+  assert.ok(dualSecond.augment?.pendingRecon.white);
+  assert.equal(dualSecond.repetitionTracker?.currentOccurrences, 0);
+  while ((dualSecond.augment?.pendingRecon.white?.remaining ?? 0) > 1) {
+    dualSecond = applyNextPendingReconTarget(dualSecond, "white", 20_200);
+    assert.equal(dualSecond.repetitionTracker?.currentOccurrences, 0);
+  }
+  dualSecond = applyNextPendingReconTarget(dualSecond, "white", 20_300);
+  assert.equal(dualSecond.augment?.pendingRecon.white, null);
+  assert.equal(dualSecond.repetitionTracker?.currentOccurrences, 1);
+  const dualSecondCounts = Object.values(dualSecond.repetitionTracker?.counts ?? {});
+  assert.deepEqual(dualSecondCounts, [1]);
+  assert.ok(dualSecond.repetitionTracker?.lastCountedDigest);
+  assert.equal(projectGame(dualSecond, "black", 20_300).repetition?.active, true);
 });
 
 test("active movement, exchange, and extra-pass actions all invoke the unified adjudicator", () => {

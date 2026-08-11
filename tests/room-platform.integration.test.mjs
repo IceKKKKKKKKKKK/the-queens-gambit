@@ -117,19 +117,22 @@ const REPETITION_TEST_UNSAFE_AUGMENTS = new Set([
   // make the camp-loop's preselected commander immobile.
   "spade-lightning-doctrine",
   "spade-iron-fortress",
-  "spade-total-intelligence",
-  "spade-supreme-recon",
   "heart-initiative",
   // v3: a normal move opens a same-turn continuation instead of handing over
   // the turn, so it cannot participate in this one-move-per-side fixture.
   "heart-steady-advance",
-  "heart-targeted-recon",
   "heart-wide-recon",
   "club-steady-tempo",
   "club-frontline-scout",
   "club-local-recon",
   "diamond-front-watch",
   "diamond-drill",
+]);
+
+const REPETITION_TEST_CHOOSE_ENEMY_AUGMENTS = new Set([
+  "spade-total-intelligence",
+  "spade-supreme-recon",
+  "heart-targeted-recon",
 ]);
 
 const REQUIRED_V3_QUIET_LOOP_EXCLUSIONS = Object.freeze([
@@ -205,6 +208,88 @@ function findReversibleCampMove(snapshot, side) {
   throw new Error(`no reversible camp move for ${side}`);
 }
 
+function pendingRepetitionReconAction(snapshot) {
+  const pending = snapshot.augment?.pendingRecon;
+  if (!pending) return null;
+  assert.ok(
+    REPETITION_TEST_CHOOSE_ENEMY_AUGMENTS.has(pending.augmentId),
+    `unsupported pending reconnaissance in repetition fixture: ${pending.augmentId}`,
+  );
+  assert.ok(Array.isArray(pending.legalTargets));
+  assert.ok(pending.legalTargets.length > 0);
+  return {
+    type: "augment_recon",
+    augmentId: pending.augmentId,
+    target: pending.legalTargets[0],
+  };
+}
+
+async function settleRepetitionReconChoices(origin, code, headersBySide, initialVersion) {
+  let version = initialVersion;
+  let turn = null;
+  for (const side of ["black", "white"]) {
+    for (let pick = 0; pick < 25; pick += 1) {
+      const projected = await requestJson(`${origin}/api/rooms/${code}`, {
+        headers: headersBySide[side],
+      });
+      assert.equal(projected.status, 200);
+      assert.equal(projected.body.version, version);
+      turn ??= projected.body.snapshot.turn;
+      assert.equal(projected.body.snapshot.turn, turn);
+      const action = pendingRepetitionReconAction(projected.body.snapshot);
+      if (!action) break;
+      const response = await postAction(
+        origin,
+        code,
+        headersBySide[side],
+        version,
+        action,
+      );
+      assert.equal(response.status, 200);
+      assert.equal(response.body.snapshot.turn, turn);
+      version = response.body.version;
+      assert.notEqual(pick, 24, `repetition reconnaissance did not settle for ${side}`);
+    }
+  }
+  return version;
+}
+
+function assertRepetitionFixtureAugmentCoverage() {
+  for (const id of REPETITION_TEST_CHOOSE_ENEMY_AUGMENTS) {
+    assert.equal(REPETITION_TEST_UNSAFE_AUGMENTS.has(id), false);
+  }
+  for (const suitPrefix of ["spade", "heart", "club", "diamond"]) {
+    assert.ok(
+      [...REPETITION_TEST_UNSAFE_AUGMENTS].filter((id) => id.startsWith(`${suitPrefix}-`))
+        .length <= 3,
+      `a one-slot refresh must exhaust unsafe ${suitPrefix} repetition offers`,
+    );
+  }
+  for (const [augmentId, remaining] of [
+    ["heart-targeted-recon", 1],
+    ["spade-total-intelligence", 2],
+    ["spade-supreme-recon", 3],
+  ]) {
+    assert.deepEqual(
+      pendingRepetitionReconAction({
+        augment: {
+          pendingRecon: {
+            augmentId,
+            remaining,
+            legalTargets: [
+              { row: 6, col: 0 },
+              { row: 6, col: 2 },
+              { row: 6, col: 4 },
+            ].slice(0, remaining),
+          },
+        },
+      }),
+      { type: "augment_recon", augmentId, target: { row: 6, col: 0 } },
+    );
+  }
+  assert.equal(pendingRepetitionReconAction({ augment: { pendingRecon: null } }), null);
+}
+
 async function startRepetitionRoom(origin, code, headersBySide) {
   const initialBySide = Object.fromEntries(
     await Promise.all(
@@ -249,10 +334,12 @@ async function startRepetitionRoom(origin, code, headersBySide) {
     assert.equal(ready.status, 200);
     version = ready.body.version;
   }
+  version = await settleRepetitionReconChoices(origin, code, headersBySide, version);
   const playing = await requestJson(`${origin}/api/rooms/${code}`, {
     headers: headersBySide.black,
   });
   assert.equal(playing.status, 200);
+  assert.equal(playing.body.version, version);
   assert.equal(playing.body.snapshot.phase, "playing");
   assert.deepEqual(playing.body.snapshot.repetition, {
     threshold: 3,
@@ -327,6 +414,18 @@ async function activateRepetitionAfterSecondDraft(origin, room, headersBySide) {
     assert.equal(locked.status, 200);
     current = locked.body;
   }
+  const settledVersion = await settleRepetitionReconChoices(
+    origin,
+    room.code,
+    headersBySide,
+    current.version,
+  );
+  const settled = await requestJson(`${origin}/api/rooms/${room.code}`, {
+    headers: headersBySide.black,
+  });
+  assert.equal(settled.status, 200);
+  assert.equal(settled.body.version, settledVersion);
+  current = settled.body;
   assert.equal(current.snapshot.phase, "playing");
   assert.deepEqual(current.snapshot.repetition, {
     threshold: 3,
@@ -826,6 +925,7 @@ function spectatorKnownOpponentPieceIds(code, perspective) {
 
 test("authenticated rooms, identity seats, spectator policy, provisioning, and settlement", { timeout: 120_000 }, async (t) => {
   assertClockIncrementCombatMoveSelectorRegressions();
+  assertRepetitionFixtureAugmentCoverage();
   assert.deepEqual(
     REQUIRED_V3_QUIET_LOOP_EXCLUSIONS.filter((id) => REPETITION_TEST_UNSAFE_AUGMENTS.has(id)),
     REQUIRED_V3_QUIET_LOOP_EXCLUSIONS,
