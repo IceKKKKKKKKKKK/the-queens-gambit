@@ -13,13 +13,15 @@
 | 花色意图 | 黑桃 > 红桃 > 梅花 > 方块；这是设计等级，不是当前模拟已经证明的胜率排序 |
 | 方式分布 | 主动 28、自动 23、持续 13、布阵 6 |
 | 机制参数指纹 | `2918025817` |
-| 产品稳定性算法 | `product-stability-v17-v3-no-clock-zero-time-deterministic-ids-slot-stable-drafts-relocation-aware-public-rank-capacity-worlds-private-draft-fidelity` |
-| 对局引擎指纹 | `augment-duel-dark-v3:threefold-3:strategic-sha256-v3` |
-| 当前结论 | 70 张已进入服务端规则；最终发布回归 266/266 通过，正式四小时持续测试与 Sites 部署仍须基于冻结提交完成 |
+| 产品稳定性算法 | `product-stability-v18-v3-no-clock-zero-time-deterministic-ids-slot-stable-drafts-relocation-aware-public-rank-capacity-worlds-private-draft-fidelity` |
+| 对局引擎指纹 | `augment-duel-dark-v3:threefold-3:strategic-sha256-v4` |
+| 当前结论 | 70 张已进入服务端规则；最终发布回归 268/268 通过，正式四小时持续测试与 Sites 部署仍须基于冻结提交完成 |
 
 `lib/augments.ts` 中的 `AUGMENT_CATALOG` 是运行时权威来源。机制参数指纹只覆盖稳定 ID、花色、次数和结构化效果，不覆盖名称或说明文案；规则改动后应同时更新本 README 和测试记录。
 
-v17 暗棋采样只依据玩家可见投影、公开闪电战状态和公开晋升标记，在标准棋子库存容量内抽取基础军阶，再独立计算当前有效军阶；对手已锁但尚未共同公开的选牌只从合成选项恢复到内部 loadout，公开前 trigger 保持 0 且不标记 used。采样不会读取权威 `baseTypes`、私有选牌或回放私密信息，每个 v3 抽样世界都必须通过规则校验并重新投影为同一玩家可见状态。引擎同时要求只有敌方棋子实际进入守方大本营才会解锁“濒死悟道”；旧 v16 算法与旧引擎 checkpoint 均拒绝恢复。
+v18 暗棋采样沿用玩家可见投影、公开闪电战状态和公开晋升标记边界，在标准棋子库存容量内抽取基础军阶，再独立计算当前有效军阶；对手已锁但尚未共同公开的选牌只从合成选项恢复到内部 loadout，公开前 trigger 保持 0 且不标记 used。采样不会读取权威 `baseTypes`、私有选牌或回放私密信息，每个 v3 抽样世界都必须通过规则校验并重新投影为同一玩家可见状态。三次重复摘要忽略不会改变剩余次数或未来权利的持续牌触发计数，仍保留主动、自动、布阵牌次数以及棋子、公开信息、大本营、地雷、伤亡、闪电战和追加行动等规则状态；只有敌方棋子实际进入守方大本营才会解锁“濒死悟道”。旧 v17 算法与旧 `strategic-sha256-v3` 引擎 checkpoint 均拒绝恢复。
+
+本仓库此前未公开部署 v3/70，因此 `strategic-sha256-v4` 是 v3 的首次公开发布摘要合同，不需要迁移线上 v3 房间。若其他环境曾持久化旧摘要的 v3 进行中房间，升级前必须另行设计并验证迁移，或清理、等待其过期；不能直接混用新旧重复局面摘要。
 
 ## 强化模式怎么进行
 
@@ -137,7 +139,7 @@ v17 暗棋采样只依据玩家可见投影、公开闪电战状态和公开晋�
 
 ### 已有证据
 
-- 最终完整回归 266/266 通过：HTML 9 项、集成服务器契约 4 项、TypeScript 250 项、真实集成 3 项；
+- 最终完整回归 268/268 通过：HTML 9 项、集成服务器契约 4 项、TypeScript 252 项、真实集成 3 项；
 - production build、全项目 ESLint、`tsc --noEmit --incremental false` 与 `git diff --check` 均通过；
 - 三套真实集成各连续运行 4 轮，共 12/12 通过；每轮服务端端口均可重新绑定，结束后孤儿进程为 0；
 - API 集成在独立内存状态下连续运行 64/64 次且零自动重试，跨过此前第 57 次的开发服务器 HTML 故障点；64 个动态端口全部可重新绑定，D1 文件与 Vinext/Workerd 残留均为 0；另有双启动哨兵验证同一显式持久状态可在停服后读回房间并安全清理；

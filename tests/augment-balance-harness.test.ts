@@ -2960,6 +2960,36 @@ test("the exact lightning projection regression now finishes one uncapped leg", 
   assert.equal(result.stuck, false);
 });
 
+test("the exact fortress and last-headquarters loop ends as a product threefold draw", () => {
+  const pairing = buildProductStabilityPairings().find(
+    (candidate) =>
+      candidate.cardA === "spade-iron-fortress" &&
+      candidate.cardB === "spade-last-headquarters",
+  );
+  assert.ok(pairing);
+  const group = scheduleGroup(pairing, 0, 0);
+  const result = playLeg(
+    group,
+    mirrorLegs(group.cardA, group.cardB)[2],
+    {
+      seed: 20260811,
+      maxActions: 300,
+      thinkTimeMinMs: 0,
+      thinkTimeMaxMs: 0,
+      search: SEARCH,
+      refreshMargin: 4,
+    },
+  );
+  assert.equal(result.pairedSeed, 3013363771);
+  assert.equal(result.exception, null);
+  assert.equal(result.finished, true);
+  assert.equal(result.finishReason, "draw");
+  assert.equal(result.drawReason, "threefold_repetition");
+  assert.equal(result.capped, false);
+  assert.equal(result.stuck, false);
+  assert.equal(result.moves, 122);
+});
+
 test("determinization rejects an ongoing projection with no legal living flag host", () => {
   const state = createControlledPairGame(
     "club-forced-march",
@@ -3399,6 +3429,12 @@ test("the independent repetition position separates every v3 strategic rule fiel
     nowMs + 2,
   );
   const baseline = referenceStrategicPositionJson(settled);
+  const passiveTelemetry = structuredClone(settled);
+  passiveTelemetry.augment!.triggerCounts.black["heart-steady-advance"] = 999;
+  assert.equal(referenceStrategicPositionJson(passiveTelemetry), baseline);
+  const chargedRight = structuredClone(settled);
+  chargedRight.augment!.triggerCounts.black["heart-initiative"] = 1;
+  assert.notEqual(referenceStrategicPositionJson(chargedRight), baseline);
   const blackMine = settled.pieces.find(
     (piece) => piece.side === "black" && piece.type === "mine",
   )!;
@@ -4168,12 +4204,12 @@ test("checkpoint validation and remaining schedule make resume idempotent", () =
   assert.equal(restored.algorithmVersion, BALANCE_ALGORITHM_VERSION);
   assert.equal(
     BALANCE_ALGORITHM_VERSION,
-    "product-stability-v17-v3-no-clock-zero-time-deterministic-ids-slot-stable-drafts-relocation-aware-public-rank-capacity-worlds-private-draft-fidelity",
+    "product-stability-v18-v3-no-clock-zero-time-deterministic-ids-slot-stable-drafts-relocation-aware-public-rank-capacity-worlds-private-draft-fidelity",
   );
   assert.equal(restored.engineRulesFingerprint, BALANCE_ENGINE_RULES_FINGERPRINT);
   assert.equal(
     BALANCE_ENGINE_RULES_FINGERPRINT,
-    "augment-duel-dark-v3:threefold-3:strategic-sha256-v3",
+    "augment-duel-dark-v3:threefold-3:strategic-sha256-v4",
   );
   assert.notEqual(
     tournamentConfigFingerprint(OPTIONS),
@@ -4215,6 +4251,11 @@ test("checkpoint validation and remaining schedule make resume idempotent", () =
     "product-stability-v16-v3-no-clock-zero-time-deterministic-ids-slot-stable-drafts-relocation-aware-public-rank-capacity-worlds";
   assert.throws(() => validateCheckpoint(v16, OPTIONS, pairings), /algorithm/i);
 
+  const v17 = JSON.parse(JSON.stringify(checkpoint));
+  v17.algorithmVersion =
+    "product-stability-v17-v3-no-clock-zero-time-deterministic-ids-slot-stable-drafts-relocation-aware-public-rank-capacity-worlds-private-draft-fidelity";
+  assert.throws(() => validateCheckpoint(v17, OPTIONS, pairings), /algorithm/i);
+
   const v6 = JSON.parse(JSON.stringify(checkpoint));
   v6.algorithmVersion = "hidden-info-balance-v6-full-threshold-increment";
   assert.throws(() => validateCheckpoint(v6, OPTIONS, pairings), /algorithm/i);
@@ -4241,7 +4282,7 @@ test("checkpoint validation and remaining schedule make resume idempotent", () =
 
   const previousEngineRules = JSON.parse(JSON.stringify(checkpoint));
   previousEngineRules.engineRulesFingerprint =
-    "augment-duel-dark-v3:threefold-3:strategic-sha256-v2";
+    "augment-duel-dark-v3:threefold-3:strategic-sha256-v3";
   assert.throws(
     () => validateCheckpoint(previousEngineRules, OPTIONS, pairings),
     /engine rules/i,
@@ -4358,7 +4399,7 @@ test("card aggregation separates opportunity and first-trigger timing from raw n
   );
 });
 
-test("same-tier v17 scores adjudicated threefold draws as 0.5 without hiding action caps", () => {
+test("same-tier v18 scores adjudicated threefold draws as 0.5 without hiding action caps", () => {
   const pairing = buildRoundRobinPairings()[0];
   const group = scheduleGroup(pairing, 0, 0);
   const results = playMirrorGroup(group, OPTIONS).map((result) => ({
@@ -4382,7 +4423,7 @@ test("same-tier v17 scores adjudicated threefold draws as 0.5 without hiding act
   assert.equal(aggregate.cards[group.cardA].threefoldDraws, 4);
 });
 
-test("v17 cross-tier diagnostic schedule balances legal round order and isolates setup cards", () => {
+test("v18 cross-tier diagnostic schedule balances legal round order and isolates setup cards", () => {
   const representatives = selectTierRepresentatives();
   assert.equal(representatives.length, 4);
   assert.equal(buildCrossTierComparisons().length, 6);
@@ -4477,7 +4518,7 @@ test("v17 cross-tier diagnostic schedule balances legal round order and isolates
   assert.ok(setupState.augment?.draft.loadouts[setupSide].includes(setupFocal));
 });
 
-test("v17 second focal is absent at move zero and selected in the formal move-10 draft", () => {
+test("v18 second focal is absent at move zero and selected in the formal move-10 draft", () => {
   const group = buildCrossTierExperimentSchedule(0).find(
     (candidate) =>
       candidate.stratum === "round_order" && candidate.roundOrder === "higher_first",
@@ -4503,7 +4544,7 @@ test("v17 second focal is absent at move zero and selected in the formal move-10
   assert.equal(result.focal.white.selected, true);
 });
 
-test("v17 common random seed excludes card IDs and one four-leg mirror shares it", () => {
+test("v18 common random seed excludes card IDs and one four-leg mirror shares it", () => {
   const group = buildCrossTierExperimentSchedule(0).find(
     (candidate) => candidate.stratum === "round_order",
   );
@@ -4526,7 +4567,7 @@ test("v17 common random seed excludes card IDs and one four-leg mirror shares it
   assert.ok(results.every((result) => result.secondDraftRevealed));
 });
 
-test("v17 leg ledger and report preserve finish, focal trigger, opportunity and stop status", () => {
+test("v18 leg ledger and report preserve finish, focal trigger, opportunity and stop status", () => {
   const group = buildCrossTierExperimentSchedule(0).find(
     (candidate) => candidate.stratum === "round_order",
   );
@@ -4655,7 +4696,7 @@ test("v17 leg ledger and report preserve finish, focal trigger, opportunity and 
   );
 });
 
-test("cross-tier v17 preserves drawReason and scores each product threefold draw as 0.5", () => {
+test("cross-tier v18 preserves drawReason and scores each product threefold draw as 0.5", () => {
   const options = { ...OPTIONS, maxActions: 10 };
   const group = buildCrossTierExperimentSchedule(0).find(
     (candidate) => candidate.stratum === "round_order",
@@ -4686,7 +4727,7 @@ test("cross-tier v17 preserves drawReason and scores each product threefold draw
   assert.equal(row?.higherScore?.estimate, 0.5);
 });
 
-test("v17 setup results remain outside pure round-order tier estimates", () => {
+test("v18 setup results remain outside pure round-order tier estimates", () => {
   const group = buildCrossTierExperimentSchedule(0).find(
     (candidate) => candidate.stratum === "setup",
   );
@@ -4726,7 +4767,7 @@ test("v17 setup results remain outside pure round-order tier estimates", () => {
   assert.equal(card?.setupCompleteMirrorGroups, 1);
 });
 
-test("v17 cross-tier estimates are card-equal and use deterministic mirror-group bootstrap", () => {
+test("v18 cross-tier estimates are card-equal and use deterministic mirror-group bootstrap", () => {
   const samples: CrossTierMirrorSample[] = [
     {
       groupKey: "g0",
@@ -4774,7 +4815,7 @@ test("v17 cross-tier estimates are card-equal and use deterministic mirror-group
   assert.ok(first && first.low >= 0 && first.high <= 1);
 });
 
-test("v17 technical acceptance rejects an incomplete favorable sample without gating on ordering", () => {
+test("v18 technical acceptance rejects an incomplete favorable sample without gating on ordering", () => {
   const tournament = { ...OPTIONS, maxActions: 10 };
   const groups = buildCrossTierComparisons().map((comparison) => {
     const group = buildCrossTierExperimentSchedule(0).find(
@@ -4889,6 +4930,14 @@ test("cross-tier checkpoints bind the balance algorithm and reject legacy eviden
     /algorithm/i,
   );
 
+  const v17 = JSON.parse(JSON.stringify(checkpoint));
+  v17.algorithmVersion =
+    "product-stability-v17-v3-no-clock-zero-time-deterministic-ids-slot-stable-drafts-relocation-aware-public-rank-capacity-worlds-private-draft-fidelity";
+  assert.throws(
+    () => validateCrossTierCheckpoint(v17, OPTIONS),
+    /algorithm/i,
+  );
+
   const v6 = JSON.parse(JSON.stringify(checkpoint));
   v6.algorithmVersion = "hidden-info-balance-v6-full-threshold-increment";
   assert.throws(() => validateCrossTierCheckpoint(v6, OPTIONS), /algorithm/i);
@@ -4915,7 +4964,7 @@ test("cross-tier checkpoints bind the balance algorithm and reject legacy eviden
 
   const previousEngineRules = JSON.parse(JSON.stringify(checkpoint));
   previousEngineRules.engineRulesFingerprint =
-    "augment-duel-dark-v3:threefold-3:strategic-sha256-v2";
+    "augment-duel-dark-v3:threefold-3:strategic-sha256-v3";
   assert.throws(
     () => validateCrossTierCheckpoint(previousEngineRules, OPTIONS),
     /engine rules/i,

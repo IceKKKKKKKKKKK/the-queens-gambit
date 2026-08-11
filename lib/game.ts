@@ -37,7 +37,7 @@ export const THREEFOLD_REPETITION_THRESHOLD = 3 as const;
 export const FIFTY_CARD_THREEFOLD_REPETITION_RULES_FINGERPRINT =
   "augment-duel-dark-v2:threefold-3:strategic-sha256-v1" as const;
 export const THREEFOLD_REPETITION_RULES_FINGERPRINT =
-  "augment-duel-dark-v3:threefold-3:strategic-sha256-v3" as const;
+  "augment-duel-dark-v3:threefold-3:strategic-sha256-v4" as const;
 export const DEFAULT_TIME_CONTROL_MINUTES = 20;
 export const RANKED_TIME_CONTROL_MINUTES = 10;
 export const RANKED_INCREMENT_THRESHOLD_MS = 5 * 60 * 1000;
@@ -895,8 +895,17 @@ function sortedUnique(values: readonly string[] | undefined) {
 function strategicPositionJson(state: GameState) {
   const augment = state.augment;
   if (!augment) throw new GameRuleError("AUGMENT_MODE_REQUIRED");
-  const sortedTriggerCounts = (side: Side) =>
+  const strategicTriggerCounts = (side: Side) =>
     Object.entries(augment.triggerCounts[side])
+      // Passive counts are public telemetry, not a remaining charge or future
+      // rule right. Keeping an unbounded counter here lets otherwise identical
+      // positions evade threefold forever (for example, protected-flag attacks
+      // combined with Steady Advance). The released v2 digest stays frozen.
+      .filter(
+        ([id]) =>
+          !isCurrentAugmentRulesVersion(state.rulesVersion) ||
+          getAugmentDefinition(id as AugmentId).activation !== "passive",
+      )
       .sort(([first], [second]) => compareStableText(first, second))
       .map(([id, count]) => [id, count]);
   const extraMove = (side: Side) => {
@@ -919,7 +928,7 @@ function strategicPositionJson(state: GameState) {
         [...augment.draft.loadouts.black],
         [...augment.draft.loadouts.white],
       ],
-      triggerCounts: [sortedTriggerCounts("black"), sortedTriggerCounts("white")],
+      triggerCounts: [strategicTriggerCounts("black"), strategicTriggerCounts("white")],
       permanentReveals: [
         sortedUnique(augment.permanentReveals.black),
         sortedUnique(augment.permanentReveals.white),

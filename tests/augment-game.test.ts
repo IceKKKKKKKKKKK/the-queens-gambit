@@ -563,7 +563,7 @@ test("the v2 repetition contract stays frozen while v3 is current and legacy roo
   );
   assert.equal(
     THREEFOLD_REPETITION_RULES_FINGERPRINT,
-    "augment-duel-dark-v3:threefold-3:strategic-sha256-v3",
+    "augment-duel-dark-v3:threefold-3:strategic-sha256-v4",
   );
   const deterministic = createAugmentGame({ repetitionSalt: "paired-seed-17" });
   assert.equal(deterministic.repetitionTracker?.salt, "paired-seed-17");
@@ -692,7 +692,7 @@ test("clocks, move numbers, replay, events, and private draft bookkeeping do not
   assert.deepEqual(ignored.repetitionTracker, originalTracker);
 });
 
-test("turn, pieces, moved identities, loadout order, triggers, reveals, flags, and extra moves split positions", () => {
+test("turn, pieces, moved identities, loadout order, charged triggers, reveals, flags, and extra moves split positions", () => {
   const baseline = repetitionReadyState();
   adjudicateThreefoldRepetition(baseline);
   const originalDigest = baseline.repetitionTracker!.lastCountedDigest;
@@ -715,6 +715,35 @@ test("turn, pieces, moved identities, loadout order, triggers, reveals, flags, a
     assert.equal(Object.keys(changed.repetitionTracker?.counts ?? {}).length, 2, label);
     assert.equal(changed.repetitionTracker?.currentOccurrences, 1, label);
   }
+});
+
+test("v3 repetition ignores passive trigger telemetry but preserves charge-bearing rights", () => {
+  const baseline = v3PlayingState({
+    pieces: [
+      piece("black-shuttle", "black", "platoon", 3, 0),
+      piece("white-shuttle", "white", "platoon", 8, 4),
+    ],
+    blackAugments: ["spade-iron-fortress", "heart-initiative"],
+    moveNumber: 10,
+  });
+  baseline.movedPieceIds = ["black-shuttle", "white-shuttle"];
+  adjudicateThreefoldRepetition(baseline);
+  const originalDigest = baseline.repetitionTracker?.lastCountedDigest;
+  assert.ok(originalDigest);
+
+  const passiveTelemetry = structuredClone(baseline);
+  passiveTelemetry.augment!.triggerCounts.black["spade-iron-fortress"] = 17;
+  assert.equal(adjudicateThreefoldRepetition(passiveTelemetry), false);
+  assert.equal(passiveTelemetry.repetitionTracker?.lastCountedDigest, originalDigest);
+  assert.equal(passiveTelemetry.repetitionTracker?.currentOccurrences, 1);
+  assert.equal(Object.keys(passiveTelemetry.repetitionTracker?.counts ?? {}).length, 1);
+
+  const chargedRight = structuredClone(baseline);
+  chargedRight.augment!.triggerCounts.black["heart-initiative"] = 1;
+  assert.equal(adjudicateThreefoldRepetition(chargedRight), false);
+  assert.notEqual(chargedRight.repetitionTracker?.lastCountedDigest, originalDigest);
+  assert.equal(chargedRight.repetitionTracker?.currentOccurrences, 1);
+  assert.equal(Object.keys(chargedRight.repetitionTracker?.counts ?? {}).length, 2);
 });
 
 test("draft and pending reconnaissance phases never count an occurrence", () => {

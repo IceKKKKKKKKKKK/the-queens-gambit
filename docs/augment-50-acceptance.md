@@ -68,8 +68,8 @@ redeploy 策略只能生成少量确定性的完整 placements，避免全排列
 
 - balance/report schema：5；
 - soak schema：2；
-- 算法：`product-stability-v17-v3-no-clock-zero-time-deterministic-ids-slot-stable-drafts-relocation-aware-public-rank-capacity-worlds-private-draft-fidelity`；只使用玩家可见投影与公开闪电战/晋升元数据，以标准库存容量抽取基础军阶后独立计算当前军阶；对手已锁但未共同公开的卡仅进入合成内部 loadout，公开前 trigger 为 0 且 unused；每个 v3 抽样世界必须通过规则校验与重投影一致性检查，不读取权威 `baseTypes`、私有选牌或回放私密信息，且拒绝 v16 checkpoint；
-- 引擎：`augment-duel-dark-v3:threefold-3:strategic-sha256-v3`；己方棋进入己方大本营不会解锁对手“濒死悟道”。
+- 算法：`product-stability-v18-v3-no-clock-zero-time-deterministic-ids-slot-stable-drafts-relocation-aware-public-rank-capacity-worlds-private-draft-fidelity`；只使用玩家可见投影与公开闪电战/晋升元数据，以标准库存容量抽取基础军阶后独立计算当前军阶；对手已锁但未共同公开的卡仅进入合成内部 loadout，公开前 trigger 为 0 且 unused；每个 v3 抽样世界必须通过规则校验与重投影一致性检查，不读取权威 `baseTypes`、私有选牌或回放私密信息，且拒绝 v17 checkpoint；
+- 引擎：`augment-duel-dark-v3:threefold-3:strategic-sha256-v4`；三次重复摘要忽略持续牌纯触发计数，但保留有次数权利的计数与现有规则状态；己方棋进入己方大本营不会解锁对手“濒死悟道”，旧 `strategic-sha256-v3` checkpoint 拒绝恢复。
 
 checkpoint 指纹必须绑定实际零时间配置、搜索深度、eligible/excluded IDs、赛程、目录、算法和引擎。任何旧 schema、旧算法、旧引擎、旧牌池或旧赛程证据都严格拒绝，不能与当前结果合并。
 
@@ -83,7 +83,7 @@ checkpoint 指纹必须绑定实际零时间配置、搜索深度、eligible/exc
 - 四张新主动牌 opportunity/use；
 - 回放、隐私、API、动画和恢复证据。
 
-截至 2026-08-11 ET，最终代码回归为 266/266：HTML 9 项、集成服务器契约 4 项、TypeScript 250 项、真实集成 3 项；production build、全项目 ESLint、`tsc --noEmit --incremental false` 与 `git diff --check` 均通过。三套真实集成各连续执行 4 轮，共 12/12 通过；每轮端口可重新绑定，结束后孤儿进程为 0。API 集成另在同一隔离工作区连续执行 64/64 次且零自动重试，全部返回 JSON、64 个动态端口均可重绑、D1 文件与 Vinext/Workerd 残留均为 0；独立双启动哨兵验证显式持久状态可在停服后读回并安全清理。
+截至 2026-08-11 ET，最终代码回归为 268/268：HTML 9 项、集成服务器契约 4 项、TypeScript 252 项、真实集成 3 项；production build、全项目 ESLint、`tsc --noEmit --incremental false` 与 `git diff --check` 均通过。三套真实集成各连续执行 4 轮，共 12/12 通过；每轮端口可重新绑定，结束后孤儿进程为 0。API 集成另在同一隔离工作区连续执行 64/64 次且零自动重试，全部返回 JSON、64 个动态端口均可重绑、D1 文件与 Vinext/Workerd 残留均为 0；独立双启动哨兵验证显式持久状态可在停服后读回并安全清理。
 
 这组代码回归不替代正式持续测试。正式不少于 4 小时的四 worker soak 与 Sites 部署都必须发生在准确的冻结提交之后；持续测试通过后才能进入公开部署和生产 QA。权威长跑结果写入 `outputs/soak/<run-id>/final.json`，quick 报告写入 `outputs/balance/augment-balance-report.json`。`outputs/` 只保存本机证据，不提交。
 

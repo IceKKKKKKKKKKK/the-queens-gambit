@@ -455,8 +455,13 @@ function sortedUnique(values: readonly string[] | undefined) {
 export function referenceStrategicPositionJson(state: GameState) {
   const augment = state.augment;
   if (!augment) throw new Error("Reference repetition requires augment state.");
-  const triggerCounts = (side: Side) =>
+  const strategicTriggerCounts = (side: Side) =>
     Object.entries(augment.triggerCounts[side])
+      .filter(
+        ([id]) =>
+          state.rulesVersion !== AUGMENT_RULES_VERSION ||
+          getAugmentDefinition(id as AugmentId).activation !== "passive",
+      )
       .sort(([first], [second]) => first.localeCompare(second))
       .map(([id, count]) => [id, count]);
   const extraMove = (side: Side) => {
@@ -479,7 +484,7 @@ export function referenceStrategicPositionJson(state: GameState) {
         [...augment.draft.loadouts.black],
         [...augment.draft.loadouts.white],
       ],
-      triggerCounts: [triggerCounts("black"), triggerCounts("white")],
+      triggerCounts: [strategicTriggerCounts("black"), strategicTriggerCounts("white")],
       permanentReveals: [
         sortedUnique(augment.permanentReveals.black),
         sortedUnique(augment.permanentReveals.white),
@@ -1524,7 +1529,7 @@ function verifyRejectedActionDoesNotMutate(state: GameState, nowMs: number) {
   );
 }
 
-export const THREEFOLD_TRACE_SEED = "rules-v17-v3-no-clock-threefold-trace";
+export const THREEFOLD_TRACE_SEED = "rules-v18-v3-no-clock-threefold-trace";
 export const THREEFOLD_TRACE_CARD_PAIR = [
   "club-road-patrol",
   "club-engineer-oath",
