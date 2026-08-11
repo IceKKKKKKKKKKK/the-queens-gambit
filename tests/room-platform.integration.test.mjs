@@ -560,6 +560,186 @@ function insertCompletedHistoryFixtures(authSubjectA, authSubjectB, prefix, coun
   }
 }
 
+function selectClockIncrementProbeMove(state) {
+  const side = state?.turn;
+  if (side !== "black" && side !== "white") return null;
+  if (!Array.isArray(state.pieces)) return null;
+  const loadout = state.augment?.draft?.loadouts?.[side];
+  const baseTypes = state.augment?.ruleState?.baseTypes;
+  if (!Array.isArray(loadout) || !baseTypes || typeof baseTypes !== "object") return null;
+  if (state.augment?.pendingRecon?.[side]) return null;
+
+  const excludedPieceId = state.augment?.extraMove?.[side]?.excludedPieceId ?? null;
+  const requiredPieceId = state.augment?.ruleState?.multiMove?.[side]?.pieceId ?? null;
+  const supportedBaseType = (piece, { combat }) => {
+    if (!piece || piece.id === excludedPieceId) return null;
+    if (requiredPieceId && piece.id !== requiredPieceId) return null;
+    const baseType = baseTypes[piece.id];
+    if (typeof baseType !== "string" || baseType === "mine" || baseType === "flag") return null;
+    if (baseType === "commander" && loadout.includes("spade-iron-fortress")) return null;
+    if (combat && baseType === "division" && loadout.includes("club-screened-strike")) {
+      return null;
+    }
+    return baseType;
+  };
+
+  const frontRow = side === "black" ? 6 : 5;
+  const targetRow = side === "black" ? 5 : 6;
+  for (const col of [0, 2, 4]) {
+    const piece = state.pieces.find(
+      (candidate) =>
+        candidate.alive &&
+        candidate.side === side &&
+        candidate.row === frontRow &&
+        candidate.col === col,
+    );
+    const target = state.pieces.find(
+      (candidate) => candidate.alive && candidate.row === targetRow && candidate.col === col,
+    );
+    if (!piece || !target || target.side === side) continue;
+    const baseType = supportedBaseType(piece, { combat: true });
+    if (!baseType) continue;
+    return {
+      kind: "central_combat",
+      targetEmpty: false,
+      turn: side,
+      from: { row: frontRow, col },
+      to: { row: targetRow, col },
+      baseType,
+      loadout: [...loadout],
+    };
+  }
+
+  const occupied = new Set(
+    state.pieces
+      .filter((piece) => piece.alive)
+      .map((piece) => `${piece.row},${piece.col}`),
+  );
+  const camps = REPETITION_CAMPS.filter((camp) =>
+    side === "white" ? camp.row <= 5 : camp.row >= 6,
+  );
+  for (const camp of camps) {
+    if (occupied.has(`${camp.row},${camp.col}`)) continue;
+    const piece = state.pieces.find(
+      (candidate) =>
+        candidate.alive &&
+        candidate.side === side &&
+        !isRepetitionHeadquarters(candidate) &&
+        isRepetitionRoadEdge(candidate, camp) &&
+        Boolean(supportedBaseType(candidate, { combat: false })),
+    );
+    if (!piece) continue;
+    return {
+      kind: "camp_quiet",
+      targetEmpty: true,
+      turn: side,
+      from: { row: piece.row, col: piece.col },
+      to: { ...camp },
+      baseType: baseTypes[piece.id],
+      loadout: [...loadout],
+    };
+  }
+  return null;
+}
+
+function assertClockIncrementCombatMoveSelectorRegressions() {
+  const makeState = (side, loadout, firstBaseType, safeBaseType) => {
+    const opponent = side === "black" ? "white" : "black";
+    const frontRow = side === "black" ? 6 : 5;
+    const targetRow = side === "black" ? 5 : 6;
+    return {
+      turn: side,
+      pieces: [
+        { id: "old-candidate", side, type: firstBaseType, row: frontRow, col: 0, alive: true },
+        { id: "safe-candidate", side, type: safeBaseType, row: frontRow, col: 2, alive: true },
+        { id: "old-target", side: opponent, type: "company", row: targetRow, col: 0, alive: true },
+        { id: "safe-target", side: opponent, type: "company", row: targetRow, col: 2, alive: true },
+      ],
+      augment: {
+        draft: { loadouts: { [side]: loadout, [opponent]: [] } },
+        ruleState: {
+          baseTypes: {
+            "old-candidate": firstBaseType,
+            "safe-candidate": safeBaseType,
+            "old-target": "company",
+            "safe-target": "company",
+          },
+        },
+      },
+    };
+  };
+
+  const fortressMove = selectClockIncrementProbeMove(
+    makeState("black", ["spade-iron-fortress"], "commander", "engineer"),
+  );
+  assert.equal(fortressMove?.kind, "central_combat");
+  assert.deepEqual(fortressMove?.from, { row: 6, col: 2 });
+  assert.equal(fortressMove?.baseType, "engineer");
+
+  const screenedMove = selectClockIncrementProbeMove(
+    makeState("white", ["club-screened-strike"], "division", "brigade"),
+  );
+  assert.equal(screenedMove?.kind, "central_combat");
+  assert.deepEqual(screenedMove?.from, { row: 5, col: 2 });
+  assert.deepEqual(screenedMove?.to, { row: 6, col: 2 });
+  assert.equal(screenedMove?.baseType, "brigade");
+
+  for (const side of ["black", "white"]) {
+    const opponent = side === "black" ? "white" : "black";
+    const frontRow = side === "black" ? 6 : 5;
+    const targetRow = side === "black" ? 5 : 6;
+    const campRow = side === "black" ? 7 : 4;
+    const fallbackState = {
+      turn: side,
+      pieces: [
+        { id: "open-bridge", side, type: "company", row: frontRow, col: 0, alive: true },
+        { id: "division-two", side, type: "division", row: frontRow, col: 2, alive: true },
+        { id: "division-four", side, type: "division", row: frontRow, col: 4, alive: true },
+        { id: "target-two", side: opponent, type: "company", row: targetRow, col: 2, alive: true },
+        { id: "target-four", side: opponent, type: "company", row: targetRow, col: 4, alive: true },
+      ],
+      augment: {
+        draft: { loadouts: { [side]: ["club-screened-strike"], [opponent]: [] } },
+        pendingRecon: { [side]: null, [opponent]: null },
+        extraMove: { [side]: null, [opponent]: null },
+        ruleState: {
+          baseTypes: {
+            "open-bridge": "company",
+            "division-two": "division",
+            "division-four": "division",
+            "target-two": "company",
+            "target-four": "company",
+          },
+          multiMove: { [side]: null, [opponent]: null },
+        },
+      },
+    };
+    const fallbackMove = selectClockIncrementProbeMove(fallbackState);
+    assert.equal(fallbackMove?.kind, "camp_quiet");
+    assert.equal(fallbackMove?.targetEmpty, true);
+    assert.deepEqual(fallbackMove?.from, { row: frontRow, col: 0 });
+    assert.deepEqual(fallbackMove?.to, { row: campRow, col: 1 });
+    assert.equal(fallbackMove?.baseType, "company");
+  }
+}
+
+function clockIncrementFailureDiagnostic(response, move) {
+  const body =
+    response.body && typeof response.body === "object" && !Array.isArray(response.body)
+      ? { error: typeof response.body.error === "string" ? response.body.error : null }
+      : response.body ?? null;
+  return JSON.stringify({
+    status: response.status,
+    body,
+    kind: move.kind,
+    targetEmpty: move.targetEmpty,
+    loadout: move.loadout,
+    baseType: move.baseType,
+    from: move.from,
+    to: move.to,
+  });
+}
+
 function forceRunningClockAtIncrementThreshold(code, { legacy = false } = {}) {
   const database = new DatabaseSync(localD1Path());
   try {
@@ -576,27 +756,15 @@ function forceRunningClockAtIncrementThreshold(code, { legacy = false } = {}) {
     else assert.equal(state.clock.incrementCapMs, null);
     state.clock.remainingMs[state.turn] = 300_000;
     state.clock.turnStartedAt = Date.now() + 60_000;
-    const frontRow = state.turn === "black" ? 6 : 5;
-    const targetRow = state.turn === "black" ? 5 : 6;
-    const openingPiece = state.pieces.find(
-      (piece) =>
-        piece.alive &&
-        piece.side === state.turn &&
-        piece.row === frontRow &&
-        [0, 4].includes(piece.col) &&
-        piece.type !== "mine" &&
-        piece.type !== "flag",
-    );
-    assert.ok(openingPiece);
+    const move = selectClockIncrementProbeMove(state);
+    assert.ok(move, "clock increment fixture could not find a supported clock-probe move");
     const updated = database
       .prepare("UPDATE games SET state_json = ?, updated_at = ? WHERE code = ? AND version = ?")
       .run(JSON.stringify(state), Date.now(), code, row.version);
     assert.equal(Number(updated.changes), 1);
     return {
       version: Number(row.version),
-      turn: state.turn,
-      from: { row: openingPiece.row, col: openingPiece.col },
-      to: { row: targetRow, col: openingPiece.col },
+      ...move,
     };
   } finally {
     database.close();
@@ -657,6 +825,7 @@ function spectatorKnownOpponentPieceIds(code, perspective) {
 }
 
 test("authenticated rooms, identity seats, spectator policy, provisioning, and settlement", { timeout: 120_000 }, async (t) => {
+  assertClockIncrementCombatMoveSelectorRegressions();
   assert.deepEqual(
     REQUIRED_V3_QUIET_LOOP_EXCLUSIONS.filter((id) => REPETITION_TEST_UNSAFE_AUGMENTS.has(id)),
     REQUIRED_V3_QUIET_LOOP_EXCLUSIONS,
@@ -1426,7 +1595,11 @@ test("authenticated rooms, identity seats, spectator policy, provisioning, and s
     version,
     { type: "move", from: thresholdClock.from, to: thresholdClock.to },
   );
-  assert.equal(incrementMove.status, 200);
+  assert.equal(
+    incrementMove.status,
+    200,
+    clockIncrementFailureDiagnostic(incrementMove, thresholdClock),
+  );
   assert.equal(incrementMove.body.snapshot.clock.remainingMs[thresholdClock.turn], 305_000);
   assert.equal(incrementMove.body.snapshot.clock.incrementCapMs, null);
   version = incrementMove.body.version;
@@ -1442,7 +1615,11 @@ test("authenticated rooms, identity seats, spectator policy, provisioning, and s
     version,
     { type: "move", from: legacyThresholdClock.from, to: legacyThresholdClock.to },
   );
-  assert.equal(legacyIncrementMove.status, 200);
+  assert.equal(
+    legacyIncrementMove.status,
+    200,
+    clockIncrementFailureDiagnostic(legacyIncrementMove, legacyThresholdClock),
+  );
   assert.equal(
     legacyIncrementMove.body.snapshot.clock.remainingMs[legacyThresholdClock.turn],
     300_000,
