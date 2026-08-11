@@ -96,6 +96,6 @@ powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\soak\run.ps1 -Resu
 
 ## 发布边界
 
-截至 2026-08-11 ET，最终代码回归为 237/237：HTML 9 项、TypeScript 225 项、真实集成 3 项；production build、全项目 ESLint、非增量 TypeScript 检查与差异检查均通过。三套真实集成各连续执行 4 轮，共 12/12 通过；每轮端口可重新绑定，结束后孤儿进程为 0。
+截至 2026-08-11 ET，最终代码回归为 238/238：HTML 9 项、TypeScript 226 项、真实集成 3 项；production build、全项目 ESLint、非增量 TypeScript 检查与差异检查均通过。三套真实集成各连续执行 4 轮，共 12/12 通过；每轮端口可重新绑定，结束后孤儿进程为 0。
 
 这不等于四小时 gate 已通过。每个发布候选都必须在准确的冻结提交上新跑正式持续测试，权威结果写入 `outputs/soak/<run-id>/final.json`；只有该结果满足本页全部条件后，才进入 Sites 部署与生产邮件身份、匹配、私人房、观战和复盘 QA。`outputs/` 是 Git 忽略的本机证据目录，不随源码提交；其他提交或旧工作负载的长跑不能转移为当前发布证据。

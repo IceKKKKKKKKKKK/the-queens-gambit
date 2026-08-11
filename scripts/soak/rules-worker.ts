@@ -141,6 +141,19 @@ function newlyRevealedToLoadout(before: GameState, after: GameState, side: Side,
     (after.augment?.draft.loadouts[side] ?? []).includes(id);
 }
 
+function sideOwnsPassiveCombatMode(
+  state: GameState,
+  side: Side,
+  mode: "durable_mines" | "division_defuses_mine",
+) {
+  return (state.augment?.draft.loadouts[side] ?? []).some((augmentId) => {
+    const definition = getAugmentDefinition(augmentId);
+    return definition.activation === "passive" &&
+      definition.effect.kind === "combat" &&
+      definition.effect.mode === mode;
+  });
+}
+
 /**
  * Passive trigger counters describe semantic rule pulses, not charged-card
  * consumption. Keep this deliberately explicit for the v3 passive modes so a
@@ -155,8 +168,15 @@ function expectedPassiveTriggerDelta(
 ) {
   const definition = getAugmentDefinition(id);
   if (definition.activation !== "passive") return 0;
-  if (!(after.augment?.draft.loadouts[side] ?? []).includes(id)) return 0;
   const effect = definition.effect;
+  const preActionMineCombat = effect.kind === "combat" &&
+    (effect.mode === "durable_mines" || effect.mode === "division_defuses_mine");
+  if (
+    !preActionMineCombat &&
+    !(after.augment?.draft.loadouts[side] ?? []).includes(id)
+  ) {
+    return 0;
+  }
   const beforeRule = before.augment?.ruleState;
   const afterRule = after.augment?.ruleState;
   if (!afterRule) return 0;
@@ -246,32 +266,153 @@ function expectedPassiveTriggerDelta(
     const defender = before.pieces.find(
       (piece) => piece.alive && samePosition(piece, action.to),
     );
-    const replayMove = after.replay?.moves.at(-1);
     if (
       !attacker ||
       !defender ||
-      attacker.side !== side ||
-      defender.side === side ||
+      attacker.side === defender.side ||
       originalPieceTypeForAudit(before, defender.id) !== "mine" ||
-      replayMove?.actor !== side ||
-      !samePosition(replayMove.from, action.from) ||
-      !samePosition(replayMove.to, action.to)
+      !(before.augment?.draft.loadouts[side] ?? []).includes(id)
     ) {
       return 0;
     }
     if (effect.mode === "division_defuses_mine") {
-      return originalPieceTypeForAudit(before, attacker.id) === "division" &&
-          replayMove.result === "attacker_survives"
+      return attacker.side === side &&
+          originalPieceTypeForAudit(before, attacker.id) === "division"
         ? 1
         : 0;
     }
-    return originalPieceTypeForAudit(before, attacker.id) !== "bomb" &&
-        (replayMove.result === "defender_survives" || replayMove.result === "both_removed")
+    const divisionSapperOverride =
+      originalPieceTypeForAudit(before, attacker.id) === "division" &&
+      sideOwnsPassiveCombatMode(before, attacker.side, "division_defuses_mine");
+    return defender.side === side &&
+        originalPieceTypeForAudit(before, attacker.id) !== "bomb" &&
+        !divisionSapperOverride
       ? 1
       : 0;
   }
 
   return 0;
+}
+
+function verifyPassiveCombatPostconditions(
+  before: GameState,
+  after: GameState,
+  action: PlayerAction,
+  side: Side,
+  id: AugmentId,
+) {
+  const effect = getAugmentDefinition(id).effect;
+  if (
+    effect.kind !== "combat" ||
+    (effect.mode !== "durable_mines" && effect.mode !== "division_defuses_mine") ||
+    (action.type !== "move" && action.type !== "augment_move")
+  ) {
+    return;
+  }
+  const attacker = before.pieces.find(
+    (piece) => piece.alive && samePosition(piece, action.from),
+  );
+  const defender = before.pieces.find(
+    (piece) => piece.alive && samePosition(piece, action.to),
+  );
+  expect(
+    attacker && defender,
+    "invariantFailures",
+    `${side}/${id} lost its direct-combat participants during audit.`,
+    { action },
+  );
+  const attackerAfter = after.pieces.find((piece) => piece.id === attacker.id);
+  const defenderAfter = after.pieces.find((piece) => piece.id === defender.id);
+  const replayMove = after.replay?.moves.at(-1);
+  const newEvents = newEventsSince(before, after);
+  const mineHitEvents = newEvents.filter((event) => event.result === "mine_hit");
+  const replayMineHits = replayMove?.effects?.filter(
+    (entry) => entry.result === "mine_hit",
+  ) ?? [];
+  expect(
+    replayMove?.actor === attacker.side &&
+      samePosition(replayMove.from, action.from) &&
+      samePosition(replayMove.to, action.to),
+    "replayDivergences",
+    `${side}/${id} combat trigger lacked its matching replay move.`,
+    { action, replayMove },
+  );
+
+  if (effect.mode === "division_defuses_mine") {
+    expect(
+      attackerAfter?.alive === true && samePosition(attackerAfter, action.to),
+      "invariantFailures",
+      `${side}/${id} did not leave the attacking division alive on the mine square.`,
+      { action, attackerAfter },
+    );
+    expect(
+      defenderAfter?.alive === false && after.augment?.ruleState?.mineHits[defender.id] === undefined,
+      "invariantFailures",
+      `${side}/${id} did not remove the mine and its hit memory.`,
+      { action, defenderAfter, mineHits: after.augment?.ruleState?.mineHits },
+    );
+    expect(
+      replayMove.result === "attacker_survives" &&
+        mineHitEvents.length === 0 &&
+        replayMineHits.length === 0,
+      "replayDivergences",
+      `${side}/${id} emitted the wrong sapper result or a spurious durable-mine pulse.`,
+      { action, replayMove, mineHitEvents, replayMineHits },
+    );
+    return;
+  }
+
+  const ruleState = after.augment?.ruleState;
+  const alreadyHit = before.augment?.ruleState?.mineHits[defender.id] === 1;
+  expect(
+    attackerAfter?.alive === false,
+    "invariantFailures",
+    `${side}/${id} did not remove the non-bomb attacker.`,
+    { action, attackerAfter },
+  );
+  expect(
+    ruleState?.publiclyRevealedPieceIds.includes(defender.id),
+    "privacyLeaks",
+    `${side}/${id} did not retain the attacked mine as public knowledge.`,
+    { action, publicIds: ruleState?.publiclyRevealedPieceIds },
+  );
+  if (!alreadyHit) {
+    expect(
+      defenderAfter?.alive === true && ruleState?.mineHits[defender.id] === 1,
+      "invariantFailures",
+      `${side}/${id} first hit did not preserve the mine with one hit.`,
+      { action, defenderAfter, mineHits: ruleState?.mineHits },
+    );
+    expect(
+      replayMove.result === "defender_survives" &&
+        mineHitEvents.length === 1 &&
+        mineHitEvents[0].actor === attacker.side &&
+        mineHitEvents[0].augmentId === id &&
+        mineHitEvents[0].pieceIds?.includes(defender.id) &&
+        replayMineHits.length === 1 &&
+        replayMineHits[0].actor === attacker.side &&
+        replayMineHits[0].augmentId === id &&
+        replayMineHits[0].pieceIds.includes(defender.id),
+      "replayDivergences",
+      `${side}/${id} first hit lacked exactly one mine_hit event and replay effect.`,
+      { action, replayMove, mineHitEvents, replayMineHits },
+    );
+    return;
+  }
+  expect(
+    defenderAfter?.alive === false && ruleState?.mineHits[defender.id] === undefined,
+    "invariantFailures",
+    `${side}/${id} second hit did not remove the mine and clear its hit memory.`,
+    { action, defenderAfter, mineHits: ruleState?.mineHits },
+  );
+  expect(
+    replayMove.result === "both_removed" &&
+      mineHitEvents.length === 0 &&
+      replayMineHits.length === 0,
+    "replayDivergences",
+    `${side}/${id} second hit emitted the wrong result or an extra mine_hit pulse.`,
+    { action, replayMove, mineHitEvents, replayMineHits },
+  );
 }
 
 function replayEventResultMatches(
@@ -448,6 +589,9 @@ export function verifyActionSettlement(
           `${side}/${id} passive trigger delta ${delta} did not match semantic evidence ${expectedDelta} during ${action.type}.`,
           { action, previousCount, nextCount, expectedDelta },
         );
+        if (expectedDelta > 0) {
+          verifyPassiveCombatPostconditions(before, after, action, side, id);
+        }
         if (delta > 0) {
           passiveTriggerDeltas.set(triggerKey(side, id), delta);
           const effect = definition.effect;

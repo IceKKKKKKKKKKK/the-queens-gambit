@@ -796,6 +796,249 @@ test("pass attribution supports passive multi-move and legacy extra-turn grants"
   );
 });
 
+test("rules settlement audit derives durable-mine and division-sapper ownership from the pre-action board", () => {
+  const placeBySwap = (
+    state: GameState,
+    selected: GameState["pieces"][number],
+    target: { row: number; col: number },
+  ) => {
+    const occupant = state.pieces.find(
+      (piece) =>
+        piece.alive &&
+        piece.id !== selected.id &&
+        piece.row === target.row &&
+        piece.col === target.col,
+    );
+    const origin = { row: selected.row, col: selected.col };
+    selected.row = target.row;
+    selected.col = target.col;
+    if (occupant) {
+      occupant.row = origin.row;
+      occupant.col = origin.col;
+    }
+  };
+  const originalType = (state: GameState, piece: GameState["pieces"][number]) =>
+    state.augment!.ruleState!.baseTypes[piece.id];
+  const selectPiece = (
+    state: GameState,
+    side: Side,
+    type: PieceType,
+    index = 0,
+  ) => state.pieces.filter(
+    (piece) => piece.side === side && originalType(state, piece) === type,
+  )[index];
+  const triggerCount = (state: GameState, side: Side, id: AugmentId) =>
+    state.augment?.triggerCounts[side][id] ?? 0;
+  const move = {
+    type: "move" as const,
+    from: { row: 5, col: 0 },
+    to: { row: 5, col: 1 },
+  };
+  const durableFixture = (attackerType: PieceType, seed: string) => {
+    const state = createControlledPairGame(
+      "spade-grand-maneuver",
+      "spade-volatile-mines",
+      "black",
+      seed,
+    );
+    const attacker = selectPiece(state, "black", attackerType);
+    const mine = selectPiece(state, "white", "mine");
+    assert.ok(attacker && mine);
+    placeBySwap(state, attacker, move.from);
+    placeBySwap(state, mine, move.to);
+    return { state, attacker, mine };
+  };
+
+  const firstFixture = durableFixture("company", "durable-first-second-audit");
+  const secondAttacker = selectPiece(firstFixture.state, "black", "company", 1);
+  assert.ok(secondAttacker);
+  placeBySwap(firstFixture.state, secondAttacker, { row: 5, col: 2 });
+  const firstHit = applyPlayerAction(firstFixture.state, "black", move, 1_000_000);
+  assert.doesNotThrow(() => verifyActionSettlement(firstFixture.state, firstHit, move));
+  assert.equal(
+    triggerCount(firstHit, "white", "spade-volatile-mines") -
+      triggerCount(firstFixture.state, "white", "spade-volatile-mines"),
+    1,
+  );
+  assert.equal(firstHit.augment?.ruleState?.mineHits[firstFixture.mine.id], 1);
+  assert.ok(
+    firstHit.augment?.ruleState?.publiclyRevealedPieceIds.includes(firstFixture.mine.id),
+  );
+
+  const wrongFirstResult = structuredClone(firstHit);
+  wrongFirstResult.replay!.moves.at(-1)!.result = "both_removed";
+  wrongFirstResult.events.at(-1)!.result = "both_removed";
+  assert.throws(
+    () => verifyActionSettlement(firstFixture.state, wrongFirstResult, move),
+    /first hit lacked exactly one mine_hit event and replay effect/,
+  );
+  const missingFirstEffect = structuredClone(firstHit);
+  missingFirstEffect.events = missingFirstEffect.events.filter(
+    (event) => event.result !== "mine_hit",
+  );
+  missingFirstEffect.replay!.moves.at(-1)!.effects = [];
+  assert.throws(
+    () => verifyActionSettlement(firstFixture.state, missingFirstEffect, move),
+    /first hit lacked exactly one mine_hit event and replay effect/,
+  );
+  const missingPublicReveal = structuredClone(firstHit);
+  missingPublicReveal.augment!.ruleState!.publiclyRevealedPieceIds =
+    missingPublicReveal.augment!.ruleState!.publiclyRevealedPieceIds.filter(
+      (pieceId) => pieceId !== firstFixture.mine.id,
+    );
+  assert.throws(
+    () => verifyActionSettlement(firstFixture.state, missingPublicReveal, move),
+    /did not retain the attacked mine as public knowledge/,
+  );
+  const missingHitMemory = structuredClone(firstHit);
+  delete missingHitMemory.augment!.ruleState!.mineHits[firstFixture.mine.id];
+  assert.throws(
+    () => verifyActionSettlement(firstFixture.state, missingHitMemory, move),
+    /first hit did not preserve the mine with one hit/,
+  );
+
+  const beforeSecond = structuredClone(firstHit);
+  beforeSecond.turn = "black";
+  const secondMove = {
+    type: "move" as const,
+    from: { row: 5, col: 2 },
+    to: { row: 5, col: 1 },
+  };
+  const secondHit = applyPlayerAction(beforeSecond, "black", secondMove, 1_000_000);
+  assert.doesNotThrow(() => verifyActionSettlement(beforeSecond, secondHit, secondMove));
+  assert.equal(
+    triggerCount(secondHit, "white", "spade-volatile-mines") -
+      triggerCount(beforeSecond, "white", "spade-volatile-mines"),
+    1,
+  );
+  assert.equal(secondHit.pieces.find((piece) => piece.id === firstFixture.mine.id)?.alive, false);
+  assert.equal(secondHit.augment?.ruleState?.mineHits[firstFixture.mine.id], undefined);
+  assert.equal(secondHit.replay?.moves.at(-1)?.result, "both_removed");
+  assert.equal(secondHit.replay?.moves.at(-1)?.effects?.length, 0);
+  const forgedSecondPulse = structuredClone(secondHit);
+  forgedSecondPulse.replay!.moves.at(-1)!.effects = [{
+    actor: "black",
+    result: "mine_hit",
+    augmentId: "spade-volatile-mines",
+    pieceIds: [firstFixture.mine.id],
+    positions: [{ row: 5, col: 1 }],
+  }];
+  assert.throws(
+    () => verifyActionSettlement(beforeSecond, forgedSecondPulse, secondMove),
+    /second hit emitted the wrong result or an extra mine_hit pulse/,
+  );
+
+  const engineerFixture = durableFixture("engineer", "durable-engineer-audit");
+  const engineerHit = applyPlayerAction(engineerFixture.state, "black", move, 1_000_000);
+  assert.doesNotThrow(() => verifyActionSettlement(engineerFixture.state, engineerHit, move));
+  assert.equal(
+    triggerCount(engineerHit, "white", "spade-volatile-mines") -
+      triggerCount(engineerFixture.state, "white", "spade-volatile-mines"),
+    1,
+  );
+  assert.equal(
+    engineerHit.pieces.find((piece) => piece.id === engineerFixture.attacker.id)?.alive,
+    false,
+  );
+
+  const bombFixture = durableFixture("bomb", "durable-bomb-bypass-audit");
+  const bombed = applyPlayerAction(bombFixture.state, "black", move, 1_000_000);
+  assert.doesNotThrow(() => verifyActionSettlement(bombFixture.state, bombed, move));
+  assert.equal(
+    triggerCount(bombed, "white", "spade-volatile-mines") -
+      triggerCount(bombFixture.state, "white", "spade-volatile-mines"),
+    0,
+  );
+
+  const reverse = createControlledPairGame(
+    "spade-volatile-mines",
+    "spade-grand-maneuver",
+    "black",
+    "durable-reverse-owner-audit",
+  );
+  const reverseAttacker = selectPiece(reverse, "black", "company");
+  const ordinaryEnemyMine = selectPiece(reverse, "white", "mine");
+  assert.ok(reverseAttacker && ordinaryEnemyMine);
+  placeBySwap(reverse, reverseAttacker, move.from);
+  placeBySwap(reverse, ordinaryEnemyMine, move.to);
+  const reverseResult = applyPlayerAction(reverse, "black", move, 1_000_000);
+  assert.doesNotThrow(() => verifyActionSettlement(reverse, reverseResult, move));
+  assert.equal(
+    triggerCount(reverseResult, "black", "spade-volatile-mines") -
+      triggerCount(reverse, "black", "spade-volatile-mines"),
+    0,
+  );
+
+  const sapper = createControlledPairGame(
+    "club-division-sapper",
+    "club-forced-march",
+    "black",
+    "division-sapper-priority-audit",
+  );
+  sapper.augment!.draft.loadouts.white.push("spade-volatile-mines");
+  const division = selectPiece(sapper, "black", "division");
+  const sapperMine = selectPiece(sapper, "white", "mine");
+  assert.ok(division && sapperMine);
+  placeBySwap(sapper, division, move.from);
+  placeBySwap(sapper, sapperMine, move.to);
+  const defused = applyPlayerAction(sapper, "black", move, 1_000_000);
+  assert.doesNotThrow(() => verifyActionSettlement(sapper, defused, move));
+  assert.equal(
+    triggerCount(defused, "white", "spade-volatile-mines") -
+      triggerCount(sapper, "white", "spade-volatile-mines"),
+    0,
+  );
+  assert.equal(
+    triggerCount(defused, "black", "club-division-sapper") -
+      triggerCount(sapper, "black", "club-division-sapper"),
+    1,
+  );
+
+  const chain = createControlledPairGame(
+    "spade-cherry-bomb",
+    "spade-volatile-mines",
+    "black",
+    "durable-chain-bypass-audit",
+  );
+  const chainBomb = selectPiece(chain, "black", "bomb");
+  const chainVictim = selectPiece(chain, "white", "company");
+  const chainMine = selectPiece(chain, "white", "mine");
+  assert.ok(chainBomb && chainVictim && chainMine);
+  placeBySwap(chain, chainBomb, move.from);
+  placeBySwap(chain, chainVictim, move.to);
+  placeBySwap(chain, chainMine, { row: 5, col: 2 });
+  const chained = applyPlayerAction(chain, "black", move, 1_000_000);
+  assert.doesNotThrow(() => verifyActionSettlement(chain, chained, move));
+  assert.equal(
+    triggerCount(chained, "white", "spade-volatile-mines") -
+      triggerCount(chain, "white", "spade-volatile-mines"),
+    0,
+  );
+  assert.equal(chained.pieces.find((piece) => piece.id === chainMine.id)?.alive, false);
+
+  const sacrifice = createControlledPairGame(
+    "club-road-patrol",
+    "club-bitter-ruse",
+    "white",
+    "durable-sacrifice-bypass-audit",
+  );
+  sacrifice.augment!.draft.loadouts.white.push("spade-volatile-mines");
+  const sacrificedMine = selectPiece(sacrifice, "white", "mine");
+  assert.ok(sacrificedMine);
+  const sacrificeAction = {
+    type: "augment_sacrifice" as const,
+    augmentId: "club-bitter-ruse" as const,
+    pieceId: sacrificedMine.id,
+  };
+  const sacrificed = applyPlayerAction(sacrifice, "white", sacrificeAction, 1_000_000);
+  assert.doesNotThrow(() => verifyActionSettlement(sacrifice, sacrificed, sacrificeAction));
+  assert.equal(
+    triggerCount(sacrificed, "white", "spade-volatile-mines") -
+      triggerCount(sacrifice, "white", "spade-volatile-mines"),
+    0,
+  );
+});
+
 test("rules settlement audit separates steady passive pulses from charged events", () => {
   const before = createControlledPairGame(
     "heart-steady-advance",

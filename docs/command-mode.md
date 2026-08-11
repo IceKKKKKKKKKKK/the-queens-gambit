@@ -411,7 +411,7 @@ v3 在冻结的 v2 目录后新增以下 20 张。表内是当前最终语义，
 
 ### 9.5 截至 2026-08-11 ET 的冻结证据
 
-- 最终完整回归 237/237 通过：HTML 9 项、TypeScript 225 项、真实集成 3 项；production build、全项目 ESLint、`tsc --noEmit --incremental false` 与 `git diff --check` 通过。
+- 最终完整回归 238/238 通过：HTML 9 项、TypeScript 226 项、真实集成 3 项；production build、全项目 ESLint、`tsc --noEmit --incremental false` 与 `git diff --check` 通过。
 - 三套真实集成各连续执行 4 轮，共 12/12 通过；每轮服务端端口可重新绑定，结束后孤儿进程为 0。
 - 未登录玩家邀请已覆盖同标签页 `sessionStorage` 恢复、认证 URL/服务端 HTML 无 secret，以及 `watch=1` 不读取、不替换、不消费玩家邀请。
 - 当前产品稳定性算法为 `product-stability-v13-v3-no-clock-zero-time-deterministic-ids`，产品引擎指纹为 `augment-duel-dark-v3:threefold-3:strategic-sha256-v2`。
