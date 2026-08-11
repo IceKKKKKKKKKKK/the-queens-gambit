@@ -6,9 +6,16 @@ import { DatabaseSync } from "node:sqlite";
 import test from "node:test";
 import { fileURLToPath } from "node:url";
 
-import { openPort, spawnIntegrationServer, waitForServer } from "./integration-server.mjs";
+import {
+  openPort,
+  readJsonResponse,
+  spawnIntegrationServer,
+  waitForJsonApi,
+} from "./integration-server.mjs";
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
+let activeServer = null;
+let activeStatePath = null;
 const OPENING_TEST_EXCLUDED_AUGMENTS = new Set([
   "spade-total-intelligence",
   "spade-supreme-recon",
@@ -28,7 +35,11 @@ async function requestJson(url, init = {}) {
   const response = await fetch(url, init);
   return {
     status: response.status,
-    body: response.status === 204 ? null : await response.json(),
+    body: await readJsonResponse(response, {
+      method: init.method ?? "GET",
+      url,
+      server: activeServer,
+    }),
   };
 }
 
@@ -58,7 +69,8 @@ async function joinQueue(origin, headers) {
 }
 
 function localD1Path() {
-  const directory = path.join(root, ".wrangler", "state", "v3", "d1", "miniflare-D1DatabaseObject");
+  assert.ok(activeStatePath, "integration state path must be assigned before D1 access");
+  const directory = path.join(activeStatePath, "v3", "d1", "miniflare-D1DatabaseObject");
   const database = readdirSync(directory).find(
     (name) => name.endsWith(".sqlite") && name !== "metadata.sqlite",
   );
@@ -652,9 +664,17 @@ test("authenticated rooms, identity seats, spectator policy, provisioning, and s
   const port = await openPort();
   const origin = `http://localhost:${port}`;
   const server = spawnIntegrationServer(root, port);
-  const { child, logs } = server;
-  t.after(() => server.stop());
-  await waitForServer(origin, child, logs, "/api/account");
+  activeServer = server;
+  activeStatePath = server.statePath;
+  t.after(async () => {
+    try {
+      await server.stop();
+    } finally {
+      activeServer = null;
+      activeStatePath = null;
+    }
+  });
+  await waitForJsonApi(origin, server);
 
   assert.equal((await requestJson(`${origin}/api/rooms`, { method: "POST" })).status, 401);
 

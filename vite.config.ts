@@ -42,6 +42,15 @@ export default defineConfig(async () => {
 
   // Wrangler snapshots its log path while the Cloudflare plugin is imported.
   const { cloudflare } = await import("@cloudflare/vite-plugin");
+  const integrationPersistence =
+    process.env.JUNQI_INTEGRATION_TEST === "1"
+      ? process.env.JUNQI_INTEGRATION_PERSIST_STATE
+      : undefined;
+  const persistState = integrationPersistence
+    ? integrationPersistence === "memory"
+      ? false
+      : { path: integrationPersistence }
+    : true;
 
   return {
     server: isCodexSeatbeltSandbox
@@ -51,6 +60,7 @@ export default defineConfig(async () => {
       vinext(),
       sites(),
       cloudflare({
+        persistState,
         viteEnvironment: { name: "rsc", childEnvironments: ["ssr"] },
         config: localBindingConfig,
       }),

@@ -411,8 +411,9 @@ v3 在冻结的 v2 目录后新增以下 20 张。表内是当前最终语义，
 
 ### 9.5 截至 2026-08-11 ET 的冻结证据
 
-- 最终完整回归 247/247 通过：HTML 9 项、TypeScript 235 项、真实集成 3 项；production build、全项目 ESLint、`tsc --noEmit --incremental false` 与 `git diff --check` 通过。
+- 最终完整回归 251/251 通过：HTML 9 项、集成服务器契约 4 项、TypeScript 235 项、真实集成 3 项；production build、全项目 ESLint、`tsc --noEmit --incremental false` 与 `git diff --check` 通过。
 - 三套真实集成各连续执行 4 轮，共 12/12 通过；每轮服务端端口可重新绑定，结束后孤儿进程为 0。
+- API 集成在同一隔离工作区连续执行 64/64 次且零自动重试，全部返回 JSON、64 个动态端口均可重绑、D1 文件与 Vinext/Workerd 残留均为 0；独立双启动哨兵验证显式持久状态可在停服后读回并安全清理。
 - 未登录玩家邀请已覆盖同标签页 `sessionStorage` 恢复、认证 URL/服务端 HTML 无 secret，以及 `watch=1` 不读取、不替换、不消费玩家邀请。
 - 当前产品稳定性算法为 `product-stability-v15-v3-no-clock-zero-time-deterministic-ids-slot-stable-drafts-relocation-aware-worlds`，产品引擎指纹为 `augment-duel-dark-v3:threefold-3:strategic-sha256-v2`。
 - 产品目录共 70 张；自动模拟使用 63 张非计时军令、`clock=null`、零模拟等待、`1×3×1` 搜索、同花色环形四腿赛程和单局 300 手安全上限。任一触顶即失败，不能伪装成和棋。

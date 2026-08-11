@@ -4,13 +4,19 @@ import path from "node:path";
 import test from "node:test";
 import { fileURLToPath } from "node:url";
 
-import { openPort, spawnIntegrationServer, waitForServer } from "./integration-server.mjs";
+import {
+  openPort,
+  readJsonResponse,
+  spawnIntegrationServer,
+  waitForJsonApi,
+} from "./integration-server.mjs";
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 let hostIdentity = {};
 let guestIdentity = {};
 let spectatorIdentity = {};
 const identityByToken = new Map();
+let activeServer = null;
 
 function opaqueToken() {
   return randomBytes(32).toString("base64url");
@@ -39,13 +45,21 @@ async function requestJson(url, init = {}) {
     ...init,
     headers: { ...inferredIdentity(url, init), ...(init.headers ?? {}) },
   });
-  const body = response.status === 204 ? null : await response.json();
+  const body = await readJsonResponse(response, {
+    method: init.method ?? "GET",
+    url,
+    server: activeServer,
+  });
   return { status: response.status, body };
 }
 
 async function requestJsonWithoutIdentity(url, init = {}) {
   const response = await fetch(url, init);
-  const body = response.status === 204 ? null : await response.json();
+  const body = await readJsonResponse(response, {
+    method: init.method ?? "GET",
+    url,
+    server: activeServer,
+  });
   return { status: response.status, body };
 }
 
@@ -97,10 +111,16 @@ function ownLayout(snapshot, side) {
 test("room API preserves role-based visibility, identity, concurrency, and limits", { timeout: 90_000 }, async (t) => {
   const port = await openPort();
   const origin = `http://localhost:${port}`;
-  const server = spawnIntegrationServer(root, port, 4_000);
-  const { child, logs } = server;
-  t.after(() => server.stop());
-  await waitForServer(origin, child, logs);
+  const server = spawnIntegrationServer(root, port, { logLimit: 4_000, persistState: "memory" });
+  activeServer = server;
+  t.after(async () => {
+    try {
+      await server.stop();
+    } finally {
+      activeServer = null;
+    }
+  });
+  await waitForJsonApi(origin, server);
 
   const identityNonce = randomBytes(6).toString("hex");
   hostIdentity = {

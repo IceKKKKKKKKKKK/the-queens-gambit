@@ -9,7 +9,7 @@
     "dev": "vinext dev",
     "build": "vinext build",
     "start": "vinext start",
-    "test": "node ./node_modules/vinext/dist/cli.js build && node --test tests/rendered-html.test.mjs && node --test --experimental-transform-types tests/game.test.ts tests/augments.catalog.test.ts tests/augment-game.test.ts tests/augment-ui-motion.test.ts tests/augment-balance-harness.test.ts tests/identity.test.ts tests/ranking.test.ts tests/platform-settlement.test.ts && node --test tests/api.integration.test.mjs && node --test tests/platform-api.integration.test.mjs && node --test tests/room-platform.integration.test.mjs",
+    "test": "node ./node_modules/vinext/dist/cli.js build && node --test tests/rendered-html.test.mjs tests/integration-server.test.mjs && node --test --experimental-transform-types tests/game.test.ts tests/augments.catalog.test.ts tests/augment-game.test.ts tests/augment-ui-motion.test.ts tests/augment-balance-harness.test.ts tests/identity.test.ts tests/ranking.test.ts tests/platform-settlement.test.ts && node --test tests/api.integration.test.mjs && node --test tests/platform-api.integration.test.mjs && node --test tests/room-platform.integration.test.mjs",
     "test:platform": "node --test --experimental-transform-types tests/identity.test.ts tests/ranking.test.ts tests/platform-settlement.test.ts",
     "test:balance": "node --experimental-transform-types scripts/augment-balance-simulation.ts",
     "lint": "node ./node_modules/eslint/bin/eslint.js . --ignore-pattern dist --ignore-pattern .next",

@@ -84,6 +84,6 @@ node --experimental-transform-types scripts/augment-balance-simulation.ts --mode
 
 ## 发布证据边界
 
-截至 2026-08-11 ET，最终代码回归为 247/247：HTML 9 项、TypeScript 235 项、真实集成 3 项；production build、全项目 ESLint、非增量 TypeScript 检查与差异检查均通过。三套真实集成各连续执行 4 轮，共 12/12 通过；端口每轮可重新绑定，结束后孤儿进程为 0。
+截至 2026-08-11 ET，最终代码回归为 251/251：HTML 9 项、集成服务器契约 4 项、TypeScript 235 项、真实集成 3 项；production build、全项目 ESLint、非增量 TypeScript 检查与差异检查均通过。三套真实集成各连续执行 4 轮，共 12/12 通过；端口每轮可重新绑定，结束后孤儿进程为 0。API 集成另在同一隔离工作区连续执行 64/64 次且零自动重试，全部返回 JSON、64 个动态端口均可重绑、D1 文件与 Vinext/Workerd 残留均为 0；独立双启动哨兵验证显式持久状态可在停服后读回并安全清理。
 
 这些回归证明当前覆盖路径可工作，不替代冻结提交上的正式持续测试。发布必须以准确的冻结提交连续运行四个 worker 不少于 4 小时、完成至少一整圈 63 个同花色环形四腿组，并让所有技术 gate 通过；随后才进入 Sites 部署与生产 QA。quick 的默认证据写入 `outputs/balance/augment-balance-report.json`，正式持续测试的权威结果写入 `outputs/soak/<run-id>/final.json`。`outputs/` 只保存本机证据，不提交到源码仓库。
