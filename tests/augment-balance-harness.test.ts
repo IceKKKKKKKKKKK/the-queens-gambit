@@ -4,6 +4,7 @@ import test from "node:test";
 import {
   AUGMENT_CATALOG,
   beginSecondAugmentDraft,
+  FIFTY_CARD_AUGMENT_CATALOG_VERSION,
   LEGACY_AUGMENT_CATALOG_VERSION,
   getAugmentDefinition,
   type AugmentId,
@@ -12,6 +13,7 @@ import {
   LEGACY_AUGMENT_RULES_VERSION,
   PIECE_INFO,
   applyPlayerAction,
+  createAugmentGame,
   createInitialGame,
   getLegalTargets,
   isValidRepetitionTrackerForState,
@@ -99,10 +101,12 @@ import {
 } from "../scripts/balance/tournament.ts";
 import {
   EXCLUDED_CLOCK_AUGMENT_IDS,
+  SIMULATION_CATALOG_VERSION,
   SIMULATION_CATALOG_SIZE,
   SIMULATION_ELIGIBLE_AUGMENT_IDS,
   SIMULATION_ELIGIBLE_AUGMENTS,
   SIMULATION_ELIGIBLE_COUNT,
+  isSimulationEligibleAugment,
 } from "../scripts/balance/simulation-pool.ts";
 import {
   FORMAL_SOAK_MINIMUM_ACTIVE_MS,
@@ -608,7 +612,70 @@ test("product-stability ring covers every eligible card without clock cards or C
   assert.ok(Object.values(appearances).every((count) => count === 2));
 });
 
-test("authoritative and determinized simulations are clockless and round two rejects clock offers", () => {
+function createSimulationDraftFixture(roundNumber: 1 | 2) {
+  if (roundNumber === 1) {
+    const state = createAugmentGame({ repetitionSalt: "slot-stable-round-one" });
+    state.clock = null;
+    const round = state.augment!.draft.rounds[0];
+    round.suit = "hearts";
+    const options = [
+      "heart-remote-exchange",
+      "heart-bomb-disposal",
+      "heart-targeted-recon",
+    ] as [AugmentId, AugmentId, AugmentId];
+    for (const side of ["black", "white"] as const) {
+      round.players[side] = {
+        options: [...options],
+        selectedId: null,
+        locked: false,
+        refreshedSlot: null,
+      };
+      state.augment!.draft.seenBySide[side] = [...options];
+      state.augment!.draft.loadouts[side] = [];
+    }
+    return state;
+  }
+
+  const initial = createControlledPairGame(
+    "club-road-patrol",
+    "club-engineer-oath",
+    "black",
+    "slot-stable-round-two",
+  );
+  const draft = beginSecondAugmentDraft(initial.augment!.draft, {
+    suit: "hearts",
+    random: () => 0,
+  });
+  const round = draft.rounds.find((candidate) => candidate.number === 2)!;
+  const options = [
+    "heart-remote-exchange",
+    "heart-bomb-disposal",
+    "heart-targeted-recon",
+  ] as [AugmentId, AugmentId, AugmentId];
+  for (const side of ["black", "white"] as const) {
+    round.players[side] = {
+      options: [...options],
+      selectedId: null,
+      locked: false,
+      refreshedSlot: null,
+    };
+    draft.seenBySide[side] = [...new Set([...draft.seenBySide[side], ...options])];
+  }
+  const state = structuredClone(initial);
+  state.phase = "augment_draft";
+  state.moveNumber = 9;
+  state.augment!.draft = draft;
+  state.augment!.resumeTurn = state.turn;
+  return state;
+}
+
+function activeFixtureRound(state: GameState) {
+  return state.augment!.draft.rounds.find(
+    (round) => round.number === state.augment!.draft.activeRound,
+  )!;
+}
+
+test("authoritative and determinized simulations are clockless", () => {
   const initial = createControlledPairGame(
     "club-road-patrol",
     "club-engineer-oath",
@@ -627,47 +694,191 @@ test("authoritative and determinized simulations are clockless and round two rej
     determinizeFromProjection(clockedInput, "black", "clockless-world").clock,
     null,
   );
+});
 
-  const draft = beginSecondAugmentDraft(initial.augment!.draft, {
-    suit: "hearts",
-    random: () => 0,
-  });
-  const round = draft.rounds.find((candidate) => candidate.number === 2)!;
-  for (const side of ["black", "white"] as const) {
-    round.players[side].options = [
-      "heart-reserve-clock",
-      "heart-rail-turn",
-      "heart-initiative",
-    ];
-    draft.seenBySide[side].push(...round.players[side].options);
+test("simulation draft filtering preserves slots for both sides, rounds, and refresh slots", () => {
+  for (const roundNumber of [1, 2] as const) {
+    for (const side of ["black", "white"] as const) {
+      for (const slot of [0, 1, 2] as const) {
+        const state = createSimulationDraftFixture(roundNumber);
+        const round = activeFixtureRound(state);
+        const originalOptions = [...round.players[side].options];
+        round.players[side].options[slot] = "heart-reserve-clock";
+        round.players[side].selectedId =
+          round.players[side].options[(slot + 1) % 3];
+        round.players[side].refreshedSlot = slot;
+        state.augment!.draft.seenBySide[side].push("heart-reserve-clock");
+        const previousSeen = new Set(state.augment!.draft.seenBySide[side]);
+        const untouchedOpponent = [...round.players[side === "black" ? "white" : "black"].options];
+
+        const constrained = constrainActiveDraftToSimulationPool(
+          state,
+          `slot-matrix:${roundNumber}:${side}:${slot}`,
+        );
+        const filteredRound = activeFixtureRound(constrained);
+        const filtered = filteredRound.players[side];
+        assert.equal(filtered.refreshedSlot, slot);
+        assert.equal(filtered.selectedId, round.players[side].selectedId);
+        for (const index of [0, 1, 2] as const) {
+          if (index !== slot) assert.equal(filtered.options[index], round.players[side].options[index]);
+        }
+        assert.ok(isSimulationEligibleAugment(filtered.options[slot]));
+        assert.equal(previousSeen.has(filtered.options[slot]), false);
+        assert.deepEqual(
+          filteredRound.players[side === "black" ? "white" : "black"].options,
+          untouchedOpponent,
+        );
+        assert.equal(round.players[side].options[slot], "heart-reserve-clock");
+        assert.equal(originalOptions.includes(filtered.options[slot]), false);
+      }
+    }
   }
-  const drafting = structuredClone(initial);
-  drafting.phase = "augment_draft";
-  drafting.moveNumber = 9;
-  drafting.augment!.draft = draft;
-  drafting.augment!.resumeTurn = drafting.turn;
+});
+
+test("the exact game-13 round-two refresh seed replaces only slot zero", () => {
+  const drafting = createSimulationDraftFixture(2);
+  const draft = drafting.augment!.draft;
+  const round = activeFixtureRound(drafting);
+  round.suit = "diamonds";
+  round.players.white = {
+    options: [
+      "diamond-time-cache",
+      "diamond-camp-transfer",
+      "diamond-engineer-mutiny",
+    ],
+    selectedId: null,
+    locked: false,
+    refreshedSlot: 0,
+  };
+  round.players.black = {
+    options: [
+      "diamond-camp-assault",
+      "diamond-command-fusion",
+      "diamond-engineer-mutiny",
+    ],
+    selectedId: null,
+    locked: false,
+    refreshedSlot: null,
+  };
+  draft.seenBySide.white = [
+    ...draft.seenBySide.white,
+    "diamond-command-fusion",
+    "diamond-camp-transfer",
+    "diamond-engineer-mutiny",
+    "diamond-time-cache",
+  ];
+  draft.seenBySide.black = [
+    ...draft.seenBySide.black,
+    ...round.players.black.options,
+  ];
   const constrained = constrainActiveDraftToSimulationPool(
     drafting,
-    "second-round-no-clock",
+    "20260811:rules:13:9:white:post-refresh",
   );
-  assert.ok(
-    constrained.augment!.draft.rounds
-      .find((candidate) => candidate.number === 2)!
-      .players.black.options.every((id) =>
-        SIMULATION_ELIGIBLE_AUGMENT_IDS.includes(id)
-      ),
+  assert.deepEqual(
+    activeFixtureRound(constrained).players.white.options,
+    [
+      "diamond-camp-relay",
+      "diamond-camp-transfer",
+      "diamond-engineer-mutiny",
+    ],
   );
-  assert.ok(
-    constrained.augment!.draft.rounds
-      .find((candidate) => candidate.number === 2)!
-      .players.white.options.every((id) =>
-        SIMULATION_ELIGIBLE_AUGMENT_IDS.includes(id)
-      ),
+  assert.equal(activeFixtureRound(constrained).players.white.refreshedSlot, 0);
+  assert.equal(draft.seenBySide.white.includes("diamond-time-cache"), true);
+  assert.equal(
+    constrained.augment!.draft.seenBySide.white.includes("diamond-time-cache"),
+    false,
   );
-  assert.ok(
-    round.players.black.options.includes("heart-reserve-clock"),
-    "the simulation constraint must not mutate its input",
+});
+
+test("simulation draft candidates are side-local and exclude setup, loadout, seen, and retained cards", () => {
+  const crossSide = createSimulationDraftFixture(1);
+  const crossRound = activeFixtureRound(crossSide);
+  const shared = "heart-battalion-ascent" as const;
+  crossRound.players.black.options = [
+    shared,
+    "heart-bomb-disposal",
+    "heart-targeted-recon",
+  ];
+  crossRound.players.white.options = [
+    "heart-reserve-clock",
+    "heart-bomb-disposal",
+    "heart-targeted-recon",
+  ];
+  crossSide.augment!.draft.seenBySide.black = [...crossRound.players.black.options];
+  crossSide.augment!.draft.seenBySide.white = [
+    ...SIMULATION_ELIGIBLE_AUGMENTS
+      .filter((definition) => definition.suit === "hearts" && definition.id !== shared)
+      .map((definition) => definition.id),
+    "heart-reserve-clock",
+  ];
+  const sharedResult = constrainActiveDraftToSimulationPool(crossSide, "side-local-shared");
+  assert.equal(activeFixtureRound(sharedResult).players.white.options[0], shared);
+  assert.equal(activeFixtureRound(sharedResult).players.black.options[0], shared);
+
+  const setupState = createSimulationDraftFixture(2);
+  const setupRound = activeFixtureRound(setupState);
+  setupRound.suit = "diamonds";
+  for (const side of ["black", "white"] as const) {
+    setupRound.players[side].options = [
+      "diamond-forward-bomb",
+      "diamond-camp-transfer",
+      "diamond-engineer-screen",
+    ];
+    setupState.augment!.draft.seenBySide[side].push(...setupRound.players[side].options);
+  }
+  const setupResult = constrainActiveDraftToSimulationPool(setupState, "round-two-setup");
+  for (const side of ["black", "white"] as const) {
+    const options = activeFixtureRound(setupResult).players[side].options;
+    assert.notEqual(getAugmentDefinition(options[0]).activation, "setup");
+    assert.equal(options[1], "diamond-camp-transfer");
+    assert.equal(options[2], "diamond-engineer-screen");
+  }
+
+  const selectedState = createSimulationDraftFixture(2);
+  const selectedRound = activeFixtureRound(selectedState);
+  selectedRound.players.black.options = [
+    "heart-rail-turn",
+    "heart-remote-exchange",
+    "heart-bomb-disposal",
+  ];
+  selectedRound.players.black.selectedId = "heart-remote-exchange";
+  selectedState.augment!.draft.loadouts.black.push("heart-rail-turn");
+  selectedState.augment!.draft.seenBySide.black.push(...selectedRound.players.black.options);
+  const selectedResult = constrainActiveDraftToSimulationPool(selectedState, "selected-retained");
+  assert.equal(activeFixtureRound(selectedResult).players.black.selectedId, "heart-remote-exchange");
+  assert.equal(activeFixtureRound(selectedResult).players.black.options[1], "heart-remote-exchange");
+  assert.notEqual(activeFixtureRound(selectedResult).players.black.options[0], "heart-rail-turn");
+
+  selectedRound.players.black.selectedId = "heart-rail-turn";
+  const clearedResult = constrainActiveDraftToSimulationPool(selectedState, "selected-cleared");
+  assert.equal(activeFixtureRound(clearedResult).players.black.selectedId, null);
+  assert.equal(activeFixtureRound(clearedResult).players.black.options.includes("heart-rail-turn"), false);
+});
+
+test("simulation draft filtering fails closed for invalid locks and old catalog versions", () => {
+  const locked = createSimulationDraftFixture(1);
+  const lockedPlayer = activeFixtureRound(locked).players.black;
+  lockedPlayer.options[0] = "heart-reserve-clock";
+  lockedPlayer.selectedId = "heart-reserve-clock";
+  lockedPlayer.locked = true;
+  locked.augment!.draft.loadouts.black = ["heart-reserve-clock"];
+  assert.throws(
+    () => constrainActiveDraftToSimulationPool(locked, "invalid-lock"),
+    /locked an invalid offer/i,
   );
+
+  for (const catalogVersion of [
+    LEGACY_AUGMENT_CATALOG_VERSION,
+    FIFTY_CARD_AUGMENT_CATALOG_VERSION,
+  ] as const) {
+    const old = createSimulationDraftFixture(1);
+    old.augment!.draft.catalogVersion = catalogVersion;
+    assert.throws(
+      () => constrainActiveDraftToSimulationPool(old, `old:${catalogVersion}`),
+      new RegExp(SIMULATION_CATALOG_VERSION),
+    );
+  }
 });
 
 test("visible product policy reaches and executes every new active action schema", () => {
@@ -2660,7 +2871,7 @@ test("checkpoint validation and remaining schedule make resume idempotent", () =
   assert.equal(restored.algorithmVersion, BALANCE_ALGORITHM_VERSION);
   assert.equal(
     BALANCE_ALGORITHM_VERSION,
-    "product-stability-v13-v3-no-clock-zero-time-deterministic-ids",
+    "product-stability-v14-v3-no-clock-zero-time-deterministic-ids-slot-stable-drafts",
   );
   assert.equal(restored.engineRulesFingerprint, BALANCE_ENGINE_RULES_FINGERPRINT);
   assert.equal(
@@ -2687,6 +2898,10 @@ test("checkpoint validation and remaining schedule make resume idempotent", () =
   const earlyV12 = JSON.parse(JSON.stringify(checkpoint));
   earlyV12.algorithmVersion = "product-stability-v12-v3-no-clock-zero-time";
   assert.throws(() => validateCheckpoint(earlyV12, OPTIONS, pairings), /algorithm/i);
+
+  const v13 = JSON.parse(JSON.stringify(checkpoint));
+  v13.algorithmVersion = "product-stability-v13-v3-no-clock-zero-time-deterministic-ids";
+  assert.throws(() => validateCheckpoint(v13, OPTIONS, pairings), /algorithm/i);
 
   const v6 = JSON.parse(JSON.stringify(checkpoint));
   v6.algorithmVersion = "hidden-info-balance-v6-full-threshold-increment";
@@ -2823,7 +3038,7 @@ test("card aggregation separates opportunity and first-trigger timing from raw n
   );
 });
 
-test("same-tier v13 scores adjudicated threefold draws as 0.5 without hiding action caps", () => {
+test("same-tier v14 scores adjudicated threefold draws as 0.5 without hiding action caps", () => {
   const pairing = buildRoundRobinPairings()[0];
   const group = scheduleGroup(pairing, 0, 0);
   const results = playMirrorGroup(group, OPTIONS).map((result) => ({
@@ -2847,7 +3062,7 @@ test("same-tier v13 scores adjudicated threefold draws as 0.5 without hiding act
   assert.equal(aggregate.cards[group.cardA].threefoldDraws, 4);
 });
 
-test("v13 cross-tier diagnostic schedule balances legal round order and isolates setup cards", () => {
+test("v14 cross-tier diagnostic schedule balances legal round order and isolates setup cards", () => {
   const representatives = selectTierRepresentatives();
   assert.equal(representatives.length, 4);
   assert.equal(buildCrossTierComparisons().length, 6);
@@ -2942,7 +3157,7 @@ test("v13 cross-tier diagnostic schedule balances legal round order and isolates
   assert.ok(setupState.augment?.draft.loadouts[setupSide].includes(setupFocal));
 });
 
-test("v13 second focal is absent at move zero and selected in the formal move-10 draft", () => {
+test("v14 second focal is absent at move zero and selected in the formal move-10 draft", () => {
   const group = buildCrossTierExperimentSchedule(0).find(
     (candidate) =>
       candidate.stratum === "round_order" && candidate.roundOrder === "higher_first",
@@ -2968,7 +3183,7 @@ test("v13 second focal is absent at move zero and selected in the formal move-10
   assert.equal(result.focal.white.selected, true);
 });
 
-test("v13 common random seed excludes card IDs and one four-leg mirror shares it", () => {
+test("v14 common random seed excludes card IDs and one four-leg mirror shares it", () => {
   const group = buildCrossTierExperimentSchedule(0).find(
     (candidate) => candidate.stratum === "round_order",
   );
@@ -2991,7 +3206,7 @@ test("v13 common random seed excludes card IDs and one four-leg mirror shares it
   assert.ok(results.every((result) => result.secondDraftRevealed));
 });
 
-test("v13 leg ledger and report preserve finish, focal trigger, opportunity and stop status", () => {
+test("v14 leg ledger and report preserve finish, focal trigger, opportunity and stop status", () => {
   const group = buildCrossTierExperimentSchedule(0).find(
     (candidate) => candidate.stratum === "round_order",
   );
@@ -3120,7 +3335,7 @@ test("v13 leg ledger and report preserve finish, focal trigger, opportunity and 
   );
 });
 
-test("cross-tier v13 preserves drawReason and scores each product threefold draw as 0.5", () => {
+test("cross-tier v14 preserves drawReason and scores each product threefold draw as 0.5", () => {
   const options = { ...OPTIONS, maxActions: 10 };
   const group = buildCrossTierExperimentSchedule(0).find(
     (candidate) => candidate.stratum === "round_order",
@@ -3151,7 +3366,7 @@ test("cross-tier v13 preserves drawReason and scores each product threefold draw
   assert.equal(row?.higherScore?.estimate, 0.5);
 });
 
-test("v13 setup results remain outside pure round-order tier estimates", () => {
+test("v14 setup results remain outside pure round-order tier estimates", () => {
   const group = buildCrossTierExperimentSchedule(0).find(
     (candidate) => candidate.stratum === "setup",
   );
@@ -3191,7 +3406,7 @@ test("v13 setup results remain outside pure round-order tier estimates", () => {
   assert.equal(card?.setupCompleteMirrorGroups, 1);
 });
 
-test("v13 cross-tier estimates are card-equal and use deterministic mirror-group bootstrap", () => {
+test("v14 cross-tier estimates are card-equal and use deterministic mirror-group bootstrap", () => {
   const samples: CrossTierMirrorSample[] = [
     {
       groupKey: "g0",
@@ -3239,7 +3454,7 @@ test("v13 cross-tier estimates are card-equal and use deterministic mirror-group
   assert.ok(first && first.low >= 0 && first.high <= 1);
 });
 
-test("v13 technical acceptance rejects an incomplete favorable sample without gating on ordering", () => {
+test("v14 technical acceptance rejects an incomplete favorable sample without gating on ordering", () => {
   const tournament = { ...OPTIONS, maxActions: 10 };
   const groups = buildCrossTierComparisons().map((comparison) => {
     const group = buildCrossTierExperimentSchedule(0).find(
@@ -3320,6 +3535,13 @@ test("cross-tier checkpoints bind the balance algorithm and reject legacy eviden
   earlyV12.algorithmVersion = "product-stability-v12-v3-no-clock-zero-time";
   assert.throws(
     () => validateCrossTierCheckpoint(earlyV12, OPTIONS),
+    /algorithm/i,
+  );
+
+  const v13 = JSON.parse(JSON.stringify(checkpoint));
+  v13.algorithmVersion = "product-stability-v13-v3-no-clock-zero-time-deterministic-ids";
+  assert.throws(
+    () => validateCrossTierCheckpoint(v13, OPTIONS),
     /algorithm/i,
   );
 

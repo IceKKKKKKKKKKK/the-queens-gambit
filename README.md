@@ -13,9 +13,9 @@
 | 花色意图 | 黑桃 > 红桃 > 梅花 > 方块；这是设计等级，不是当前模拟已经证明的胜率排序 |
 | 方式分布 | 主动 28、自动 23、持续 13、布阵 6 |
 | 机制参数指纹 | `2918025817` |
-| 产品稳定性算法 | `product-stability-v13-v3-no-clock-zero-time-deterministic-ids` |
+| 产品稳定性算法 | `product-stability-v14-v3-no-clock-zero-time-deterministic-ids-slot-stable-drafts` |
 | 对局引擎指纹 | `augment-duel-dark-v3:threefold-3:strategic-sha256-v2` |
-| 当前结论 | 70 张已进入服务端规则；最终发布回归 238/238 通过，正式四小时持续测试与 Sites 部署仍须基于冻结提交完成 |
+| 当前结论 | 70 张已进入服务端规则；最终发布回归 242/242 通过，正式四小时持续测试与 Sites 部署仍须基于冻结提交完成 |
 
 `lib/augments.ts` 中的 `AUGMENT_CATALOG` 是运行时权威来源。机制参数指纹只覆盖稳定 ID、花色、次数和结构化效果，不覆盖名称或说明文案；规则改动后应同时更新本 README 和测试记录。
 
@@ -135,7 +135,7 @@
 
 ### 已有证据
 
-- 最终完整回归 238/238 通过：HTML 9 项、TypeScript 226 项、真实集成 3 项；
+- 最终完整回归 242/242 通过：HTML 9 项、TypeScript 230 项、真实集成 3 项；
 - production build、全项目 ESLint、`tsc --noEmit --incremental false` 与 `git diff --check` 均通过；
 - 三套真实集成各连续运行 4 轮，共 12/12 通过；每轮服务端端口均可重新绑定，结束后孤儿进程为 0；
 - 未登录邀请覆盖同一标签页 `sessionStorage` 恢复、邀请 secret 不进入认证 URL 或服务端 HTML，以及 `watch=1` 不读取、不替换、不消费玩家邀请；

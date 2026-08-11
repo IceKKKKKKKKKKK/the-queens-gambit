@@ -411,10 +411,10 @@ v3 在冻结的 v2 目录后新增以下 20 张。表内是当前最终语义，
 
 ### 9.5 截至 2026-08-11 ET 的冻结证据
 
-- 最终完整回归 238/238 通过：HTML 9 项、TypeScript 226 项、真实集成 3 项；production build、全项目 ESLint、`tsc --noEmit --incremental false` 与 `git diff --check` 通过。
+- 最终完整回归 242/242 通过：HTML 9 项、TypeScript 230 项、真实集成 3 项；production build、全项目 ESLint、`tsc --noEmit --incremental false` 与 `git diff --check` 通过。
 - 三套真实集成各连续执行 4 轮，共 12/12 通过；每轮服务端端口可重新绑定，结束后孤儿进程为 0。
 - 未登录玩家邀请已覆盖同标签页 `sessionStorage` 恢复、认证 URL/服务端 HTML 无 secret，以及 `watch=1` 不读取、不替换、不消费玩家邀请。
-- 当前产品稳定性算法为 `product-stability-v13-v3-no-clock-zero-time-deterministic-ids`，产品引擎指纹为 `augment-duel-dark-v3:threefold-3:strategic-sha256-v2`。
+- 当前产品稳定性算法为 `product-stability-v14-v3-no-clock-zero-time-deterministic-ids-slot-stable-drafts`，产品引擎指纹为 `augment-duel-dark-v3:threefold-3:strategic-sha256-v2`。
 - 产品目录共 70 张；自动模拟使用 63 张非计时军令、`clock=null`、零模拟等待、`1×3×1` 搜索、同花色环形四腿赛程和单局 300 手安全上限。任一触顶即失败，不能伪装成和棋。
 - 在当前自动化与受支持的 Chrome 视口证据范围内没有已知 P0/P1。正式连续不少于 4 小时的四 worker soak 与公开 Sites 部署仍是冻结提交之后的 release gate；权威长跑结果写入 `outputs/soak/<run-id>/final.json`，本机其他证据保留在 `outputs/`。
 

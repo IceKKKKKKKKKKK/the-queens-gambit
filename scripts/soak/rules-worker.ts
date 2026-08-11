@@ -1310,9 +1310,10 @@ function completeDraft(
     if (authoritativeRound.players[side].refreshedSlot === null) {
       const slot = ((roundNumber + (side === "black" ? 0 : 1)) % 3) as AugmentSlot;
       const previousOptions = [...authoritativeRound.players[side].options];
-      const previousSeen = new Set(next.augment?.draft.seenBySide[side] ?? []);
+      const previousSeenIds = [...(next.augment?.draft.seenBySide[side] ?? [])];
+      const previousSeen = new Set(previousSeenIds);
       const removedId = previousOptions[slot];
-      next = applyAuditedAction(
+      const productRefreshed = applyAuditedAction(
         next,
         side,
         { type: "augment_refresh", slot },
@@ -1320,8 +1321,44 @@ function completeDraft(
         `${seed}:${side}:refresh`,
         repetitionOracle,
       );
+      const productDraft = productRefreshed.augment?.draft;
+      const productRound = productDraft?.rounds.find(
+        (candidate) => candidate.number === roundNumber,
+      );
+      expect(productDraft && productRound, "invariantFailures", "Product refresh lost the active draft.");
+      const productOptions = [...productRound.players[side].options];
+      const productReplacementId = productOptions[slot];
+      expect(
+        productRound.players[side].refreshedSlot === slot,
+        "invariantFailures",
+        `${side} product refresh did not persist its slot.`,
+      );
+      expect(
+        productReplacementId !== removedId && !previousSeen.has(productReplacementId),
+        "duplicateSettlements",
+        `${side} product refresh repeated an encountered card.`,
+        { removedId, replacementId: productReplacementId, roundNumber },
+      );
+      expect(
+        previousOptions.every(
+          (id, index) => index === slot || productOptions[index] === id,
+        ),
+        "duplicateSettlements",
+        `${side} product refresh moved an untouched offer slot.`,
+        { previousOptions, productOptions, slot, roundNumber },
+      );
+      expect(
+        stableStringify(productDraft.seenBySide[side].slice(0, previousSeenIds.length)) ===
+          stableStringify(previousSeenIds) &&
+          productDraft.seenBySide[side][previousSeenIds.length] === productReplacementId &&
+          productDraft.seenBySide[side].length === previousSeenIds.length + 1 &&
+          new Set(productDraft.seenBySide[side]).size === productDraft.seenBySide[side].length,
+        "invariantFailures",
+        `${side} product refresh did not append exactly one encounter.`,
+      );
+
       next = constrainActiveDraftToSimulationPool(
-        next,
+        productRefreshed,
         `${seed}:${side}:post-refresh`,
       );
       const refreshedDraft = next.augment?.draft;
@@ -1336,16 +1373,36 @@ function completeDraft(
         `${side} refresh did not persist its slot.`,
       );
       expect(
-        replacementId !== removedId && !previousSeen.has(replacementId),
+        refreshedRound.players[side].options.every(isSimulationEligibleAugment) &&
+          !previousSeen.has(replacementId) &&
+          (isSimulationEligibleAugment(productReplacementId)
+            ? replacementId === productReplacementId
+            : replacementId !== productReplacementId),
         "duplicateSettlements",
-        `${side} refresh repeated an encountered card.`,
-        { removedId, replacementId, roundNumber },
+        `${side} simulation refresh filter did not preserve or locally replace the product result.`,
+        { productReplacementId, replacementId, roundNumber },
       );
       expect(
-        previousOptions.every((id) => refreshedDraft.seenBySide[side].includes(id)) &&
-          refreshedDraft.seenBySide[side].includes(replacementId),
+        productOptions.every(
+          (id, index) => index === slot || refreshedRound.players[side].options[index] === id,
+        ) && refreshedRound.players[side].refreshedSlot === productRound.players[side].refreshedSlot,
+        "duplicateSettlements",
+        `${side} simulation refresh filter moved an untouched offer slot.`,
+        {
+          productOptions,
+          filteredOptions: refreshedRound.players[side].options,
+          slot,
+          roundNumber,
+        },
+      );
+      expect(
+        [...previousSeen]
+          .filter(isSimulationEligibleAugment)
+          .every((id) => refreshedDraft.seenBySide[side].includes(id)) &&
+          refreshedDraft.seenBySide[side].includes(replacementId) &&
+          refreshedDraft.seenBySide[side].every(isSimulationEligibleAugment),
         "invariantFailures",
-        `${side} refresh forgot encountered-card history.`,
+        `${side} simulation refresh filter corrupted eligible encounter history.`,
       );
 
       const afterFirstRefresh = stableStringify(next);
@@ -1434,7 +1491,7 @@ function verifyRejectedActionDoesNotMutate(state: GameState, nowMs: number) {
   );
 }
 
-export const THREEFOLD_TRACE_SEED = "rules-v13-v3-no-clock-threefold-trace";
+export const THREEFOLD_TRACE_SEED = "rules-v14-v3-no-clock-threefold-trace";
 export const THREEFOLD_TRACE_CARD_PAIR = [
   "club-road-patrol",
   "club-engineer-oath",

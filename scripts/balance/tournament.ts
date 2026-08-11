@@ -35,6 +35,7 @@ import {
 import {
   EXCLUDED_CLOCK_AUGMENT_IDS,
   SIMULATION_CATALOG_SIZE,
+  SIMULATION_CATALOG_VERSION,
   SIMULATION_ELIGIBLE_AUGMENT_IDS,
   SIMULATION_ELIGIBLE_AUGMENTS,
   SIMULATION_ELIGIBLE_COUNT,
@@ -48,7 +49,7 @@ const SCHEMA_VERSION = 5 as const;
 export const BALANCE_ENGINE_RULES_FINGERPRINT =
   THREEFOLD_REPETITION_RULES_FINGERPRINT;
 export const BALANCE_ALGORITHM_VERSION =
-  "product-stability-v13-v3-no-clock-zero-time-deterministic-ids" as const;
+  "product-stability-v14-v3-no-clock-zero-time-deterministic-ids-slot-stable-drafts" as const;
 
 export interface TournamentOptions {
   seed: number;
@@ -671,14 +672,22 @@ function shuffleWithSeed<T>(values: T[], seed: number | string) {
 }
 
 /**
- * Replaces any clock card produced by the product draft RNG with an unseen,
- * same-suit, round-legal simulation card. The authoritative draft shape and
- * encountered-card history remain valid, including after a refresh.
+ * Replaces each simulation-ineligible offer in place with an unseen, same-suit,
+ * round-legal card. Valid slots never move, each side owns an independent seen
+ * history, and old catalog drafts fail closed rather than being reinterpreted.
  */
 export function constrainActiveDraftToSimulationPool(
   initial: GameState,
   seed: number | string,
 ) {
+  if (
+    initial.augment?.draft &&
+    initial.augment.draft.catalogVersion !== SIMULATION_CATALOG_VERSION
+  ) {
+    throw new Error(
+      `Simulation requires catalog ${SIMULATION_CATALOG_VERSION}; received ${initial.augment.draft.catalogVersion}.`,
+    );
+  }
   if (
     (initial.phase !== "setup" && initial.phase !== "augment_draft") ||
     !initial.augment?.draft.activeRound
@@ -693,49 +702,70 @@ export function constrainActiveDraftToSimulationPool(
 
   for (const side of SIDES) {
     const player = round.players[side];
-    if (player.locked) {
-      if (player.options.some((id) => !isSimulationEligibleAugment(id))) {
-        throw new Error(`${side} locked an excluded clock augment before simulation filtering.`);
-      }
-      continue;
-    }
-    const originalOptions = [...round.players[side].options];
+    const originalOptions = [...player.options];
     const currentOptionSet = new Set(originalOptions);
-    const priorSeen = [...new Set(
-      draft.seenBySide[side].filter(
-        (id) => isSimulationEligibleAugment(id) && !currentOptionSet.has(id),
-      ),
+    const eligibleSeenHistory = [...new Set(
+      draft.seenBySide[side].filter(isSimulationEligibleAugment),
     )];
+    const priorEligibleSeen = new Set(
+      eligibleSeenHistory.filter((id) => !currentOptionSet.has(id)),
+    );
     const loadout = new Set(draft.loadouts[side]);
-    const roundEligible = (id: AugmentId) => {
+    const baseRoundEligible = (id: AugmentId) => {
       const definition = getAugmentDefinition(id);
       return (
         isSimulationEligibleAugment(id) &&
         definition.suit === round.suit &&
-        (roundNumber === 1 || definition.activation !== "setup") &&
-        !loadout.has(id)
+        (roundNumber === 1 || definition.activation !== "setup")
       );
     };
-    const retained = originalOptions.filter(
+    if (player.locked) {
+      if (
+        new Set(originalOptions).size !== originalOptions.length ||
+        originalOptions.some((id) => !baseRoundEligible(id)) ||
+        !player.selectedId ||
+        !originalOptions.includes(player.selectedId) ||
+        !loadout.has(player.selectedId)
+      ) {
+        throw new Error(`${side} locked an invalid offer before simulation filtering.`);
+      }
+      continue;
+    }
+    const roundEligible = (id: AugmentId) => {
+      return baseRoundEligible(id) && !loadout.has(id);
+    };
+    const retainedSlots = originalOptions.map(
       (id, index) =>
         roundEligible(id) &&
         originalOptions.indexOf(id) === index &&
-        !priorSeen.includes(id),
+        !priorEligibleSeen.has(id),
     );
-    const retainedSet = new Set(retained);
+    const retainedSet = new Set(
+      originalOptions.filter((_id, index) => retainedSlots[index]),
+    );
+    const invalidSlots = retainedSlots
+      .map((retained, index) => (retained ? null : index))
+      .filter((index): index is number => index !== null);
     const replacementPool = shuffleWithSeed(
       SIMULATION_ELIGIBLE_AUGMENTS
         .filter((definition) => roundEligible(definition.id))
         .map((definition) => definition.id)
-        .filter((id) => !priorSeen.includes(id) && !retainedSet.has(id)),
+        .filter((id) => !priorEligibleSeen.has(id) && !retainedSet.has(id)),
       `${String(seed)}:${side}`,
     );
-    const options = [...retained, ...replacementPool].slice(0, 3);
-    if (options.length !== 3) {
-      throw new Error(`${side} has fewer than three eligible simulation draft options.`);
+    if (replacementPool.length < invalidSlots.length) {
+      throw new Error(`${side} has too few eligible simulation draft replacements.`);
     }
+    const options = [...originalOptions];
+    invalidSlots.forEach((slot, replacementIndex) => {
+      options[slot] = replacementPool[replacementIndex];
+    });
     round.players[side].options = options as [AugmentId, AugmentId, AugmentId];
-    draft.seenBySide[side] = [...new Set([...priorSeen, ...options])];
+    round.players[side].selectedId =
+      player.selectedId && options.includes(player.selectedId)
+        ? player.selectedId
+        : null;
+    draft.seenBySide[side] = [...new Set([...eligibleSeenHistory, ...options])];
   }
   return next;
 }

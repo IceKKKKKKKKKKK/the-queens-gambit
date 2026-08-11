@@ -399,7 +399,7 @@ export function crossTierScheduleFingerprint() {
   return String(
     hashSeed(
       stableStringify({
-        algorithm: "diagnostic-cross-tier-v13-v3-no-clock-zero-time-deterministic-ids",
+        algorithm: "diagnostic-cross-tier-v14-v3-no-clock-zero-time-deterministic-ids-slot-stable-drafts",
         engineRulesFingerprint: BALANCE_ENGINE_RULES_FINGERPRINT,
         cycleZero: buildCrossTierExperimentSchedule(0),
       }),
@@ -543,7 +543,7 @@ export function crossTierPairedSeed(
   >,
 ) {
   return hashSeed(
-    `${options.seed}:cross-tier-v13:${BALANCE_ENGINE_RULES_FINGERPRINT}:${group.cycle}:${group.key}:${group.scheduleOrdinal}:${group.roundOrder}`,
+    `${options.seed}:cross-tier-v14:${BALANCE_ENGINE_RULES_FINGERPRINT}:${group.cycle}:${group.key}:${group.scheduleOrdinal}:${group.roundOrder}`,
   );
 }
 

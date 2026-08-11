@@ -67,7 +67,7 @@ node --experimental-transform-types scripts/augment-balance-simulation.ts --mode
 
 ## Checkpoint 与报告
 
-当前平衡 checkpoint/report schema 为 5，算法版本为 `product-stability-v13-v3-no-clock-zero-time-deterministic-ids`，引擎指纹为 `augment-duel-dark-v3:threefold-3:strategic-sha256-v2`。配置指纹绑定实际零时间配置、eligible IDs、排除 IDs、搜索配置和赛程。任何旧 schema、旧算法、旧引擎、旧牌池、旧搜索或旧赛程 checkpoint 都必须拒绝，不能合并历史样本。
+当前平衡 checkpoint/report schema 为 5，算法版本为 `product-stability-v14-v3-no-clock-zero-time-deterministic-ids-slot-stable-drafts`，引擎指纹为 `augment-duel-dark-v3:threefold-3:strategic-sha256-v2`。配置指纹绑定实际零时间配置、eligible IDs、排除 IDs、搜索配置和赛程。任何旧 schema、旧算法（包括 v13）、旧引擎、旧牌池、旧搜索或旧赛程 checkpoint 都必须拒绝，不能合并历史样本。
 
 权威报告至少包含：
 
@@ -84,6 +84,6 @@ node --experimental-transform-types scripts/augment-balance-simulation.ts --mode
 
 ## 发布证据边界
 
-截至 2026-08-11 ET，最终代码回归为 238/238：HTML 9 项、TypeScript 226 项、真实集成 3 项；production build、全项目 ESLint、非增量 TypeScript 检查与差异检查均通过。三套真实集成各连续执行 4 轮，共 12/12 通过；端口每轮可重新绑定，结束后孤儿进程为 0。
+截至 2026-08-11 ET，最终代码回归为 242/242：HTML 9 项、TypeScript 230 项、真实集成 3 项；production build、全项目 ESLint、非增量 TypeScript 检查与差异检查均通过。三套真实集成各连续执行 4 轮，共 12/12 通过；端口每轮可重新绑定，结束后孤儿进程为 0。
 
 这些回归证明当前覆盖路径可工作，不替代冻结提交上的正式持续测试。发布必须以准确的冻结提交连续运行四个 worker 不少于 4 小时、完成至少一整圈 63 个同花色环形四腿组，并让所有技术 gate 通过；随后才进入 Sites 部署与生产 QA。quick 的默认证据写入 `outputs/balance/augment-balance-report.json`，正式持续测试的权威结果写入 `outputs/soak/<run-id>/final.json`。`outputs/` 只保存本机证据，不提交到源码仓库。
