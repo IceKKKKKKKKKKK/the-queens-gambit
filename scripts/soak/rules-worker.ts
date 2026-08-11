@@ -463,6 +463,9 @@ export function referenceStrategicPositionJson(state: GameState) {
     const pending = augment.extraMove[side];
     return pending ? [pending.augmentId, pending.excludedPieceId] : null;
   };
+  const ruleState = augment.ruleState;
+  const sortedPieceNumberEntries = (values: Record<string, number>) =>
+    Object.entries(values).sort(([first], [second]) => first.localeCompare(second));
   return JSON.stringify({
     turn: state.turn,
     pieces: [...state.pieces]
@@ -486,6 +489,32 @@ export function referenceStrategicPositionJson(state: GameState) {
         sortedUnique(augment.temporaryReveals.white),
       ],
       extraMove: [extraMove("black"), extraMove("white")],
+      ...(ruleState
+        ? {
+            ruleState: {
+              publiclyRevealedPieceIds: sortedUnique(ruleState.publiclyRevealedPieceIds),
+              promotedPublicIds: sortedUnique(ruleState.promotedPublicIds),
+              headquartersUnlocked: [
+                ruleState.headquartersUnlocked.black,
+                ruleState.headquartersUnlocked.white,
+              ],
+              commanderFallen: [ruleState.commanderFallen.black, ruleState.commanderFallen.white],
+              generalFallen: [ruleState.generalFallen.black, ruleState.generalFallen.white],
+              mineHits: sortedPieceNumberEntries(ruleState.mineHits),
+              bombSecondFuse: [
+                ruleState.bombSecondFuse.black,
+                ruleState.bombSecondFuse.white,
+              ],
+              casualties: [ruleState.casualties.black, ruleState.casualties.white],
+              sacrificePromotionSteps: [
+                ruleState.sacrificePromotionSteps.black,
+                ruleState.sacrificePromotionSteps.white,
+              ],
+              lightning: [ruleState.lightning.black, ruleState.lightning.white],
+              multiMove: [ruleState.multiMove.black, ruleState.multiMove.white],
+            },
+          }
+        : {}),
     },
   });
 }
@@ -498,6 +527,10 @@ export function referenceRepetitionIsEligible(state: GameState) {
       state.augment.draft.activeRound === null &&
       state.augment.pendingRecon.black === null &&
       state.augment.pendingRecon.white === null &&
+      state.augment.extraMove.black === null &&
+      state.augment.extraMove.white === null &&
+      state.augment.ruleState?.multiMove.black === null &&
+      state.augment.ruleState?.multiMove.white === null &&
       state.augment.draft.rounds.some((round) => round.number === 2 && round.revealed),
   );
 }

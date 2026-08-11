@@ -118,6 +118,10 @@ import {
   THREEFOLD_TRACE_CARD_PAIR,
   coveragePairs,
   createClocklessSetupPrivacyState,
+  createReferenceRepetitionOracle,
+  observeReferenceRepetition,
+  referenceRepetitionIsEligible,
+  referenceStrategicPositionJson,
   runThreefoldTrace,
   verifyActionSettlement,
   verifyProjectedRuleMetadata,
@@ -2173,6 +2177,203 @@ test("publicly completed opponent reconnaissance yields stable synthetic private
   for (const id of first.augment?.permanentReveals.white ?? []) {
     assert.notEqual(whiteProjection.pieces.find((piece) => piece.id === id)?.type, null);
   }
+});
+
+function createReferenceRepetitionSecondDraftFixture() {
+  const nowMs = 1_000_000;
+  let state = createControlledPairGame(
+    "spade-command-chain",
+    "spade-counteroffensive",
+    "black",
+    "reference-repetition-continuation",
+    nowMs,
+  );
+  state.moveNumber = 9;
+  const draft = beginSecondAugmentDraft(state.augment!.draft, {
+    suit: "clubs",
+    random: () => 0.25,
+  });
+  const round = draft.rounds.find((candidate) => candidate.number === 2)!;
+  const controlledOptions = [
+    "club-line-hop",
+    "club-forced-march",
+    "club-local-recon",
+  ] as [AugmentId, AugmentId, AugmentId];
+  for (const side of ["black", "white"] as const) {
+    round.players[side].options = [...controlledOptions];
+    round.players[side].selectedId = null;
+    round.players[side].locked = false;
+    draft.seenBySide[side] = [
+      ...new Set([...draft.seenBySide[side], ...controlledOptions]),
+    ];
+  }
+  state.phase = "augment_draft";
+  state.augment!.draft = draft;
+  state.augment!.resumeTurn = "black";
+  state.augment!.draftDeadlineAt = nowMs + 45_000;
+  state.augment!.extraMove.black = {
+    augmentId: "spade-command-chain",
+    excludedPieceId: state.pieces.find((piece) => piece.side === "black" && piece.alive)!.id,
+  };
+  state.augment!.triggerCounts.black["spade-command-chain"] = 1;
+  if (!state.augment!.usedBySide.black.includes("spade-command-chain")) {
+    state.augment!.usedBySide.black.push("spade-command-chain");
+  }
+  state = applyPlayerAction(
+    state,
+    "black",
+    { type: "augment_select", augmentId: "club-line-hop" },
+    nowMs,
+  );
+  state = applyPlayerAction(state, "black", { type: "augment_lock" }, nowMs);
+  state = applyPlayerAction(
+    state,
+    "white",
+    { type: "augment_select", augmentId: "club-line-hop" },
+    nowMs,
+  );
+  return { beforeFinalLock: state, nowMs };
+}
+
+test("the independent repetition oracle waits for every draft, recon, and move continuation", () => {
+  const { beforeFinalLock, nowMs } = createReferenceRepetitionSecondDraftFixture();
+  assert.equal(referenceRepetitionIsEligible(beforeFinalLock), false);
+  assert.equal(projectGame(beforeFinalLock, "black", nowMs).repetition?.active, false);
+
+  const afterFinalLock = applyPlayerAction(
+    beforeFinalLock,
+    "white",
+    { type: "augment_lock" },
+    nowMs + 1,
+  );
+  assert.equal(afterFinalLock.phase, "playing");
+  assert.equal(afterFinalLock.augment?.draft.activeRound, null);
+  assert.ok(afterFinalLock.augment?.extraMove.black);
+  assert.deepEqual(projectGame(afterFinalLock, "black", nowMs + 1).repetition, {
+    threshold: 3,
+    currentOccurrences: 0,
+    active: false,
+  });
+  const oracle = createReferenceRepetitionOracle();
+  assert.equal(referenceRepetitionIsEligible(afterFinalLock), false);
+  assert.equal(observeReferenceRepetition(afterFinalLock, oracle, nowMs + 1), 0);
+
+  for (const side of ["black", "white"] as const) {
+    const extraMove = structuredClone(afterFinalLock);
+    extraMove.augment!.extraMove = { black: null, white: null };
+    extraMove.augment!.extraMove[side] = {
+      augmentId: "spade-command-chain",
+      excludedPieceId: null,
+    };
+    assert.equal(referenceRepetitionIsEligible(extraMove), false);
+
+    const multiMove = structuredClone(afterFinalLock);
+    multiMove.augment!.extraMove = { black: null, white: null };
+    multiMove.augment!.ruleState!.multiMove[side] = {
+      augmentId: "heart-steady-advance",
+      pieceId: null,
+      movesRemaining: 1,
+      movesCompleted: 1,
+      mayUseDifferentPieces: true,
+    };
+    assert.equal(referenceRepetitionIsEligible(multiMove), false);
+
+    const pendingRecon = structuredClone(afterFinalLock);
+    pendingRecon.augment!.extraMove = { black: null, white: null };
+    pendingRecon.augment!.pendingRecon[side] = {
+      augmentId: "club-local-recon",
+      remaining: 1,
+    };
+    assert.equal(referenceRepetitionIsEligible(pendingRecon), false);
+  }
+
+  const settled = applyPlayerAction(
+    afterFinalLock,
+    "black",
+    { type: "pass_extra_move" },
+    nowMs + 2,
+  );
+  assert.equal(referenceRepetitionIsEligible(settled), true);
+  assert.deepEqual(projectGame(settled, "black", nowMs + 2).repetition, {
+    threshold: 3,
+    currentOccurrences: 1,
+    active: true,
+  });
+  assert.equal(observeReferenceRepetition(settled, oracle, nowMs + 2), 1);
+  assert.equal(observeReferenceRepetition(settled, oracle, nowMs + 3), 1);
+  assert.equal(oracle.counts.size, 1);
+});
+
+test("the independent repetition position separates every v3 strategic rule field", () => {
+  const { beforeFinalLock, nowMs } = createReferenceRepetitionSecondDraftFixture();
+  const afterFinalLock = applyPlayerAction(
+    beforeFinalLock,
+    "white",
+    { type: "augment_lock" },
+    nowMs + 1,
+  );
+  const settled = applyPlayerAction(
+    afterFinalLock,
+    "black",
+    { type: "pass_extra_move" },
+    nowMs + 2,
+  );
+  const baseline = referenceStrategicPositionJson(settled);
+  const blackMine = settled.pieces.find(
+    (piece) => piece.side === "black" && piece.type === "mine",
+  )!;
+  const blackBomb = settled.pieces.find(
+    (piece) => piece.side === "black" && piece.type === "bomb",
+  )!;
+  const publicIds = settled.pieces.filter((piece) => piece.side === "white").slice(0, 2);
+  const mutations: Array<(state: GameState) => void> = [
+    (state) => state.augment!.ruleState!.publiclyRevealedPieceIds.push(publicIds[0].id),
+    (state) => state.augment!.ruleState!.promotedPublicIds.push(publicIds[1].id),
+    (state) => { state.augment!.ruleState!.headquartersUnlocked.black = true; },
+    (state) => { state.augment!.ruleState!.commanderFallen.black = true; },
+    (state) => { state.augment!.ruleState!.generalFallen.black = true; },
+    (state) => { state.augment!.ruleState!.mineHits[blackMine.id] = 1; },
+    (state) => {
+      state.augment!.ruleState!.bombSecondFuse.black = {
+        pieceId: blackBomb.id,
+        survivalUsed: false,
+      };
+    },
+    (state) => { state.augment!.ruleState!.casualties.black += 1; },
+    (state) => { state.augment!.ruleState!.sacrificePromotionSteps.black += 1; },
+    (state) => {
+      state.augment!.ruleState!.lightning.black = {
+        augmentId: "spade-lightning-doctrine",
+        remainingOwnTurns: 11,
+      };
+    },
+    (state) => {
+      state.augment!.ruleState!.multiMove.black = {
+        augmentId: "heart-steady-advance",
+        pieceId: null,
+        movesRemaining: 1,
+        movesCompleted: 1,
+        mayUseDifferentPieces: true,
+      };
+    },
+  ];
+  for (const mutate of mutations) {
+    const changed = structuredClone(settled);
+    mutate(changed);
+    assert.notEqual(referenceStrategicPositionJson(changed), baseline);
+  }
+
+  const reordered = structuredClone(settled);
+  reordered.augment!.ruleState!.publiclyRevealedPieceIds.push(
+    publicIds[0].id,
+    publicIds[1].id,
+  );
+  const reversed = structuredClone(reordered);
+  reversed.augment!.ruleState!.publiclyRevealedPieceIds.reverse();
+  assert.equal(
+    referenceStrategicPositionJson(reordered),
+    referenceStrategicPositionJson(reversed),
+  );
 });
 
 test("second-round opponent reconnaissance stays executable in sampled worlds and never synthesizes dead targets", () => {
