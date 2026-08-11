@@ -2166,6 +2166,35 @@ test("one move records every active and automatic augment for replay and animati
     "club-engineer-oath",
   ]);
 
+  const dualFuse = v3PlayingState({
+    blackAugments: ["spade-rail-dominion", "club-bombardier"],
+    whiteAugments: ["spade-grand-maneuver", "club-bombardier"],
+    pieces: [
+      piece("attacker", "black", "bomb", 1, 2),
+      piece("defender", "white", "bomb", 5, 4),
+      piece("white-support", "white", "platoon", 8, 0),
+    ],
+  });
+  const fused = applyPlayerAction(dualFuse, "black", {
+    type: "augment_move",
+    augmentId: "spade-rail-dominion",
+    from: { row: 1, col: 2 },
+    to: { row: 5, col: 4 },
+  });
+  assert.deepEqual(fused.replay?.moves.at(-1)?.augmentIds, [
+    "spade-rail-dominion",
+    "club-bombardier",
+    "club-bombardier",
+  ]);
+  assert.deepEqual(fused.events.at(-1)?.augmentIds, [
+    "spade-rail-dominion",
+    "club-bombardier",
+    "club-bombardier",
+  ]);
+  assert.equal(fused.augment?.triggerCounts.black["spade-rail-dominion"], 1);
+  assert.equal(fused.augment?.triggerCounts.black["club-bombardier"], 1);
+  assert.equal(fused.augment?.triggerCounts.white["club-bombardier"], 1);
+
   const legacyReplay = structuredClone(retreated.replay)!;
   delete legacyReplay.moves[0].augmentIds;
   legacyReplay.moves[0].augmentId = "heart-orderly-withdrawal";

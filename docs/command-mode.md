@@ -411,11 +411,11 @@ v3 在冻结的 v2 目录后新增以下 20 张。表内是当前最终语义，
 
 ### 9.5 截至 2026-08-11 ET 的冻结证据
 
-- 最终完整回归 268/268 通过：HTML 9 项、集成服务器契约 4 项、TypeScript 252 项、真实集成 3 项；production build、全项目 ESLint、`tsc --noEmit --incremental false` 与 `git diff --check` 通过。
+- 最终完整回归 273/273 通过：HTML 9 项、集成服务器契约 4 项、TypeScript 257 项、真实集成 3 项；production build、全项目 ESLint、`tsc --noEmit --incremental false` 与 `git diff --check` 通过。
 - 三套真实集成各连续执行 4 轮，共 12/12 通过；每轮服务端端口可重新绑定，结束后孤儿进程为 0。
 - API 集成在同一隔离工作区连续执行 64/64 次且零自动重试，全部返回 JSON、64 个动态端口均可重绑、D1 文件与 Vinext/Workerd 残留均为 0；独立双启动哨兵验证显式持久状态可在停服后读回并安全清理。
 - 未登录玩家邀请已覆盖同标签页 `sessionStorage` 恢复、认证 URL/服务端 HTML 无 secret，以及 `watch=1` 不读取、不替换、不消费玩家邀请。
-- 当前产品稳定性算法为 `product-stability-v18-v3-no-clock-zero-time-deterministic-ids-slot-stable-drafts-relocation-aware-public-rank-capacity-worlds-private-draft-fidelity`，产品引擎指纹为 `augment-duel-dark-v3:threefold-3:strategic-sha256-v4`。v18 沿用玩家可见投影、公开闪电战状态和公开晋升标记边界，在标准库存容量内抽取基础军阶后独立生成当前有效军阶；对手已锁但未共同公开的卡仅从合成选项加入内部 loadout，公开前 trigger 为 0 且 unused。它不读取权威 `baseTypes`、私有选牌或回放私密信息，并对每个 v3 抽样世界执行规则校验和重投影一致性检查。三次重复摘要忽略不会改变剩余次数或未来权利的持续牌触发计数，保留其他次数权利与全部规则状态；只有敌方棋子进入守方大本营才会解锁“濒死悟道”。旧 v17 算法和旧 `strategic-sha256-v3` 引擎 checkpoint 不可恢复。
+- 当前产品稳定性算法为 `product-stability-v18-v3-no-clock-zero-time-deterministic-ids-slot-stable-drafts-relocation-aware-public-rank-capacity-worlds-private-draft-fidelity`，产品引擎指纹为 `augment-duel-dark-v3:threefold-3:strategic-sha256-v4:complete-augment-attribution-v1`。v18 沿用玩家可见投影、公开闪电战状态和公开晋升标记边界，在标准库存容量内抽取基础军阶后独立生成当前有效军阶；对手已锁但未共同公开的卡仅从合成选项加入内部 loadout，公开前 trigger 为 0 且 unused。它不读取权威 `baseTypes`、私有选牌或回放私密信息，并对每个 v3 抽样世界执行规则校验和重投影一致性检查。三次重复摘要忽略不会改变剩余次数或未来权利的持续牌触发计数，保留其他次数权利与全部规则状态；只有敌方棋子进入守方大本营才会解锁“濒死悟道”。复合效果的公开事件与回放同时保留主动牌、即时结算牌和后续自动牌。旧 v17 算法、裸 `strategic-sha256-v4` 归因合同及更早引擎 checkpoint 不可恢复。
 - 产品目录共 70 张；自动模拟使用 63 张非计时军令、`clock=null`、零模拟等待、`1×3×1` 搜索、同花色环形四腿赛程和单局 300 手安全上限。任一触顶即失败，不能伪装成和棋。
 - 在当前自动化与受支持的 Chrome 视口证据范围内没有已知 P0/P1。正式连续不少于 4 小时的四 worker soak 与公开 Sites 部署仍是冻结提交之后的 release gate；权威长跑结果写入 `outputs/soak/<run-id>/final.json`，本机其他证据保留在 `outputs/`。
 

@@ -15,6 +15,7 @@ import {
   applyPlayerAction,
   createAugmentGame,
   createInitialGame,
+  getAugmentMoveViolation,
   getLegalTargets,
   isValidAugmentRuleStateForState,
   isValidRepetitionTrackerForState,
@@ -124,6 +125,7 @@ import {
   observeReferenceRepetition,
   referenceRepetitionIsEligible,
   referenceStrategicPositionJson,
+  runRulesGame,
   runThreefoldTrace,
   verifyActionSettlement,
   verifyProjectedRuleMetadata,
@@ -1430,6 +1432,200 @@ test("rules settlement audit permits dual fuse attribution twice and rejects a t
   );
 });
 
+test("rules settlement audit attributes a shared last-headquarters card to the protected flag side", () => {
+  for (const [attackerSide, defenderSide, stagingRow] of [
+    ["white", "black", 10],
+    ["black", "white", 1],
+  ] as const) {
+    const before = createControlledPairGame(
+      "spade-last-headquarters",
+      "spade-last-headquarters",
+      attackerSide,
+      `shared-last-headquarters-settlement-audit:${attackerSide}`,
+    );
+    const flag = before.pieces.find(
+      (piece) =>
+        piece.side === defenderSide &&
+        before.augment?.ruleState?.baseTypes[piece.id] === "flag",
+    );
+    const attacker = before.pieces.find(
+      (piece) =>
+        piece.side === attackerSide &&
+        before.augment?.ruleState?.baseTypes[piece.id] === "company",
+    );
+    assert.ok(flag && attacker);
+    const attackerOrigin = { row: attacker.row, col: attacker.col };
+    const staging = { row: stagingRow, col: flag.col };
+    const stagingOccupant = before.pieces.find(
+      (piece) => piece.alive && piece.row === staging.row && piece.col === staging.col,
+    );
+    attacker.row = staging.row;
+    attacker.col = staging.col;
+    if (stagingOccupant && stagingOccupant.id !== attacker.id) {
+      stagingOccupant.row = attackerOrigin.row;
+      stagingOccupant.col = attackerOrigin.col;
+    }
+    const action = {
+      type: "move" as const,
+      from: staging,
+      to: { row: flag.row, col: flag.col },
+    };
+    const after = applyPlayerAction(before, attackerSide, action, 1_000_000);
+
+    assert.equal(after.events.at(-1)?.result, "flag_protected");
+    assert.equal(after.augment?.triggerCounts[defenderSide]["spade-last-headquarters"], 1);
+    assert.equal(
+      after.augment?.triggerCounts[attackerSide]["spade-last-headquarters"] ?? 0,
+      0,
+    );
+    assert.doesNotThrow(() => verifyActionSettlement(before, after, action));
+
+    const missingDefenderPulse = structuredClone(after);
+    missingDefenderPulse.augment!.triggerCounts[defenderSide]["spade-last-headquarters"] = 0;
+    assert.throws(
+      () => verifyActionSettlement(before, missingDefenderPulse, action),
+      new RegExp(
+        `${defenderSide}/spade-last-headquarters passive trigger delta 0 ` +
+          "did not match semantic evidence 1",
+      ),
+    );
+
+    const forgedAttackerPulse = structuredClone(after);
+    forgedAttackerPulse.augment!.triggerCounts[attackerSide]["spade-last-headquarters"] = 1;
+    assert.throws(
+      () => verifyActionSettlement(before, forgedAttackerPulse, action),
+      new RegExp(
+        `${attackerSide}/spade-last-headquarters passive trigger delta 1 ` +
+          "did not match semantic evidence 0",
+      ),
+    );
+  }
+});
+
+test("rules settlement audit recognizes flag protection beneath an active movement attribution", () => {
+  const before = createControlledPairGame(
+    "spade-last-headquarters",
+    "spade-deep-strike",
+    "white",
+    "active-move-last-headquarters-settlement-audit",
+  );
+  const blackFlag = before.pieces.find(
+    (piece) =>
+      piece.side === "black" &&
+      before.augment?.ruleState?.baseTypes[piece.id] === "flag",
+  );
+  const whiteAttacker = before.pieces.find(
+    (piece) =>
+      piece.side === "white" &&
+      before.augment?.ruleState?.baseTypes[piece.id] === "company",
+  );
+  assert.ok(blackFlag && whiteAttacker);
+  const attackerOrigin = { row: whiteAttacker.row, col: whiteAttacker.col };
+  const staging = { row: blackFlag.row - 3, col: blackFlag.col };
+  const stagingOccupant = before.pieces.find(
+    (piece) => piece.alive && piece.row === staging.row && piece.col === staging.col,
+  );
+  whiteAttacker.row = staging.row;
+  whiteAttacker.col = staging.col;
+  if (stagingOccupant && stagingOccupant.id !== whiteAttacker.id) {
+    stagingOccupant.row = attackerOrigin.row;
+    stagingOccupant.col = attackerOrigin.col;
+  }
+  const finalIntermediate = { row: blackFlag.row - 1, col: blackFlag.col };
+  const finalIntermediateOccupant = before.pieces.find(
+    (piece) =>
+      piece.alive &&
+      piece.row === finalIntermediate.row &&
+      piece.col === finalIntermediate.col,
+  );
+  const spareCamp = { row: 7, col: blackFlag.col === 1 ? 3 : 1 };
+  assert.ok(finalIntermediateOccupant);
+  assert.equal(
+    before.pieces.some(
+      (piece) => piece.alive && piece.row === spareCamp.row && piece.col === spareCamp.col,
+    ),
+    false,
+  );
+  finalIntermediateOccupant.row = spareCamp.row;
+  finalIntermediateOccupant.col = spareCamp.col;
+  before.movedPieceIds = [...new Set([
+    ...(before.movedPieceIds ?? []),
+    whiteAttacker.id,
+    ...(stagingOccupant ? [stagingOccupant.id] : []),
+    finalIntermediateOccupant.id,
+  ])];
+  const action = {
+    type: "augment_move" as const,
+    augmentId: "spade-deep-strike" as const,
+    from: staging,
+    to: { row: blackFlag.row, col: blackFlag.col },
+  };
+  assert.equal(isValidAugmentRuleStateForState(before), true);
+  assert.equal(
+    getAugmentMoveViolation(before, "white", action.augmentId, action.from, action.to),
+    null,
+  );
+  const after = applyPlayerAction(before, "white", action, 1_000_000);
+
+  assert.equal(after.events.at(-1)?.result, "flag_protected");
+  assert.equal(after.events.at(-1)?.augmentId, "spade-deep-strike");
+  assert.deepEqual(after.events.at(-1)?.augmentIds, [
+    "spade-deep-strike",
+    "spade-last-headquarters",
+  ]);
+  assert.equal(after.replay?.moves.at(-1)?.augmentId, "spade-deep-strike");
+  assert.deepEqual(after.replay?.moves.at(-1)?.augmentIds, [
+    "spade-deep-strike",
+    "spade-last-headquarters",
+  ]);
+  assert.equal(after.augment?.triggerCounts.black["spade-last-headquarters"], 1);
+  assert.equal(after.augment?.triggerCounts.white["spade-deep-strike"], 1);
+  assert.doesNotThrow(() => verifyActionSettlement(before, after, action));
+
+  const missingProtectionPulse = structuredClone(after);
+  missingProtectionPulse.augment!.triggerCounts.black["spade-last-headquarters"] = 0;
+  assert.throws(
+    () => verifyActionSettlement(before, missingProtectionPulse, action),
+    /black\/spade-last-headquarters passive trigger delta 0 did not match semantic evidence 1/,
+  );
+
+  const missingEventAttribution = structuredClone(after);
+  missingEventAttribution.events.at(-1)!.augmentIds = ["spade-deep-strike"];
+  assert.throws(
+    () => verifyActionSettlement(before, missingEventAttribution, action),
+    /lacked complete flag-protection event and replay attribution/,
+  );
+
+  const missingReplayAttribution = structuredClone(after);
+  missingReplayAttribution.replay!.moves.at(-1)!.augmentIds = ["spade-deep-strike"];
+  assert.throws(
+    () => verifyActionSettlement(before, missingReplayAttribution, action),
+    /lacked complete flag-protection event and replay attribution/,
+  );
+
+  const missingPulseAndAttribution = structuredClone(after);
+  missingPulseAndAttribution.augment!.triggerCounts.black["spade-last-headquarters"] = 0;
+  missingPulseAndAttribution.events.at(-1)!.augmentIds = ["spade-deep-strike"];
+  missingPulseAndAttribution.replay!.moves.at(-1)!.augmentIds = ["spade-deep-strike"];
+  assert.throws(
+    () => verifyActionSettlement(before, missingPulseAndAttribution, action),
+    /black\/spade-last-headquarters passive trigger delta 0 did not match semantic evidence 1/,
+  );
+});
+
+test("the exact formal r4 shared last-headquarters trace passes settlement audit", () => {
+  const result = runRulesGame(
+    "club-road-patrol",
+    "club-camp-relay",
+    417,
+    20260811,
+    300,
+  );
+  assert.equal(result.state.phase, "finished");
+  assert.equal(result.actionsApplied, 300);
+  assert.equal(result.capped, true);
+});
+
 test("rules settlement audit accepts a two-step cherry and sacrifice-aura cascade", () => {
   let before = createControlledPairGame(
     "spade-cherry-bomb",
@@ -2508,6 +2704,111 @@ test("an owner-locked unrevealed fall passive does not reinterpret trigger zero"
         1_000_000,
       ),
       /invalid v3 rule state/i,
+    );
+  }
+});
+
+test("rules settlement audit waits for joint reveal before fall-passive catch-up", () => {
+  for (const { augmentId, baseType } of [
+    {
+      augmentId: "diamond-engineer-mutiny" as const,
+      baseType: "commander" as const,
+    },
+    {
+      augmentId: "diamond-command-fusion" as const,
+      baseType: "general" as const,
+    },
+  ]) {
+    let { state } = lockedUnrevealedFallTriggerFixture(augmentId, baseType);
+    const whiteId = state.augment!.draft.rounds[1].players.white.options[0];
+    state = applyPlayerAction(
+      state,
+      "white",
+      { type: "augment_select", augmentId: whiteId },
+      1_000_000,
+    );
+    const action = { type: "augment_lock" as const };
+    const after = applyPlayerAction(state, "white", action, 1_000_000);
+
+    assert.equal(state.augment?.draft.rounds[1].revealed, false);
+    assert.equal(after.augment?.draft.rounds[1].revealed, true);
+    assert.equal(after.augment?.triggerCounts.black[augmentId], 1);
+    assert.doesNotThrow(() => verifyActionSettlement(state, after, action));
+
+    const missingCatchup = structuredClone(after);
+    missingCatchup.augment!.triggerCounts.black[augmentId] = 0;
+    assert.throws(
+      () => verifyActionSettlement(state, missingCatchup, action),
+      /passive trigger delta 0 did not match semantic evidence 1/,
+    );
+  }
+});
+
+function lockedLastHeadquartersRevealFixture(ownerLocksFirst: boolean) {
+  let state = createControlledPairGame(
+    "heart-rail-turn",
+    "heart-mobile-rail",
+    "black",
+    `last-headquarters-joint-reveal:${ownerLocksFirst ? "owner-first" : "owner-last"}`,
+  );
+  state.augment!.ruleState!.headquartersUnlocked.black = true;
+  state.moveNumber = 9;
+  let secondDraft: ReturnType<typeof beginSecondAugmentDraft> | null = null;
+  for (let attempt = 0; attempt < 256 && !secondDraft; attempt += 1) {
+    const random = new SeededRandom(`last-headquarters-joint-reveal:${attempt}`);
+    const candidate = beginSecondAugmentDraft(state.augment!.draft, {
+      suit: "spades",
+      random: () => random.next(),
+    });
+    if (candidate.rounds[1].players.black.options.includes("spade-last-headquarters")) {
+      secondDraft = candidate;
+    }
+  }
+  assert.ok(secondDraft);
+  state.augment!.draft = secondDraft;
+  state.augment!.resumeTurn = state.turn;
+  state.augment!.draftDeadlineAt = 1_045_000;
+  state.phase = "augment_draft";
+
+  const selections = {
+    black: "spade-last-headquarters" as const,
+    white: state.augment!.draft.rounds[1].players.white.options[0],
+  };
+  const firstSide: Side = ownerLocksFirst ? "black" : "white";
+  const lastSide: Side = ownerLocksFirst ? "white" : "black";
+  state = applyPlayerAction(
+    state,
+    firstSide,
+    { type: "augment_select", augmentId: selections[firstSide] },
+    1_000_000,
+  );
+  state = applyPlayerAction(state, firstSide, { type: "augment_lock" }, 1_000_000);
+  state = applyPlayerAction(
+    state,
+    lastSide,
+    { type: "augment_select", augmentId: selections[lastSide] },
+    1_000_000,
+  );
+  return { state, lastSide };
+}
+
+test("rules settlement audit attributes late last-headquarters catch-up at joint reveal", () => {
+  for (const ownerLocksFirst of [true, false]) {
+    const { state, lastSide } = lockedLastHeadquartersRevealFixture(ownerLocksFirst);
+    const action = { type: "augment_lock" as const };
+    const after = applyPlayerAction(state, lastSide, action, 1_000_000);
+
+    assert.equal(state.augment?.draft.rounds[1].revealed, false);
+    assert.equal(state.augment?.triggerCounts.black["spade-last-headquarters"] ?? 0, 0);
+    assert.equal(after.augment?.draft.rounds[1].revealed, true);
+    assert.equal(after.augment?.triggerCounts.black["spade-last-headquarters"], 1);
+    assert.doesNotThrow(() => verifyActionSettlement(state, after, action));
+
+    const missingCatchup = structuredClone(after);
+    missingCatchup.augment!.triggerCounts.black["spade-last-headquarters"] = 0;
+    assert.throws(
+      () => verifyActionSettlement(state, missingCatchup, action),
+      /passive trigger delta 0 did not match semantic evidence 1/,
     );
   }
 });
@@ -4209,7 +4510,7 @@ test("checkpoint validation and remaining schedule make resume idempotent", () =
   assert.equal(restored.engineRulesFingerprint, BALANCE_ENGINE_RULES_FINGERPRINT);
   assert.equal(
     BALANCE_ENGINE_RULES_FINGERPRINT,
-    "augment-duel-dark-v3:threefold-3:strategic-sha256-v4",
+    "augment-duel-dark-v3:threefold-3:strategic-sha256-v4:complete-augment-attribution-v1",
   );
   assert.notEqual(
     tournamentConfigFingerprint(OPTIONS),
@@ -4285,6 +4586,14 @@ test("checkpoint validation and remaining schedule make resume idempotent", () =
     "augment-duel-dark-v3:threefold-3:strategic-sha256-v3";
   assert.throws(
     () => validateCheckpoint(previousEngineRules, OPTIONS, pairings),
+    /engine rules/i,
+  );
+
+  const incompleteAttributionEngine = JSON.parse(JSON.stringify(checkpoint));
+  incompleteAttributionEngine.engineRulesFingerprint =
+    "augment-duel-dark-v3:threefold-3:strategic-sha256-v4";
+  assert.throws(
+    () => validateCheckpoint(incompleteAttributionEngine, OPTIONS, pairings),
     /engine rules/i,
   );
 
@@ -4967,6 +5276,14 @@ test("cross-tier checkpoints bind the balance algorithm and reject legacy eviden
     "augment-duel-dark-v3:threefold-3:strategic-sha256-v3";
   assert.throws(
     () => validateCrossTierCheckpoint(previousEngineRules, OPTIONS),
+    /engine rules/i,
+  );
+
+  const incompleteAttributionEngine = JSON.parse(JSON.stringify(checkpoint));
+  incompleteAttributionEngine.engineRulesFingerprint =
+    "augment-duel-dark-v3:threefold-3:strategic-sha256-v4";
+  assert.throws(
+    () => validateCrossTierCheckpoint(incompleteAttributionEngine, OPTIONS),
     /engine rules/i,
   );
 

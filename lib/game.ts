@@ -2588,9 +2588,9 @@ function hasAttackerRetreatAugment(
 function augmentsUsedSince(
   state: GameState,
   firstNewEventId: number,
-  primaryId?: AugmentId,
+  seedIds: readonly AugmentId[] = [],
 ) {
-  const ids: AugmentId[] = primaryId ? [primaryId] : [];
+  const ids: AugmentId[] = [...seedIds];
   for (const event of state.events) {
     if (
       event.id >= firstNewEventId &&
@@ -4826,11 +4826,21 @@ function applyMove(
       : {}),
   };
   replay.moves.push(replayMove);
-  const eventBackedAugmentIds = dualFuseAugmentIds ?? augmentsUsedSince(
-      state,
-      firstNewAugmentEventId,
-      actionAugmentId ?? resolutionAugmentId,
-    );
+  const immediateResolutionIds = dualFuseAugmentIds ??
+    (resolutionAugmentId ? [resolutionAugmentId] : []);
+  const attributionSeeds = [
+    ...(actionAugmentId ? [actionAugmentId] : []),
+    ...immediateResolutionIds.filter(
+      (id, index) =>
+        dualFuseAugmentIds !== null ||
+        id !== actionAugmentId && immediateResolutionIds.indexOf(id) === index,
+    ),
+  ];
+  const eventBackedAugmentIds = augmentsUsedSince(
+    state,
+    firstNewAugmentEventId,
+    attributionSeeds,
+  );
   const resolvedAugmentIds = [
     ...eventBackedAugmentIds,
     ...passiveMovementAugmentIds.filter(
@@ -5313,7 +5323,7 @@ export function applyPlayerAction(
     const resolvedAugmentIds = augmentsUsedSince(
       state,
       firstNewAugmentEventId,
-      action.augmentId,
+      [action.augmentId],
     );
     const replayMove: ReplayMove = {
       moveNumber: state.moveNumber,

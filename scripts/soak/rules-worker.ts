@@ -136,9 +136,29 @@ function recordCarriesAugment(
   return recordAugmentIds(record).includes(id);
 }
 
-function newlyRevealedToLoadout(before: GameState, after: GameState, side: Side, id: AugmentId) {
-  return !(before.augment?.draft.loadouts[side] ?? []).includes(id) &&
-    (after.augment?.draft.loadouts[side] ?? []).includes(id);
+function sideHasRevealedAugment(state: GameState, side: Side, id: AugmentId) {
+  return Boolean(
+    state.augment?.draft.rounds.some(
+      (round) => round.revealed && round.players[side].selectedId === id,
+    ),
+  );
+}
+
+function newlyRevealedAugment(before: GameState, after: GameState, side: Side, id: AugmentId) {
+  return !sideHasRevealedAugment(before, side, id) &&
+    sideHasRevealedAugment(after, side, id);
+}
+
+function protectedFlagBelongsToSide(
+  before: GameState,
+  action: PlayerAction,
+  side: Side,
+) {
+  if (action.type !== "move" && action.type !== "augment_move") return false;
+  const defender = before.pieces.find(
+    (piece) => piece.alive && samePosition(piece, action.to),
+  );
+  return defender?.side === side && originalPieceTypeForAudit(before, defender.id) === "flag";
 }
 
 function sideOwnsPassiveCombatMode(
@@ -230,12 +250,22 @@ function expectedPassiveTriggerDelta(
   }
 
   if (effect.kind === "objective" && effect.mode === "last_headquarters") {
-    const protectedFlags = events.filter(
-      (event) => event.result === "flag_protected" && recordCarriesAugment(event, id),
-    ).length;
+    let protectedFlags = 0;
+    if (
+      (action.type === "move" || action.type === "augment_move") &&
+      protectedFlagBelongsToSide(before, action, side)
+    ) {
+      protectedFlags = events.filter(
+        (event) =>
+          event.result === "flag_protected" &&
+          event.actor === otherSide(side) &&
+          samePosition(event.from, action.from) &&
+          samePosition(event.to, action.to),
+      ).length;
+    }
     const unlockedNow = !beforeRule?.headquartersUnlocked[side] &&
       afterRule.headquartersUnlocked[side];
-    const revealedAfterUnlock = newlyRevealedToLoadout(before, after, side, id) &&
+    const revealedAfterUnlock = newlyRevealedAugment(before, after, side, id) &&
       Boolean(beforeRule?.headquartersUnlocked[side]) &&
       afterRule.headquartersUnlocked[side];
     return protectedFlags + Number(unlockedNow || revealedAfterUnlock);
@@ -243,14 +273,14 @@ function expectedPassiveTriggerDelta(
 
   if (effect.kind === "combat" && effect.mode === "command_fusion") {
     return afterRule.generalFallen[side] &&
-        (!beforeRule?.generalFallen[side] || newlyRevealedToLoadout(before, after, side, id))
+        (!beforeRule?.generalFallen[side] || newlyRevealedAugment(before, after, side, id))
       ? 1
       : 0;
   }
 
   if (effect.kind === "combat" && effect.mode === "engineer_mutiny") {
     return afterRule.commanderFallen[side] &&
-        (!beforeRule?.commanderFallen[side] || newlyRevealedToLoadout(before, after, side, id))
+        (!beforeRule?.commanderFallen[side] || newlyRevealedAugment(before, after, side, id))
       ? 1
       : 0;
   }
@@ -629,6 +659,33 @@ export function verifyActionSettlement(
         );
         if (expectedDelta > 0) {
           verifyPassiveCombatPostconditions(before, after, action, side, id);
+          if (
+            definition.effect.kind === "objective" &&
+            definition.effect.mode === "last_headquarters" &&
+            (action.type === "move" || action.type === "augment_move") &&
+            protectedFlagBelongsToSide(before, action, side)
+          ) {
+            const movementEvent = newEvents.find(
+              (event) =>
+                event.result === "flag_protected" &&
+                event.actor === otherSide(side) &&
+                samePosition(event.from, action.from) &&
+                samePosition(event.to, action.to),
+            );
+            const replayMove = after.replay?.moves.at(-1);
+            expect(
+              movementEvent !== undefined &&
+                recordCarriesAugment(movementEvent, id) &&
+                replayMove?.result === "flag_protected" &&
+                replayMove.actor === otherSide(side) &&
+                samePosition(replayMove.from, action.from) &&
+                samePosition(replayMove.to, action.to) &&
+                recordCarriesAugment(replayMove, id),
+              "replayDivergences",
+              `${side}/${id} lacked complete flag-protection event and replay attribution.`,
+              { action, movementEvent, replayMove },
+            );
+          }
         }
         if (delta > 0) {
           passiveTriggerDeltas.set(triggerKey(side, id), delta);
@@ -1971,4 +2028,4 @@ if (process.argv[1] && resolve(process.argv[1]) === resolve(fileURLToPath(import
   });
 }
 
-export { coveragePairs, verifyProjectionPrivacy };
+export { coveragePairs, runGame as runRulesGame, verifyProjectionPrivacy };

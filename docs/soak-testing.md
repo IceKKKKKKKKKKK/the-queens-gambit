@@ -79,7 +79,7 @@ powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\soak\run.ps1 -Stop
 powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\soak\run.ps1 -Resume "outputs\soak\<run-id>"
 ```
 
-恢复会保留历史样本，但打开新的连续段。旧段时长不能补入新段的四小时门槛。当前 soak schema 为 2；manifest 还绑定算法 `product-stability-v18-v3-no-clock-zero-time-deterministic-ids-slot-stable-drafts-relocation-aware-public-rank-capacity-worlds-private-draft-fidelity`、引擎 `augment-duel-dark-v3:threefold-3:strategic-sha256-v4`、实际 balance 配置、63 组赛程和工作区指纹。v18 暗棋世界沿用玩家可见投影与公开闪电战/晋升元数据边界，在标准库存容量内抽取基础军阶并独立生成当前军阶；对手已锁但未共同公开的卡只进入合成内部 loadout，公开前 trigger 为 0 且 unused。每个 v3 世界都通过规则校验和重投影一致性检查，不读取权威 `baseTypes`、私有选牌或回放私密信息。三次重复摘要排除持续牌纯触发遥测计数，保留有次数权利的计数与全部现有规则状态。任何旧 schema、旧算法（包括 v13、v14、v15、v16、v17）、旧引擎（包括 `strategic-sha256-v3`）、旧工作负载或旧源码 checkpoint 都必须拒绝。
+恢复会保留历史样本，但打开新的连续段。旧段时长不能补入新段的四小时门槛。当前 soak schema 为 2；manifest 还绑定算法 `product-stability-v18-v3-no-clock-zero-time-deterministic-ids-slot-stable-drafts-relocation-aware-public-rank-capacity-worlds-private-draft-fidelity`、引擎 `augment-duel-dark-v3:threefold-3:strategic-sha256-v4:complete-augment-attribution-v1`、实际 balance 配置、63 组赛程和工作区指纹。v18 暗棋世界沿用玩家可见投影与公开闪电战/晋升元数据边界，在标准库存容量内抽取基础军阶并独立生成当前军阶；对手已锁但未共同公开的卡只进入合成内部 loadout，公开前 trigger 为 0 且 unused。每个 v3 世界都通过规则校验和重投影一致性检查，不读取权威 `baseTypes`、私有选牌或回放私密信息。三次重复摘要排除持续牌纯触发遥测计数，保留有次数权利的计数与全部现有规则状态；复合触发的事件/回放归因必须按主动、即时结算、后续自动效果完整保留。任何旧 schema、旧算法（包括 v13、v14、v15、v16、v17）、旧引擎（包括裸 `strategic-sha256-v4` 归因合同及更早版本）、旧工作负载或旧源码 checkpoint 都必须拒绝。
 
 ## 最终证据字段
 
@@ -96,6 +96,6 @@ powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\soak\run.ps1 -Resu
 
 ## 发布边界
 
-截至 2026-08-11 ET，最终代码回归为 268/268：HTML 9 项、集成服务器契约 4 项、TypeScript 252 项、真实集成 3 项；production build、全项目 ESLint、非增量 TypeScript 检查与差异检查均通过。三套真实集成各连续执行 4 轮，共 12/12 通过；每轮端口可重新绑定，结束后孤儿进程为 0。API 集成另在同一隔离工作区连续执行 64/64 次且零自动重试，全部返回 JSON、64 个动态端口均可重绑、D1 文件与 Vinext/Workerd 残留均为 0；独立双启动哨兵验证显式持久状态可在停服后读回并安全清理。
+截至 2026-08-11 ET，最终代码回归为 273/273：HTML 9 项、集成服务器契约 4 项、TypeScript 257 项、真实集成 3 项；production build、全项目 ESLint、非增量 TypeScript 检查与差异检查均通过。三套真实集成各连续执行 4 轮，共 12/12 通过；每轮端口可重新绑定，结束后孤儿进程为 0。API 集成另在同一隔离工作区连续执行 64/64 次且零自动重试，全部返回 JSON、64 个动态端口均可重绑、D1 文件与 Vinext/Workerd 残留均为 0；独立双启动哨兵验证显式持久状态可在停服后读回并安全清理。
 
 这不等于四小时 gate 已通过。每个发布候选都必须在准确的冻结提交上新跑正式持续测试，权威结果写入 `outputs/soak/<run-id>/final.json`；只有该结果满足本页全部条件后，才进入 Sites 部署与生产邮件身份、匹配、私人房、观战和复盘 QA。`outputs/` 是 Git 忽略的本机证据目录，不随源码提交；其他提交或旧工作负载的长跑不能转移为当前发布证据。
