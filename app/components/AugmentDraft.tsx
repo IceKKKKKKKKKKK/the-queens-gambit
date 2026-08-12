@@ -386,6 +386,14 @@ export default function AugmentDraft({
     event: KeyboardEvent<HTMLButtonElement>,
     currentIndex: number,
   ) => {
+    if (event.key === "Enter" || event.key === " ") {
+      event.preventDefault();
+      if (event.repeat) return;
+      const option = options[currentIndex];
+      if (!option || motionBusy) return;
+      requestPick(option.id, currentIndex);
+      return;
+    }
     const targetIndex = nextOptionIndex(event.key, currentIndex, options.length);
     if (targetIndex === null || !options[targetIndex] || motionBusy) return;
     event.preventDefault();

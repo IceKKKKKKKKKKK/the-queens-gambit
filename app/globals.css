@@ -2876,8 +2876,13 @@ body:has(.augment-draft-overlay) {
   .game-shell {
     width: 100%;
     margin-top: 18px;
-    grid-template-columns: 1fr;
+    grid-template-columns: minmax(0, 1fr);
     gap: 20px;
+  }
+
+  .board-column,
+  .side-panel {
+    min-width: 0;
   }
 
   .board-column {
@@ -2887,11 +2892,22 @@ body:has(.augment-draft-overlay) {
   }
 
   .setup-panel {
+    display: contents;
+  }
+
+  .setup-panel > * {
+    order: 3;
+    width: min(100%, 430px);
+    min-width: 0;
+    margin-inline: auto;
+  }
+
+  .setup-panel > .command-rails {
     order: 1;
   }
 
   .activity-panel {
-    order: 3;
+    order: 4;
     grid-column: auto;
   }
 

@@ -532,6 +532,10 @@ test("direct draft pick keeps keyboard navigation focus-only and removes confirm
 
   assert.match(draftSource, /onPick: \(augmentId: AugmentId\)/);
   assert.match(draftSource, /onSelect=\{\(\) => requestPick\(augmentId, index\)\}/);
+  assert.match(
+    draftSource,
+    /event\.key === "Enter" \|\| event\.key === " "[\s\S]*?event\.preventDefault\(\);[\s\S]*?event\.repeat[\s\S]*?requestPick\(option\.id, currentIndex\)/,
+  );
   assert.match(draftSource, /setFocusedIndex\(targetIndex\);[\s\S]*?optionRefs\.current\[targetIndex\]\?\.focus\(\)/);
   assert.match(draftSource, /const motionBusy = motion\.phase === "dealing"/);
   assert.match(draftSource, /disabled=\{locked \|\| pending \|\| refreshMotion !== null \|\| motionBusy\}/);
@@ -614,6 +618,10 @@ test("the mobile draft neither covers its third card nor exposes background cont
   assert.match(globalCss, /\.quiet-menu button\s*\{[\s\S]*?min-height:\s*44px/);
   assert.match(globalCss, /@media \(max-width: 780px\)[\s\S]*?\.station-hit\s*\{[\s\S]*?min-height:\s*44px/);
   assert.match(globalCss, /\.time-control-form button\s*\{[\s\S]*?min-height:\s*44px/);
+  assert.match(globalCss, /@media \(max-width: 780px\)[\s\S]*?grid-template-columns:\s*minmax\(0, 1fr\)/);
+  assert.match(globalCss, /\.board-column,\s*\n\s*\.side-panel\s*\{\s*min-width:\s*0/);
+  assert.match(globalCss, /\.setup-panel\s*\{\s*display:\s*contents/);
+  assert.match(globalCss, /\.setup-panel > \.command-rails\s*\{\s*order:\s*1/);
 });
 
 test("a pending extra move exposes a monochrome touch-safe pass control and clear rules", () => {
