@@ -6,6 +6,7 @@ import {
   AugmentRuleError,
   assertValidAugmentDraftState,
   beginSecondAugmentDraft,
+  chooseAndLockAugment,
   createAugmentDraftState,
   getAugmentDefinition,
   isSecondAugmentDraftDue,
@@ -393,6 +394,7 @@ export type PlayerAction =
   | { type: "move"; from: Position; to: Position }
   | { type: "set_time_control"; minutes: number }
   | { type: "augment_select"; augmentId: AugmentId }
+  | { type: "augment_pick"; augmentId: AugmentId }
   | { type: "augment_refresh"; slot: AugmentSlot }
   | { type: "augment_lock" }
   | { type: "augment_move"; augmentId: AugmentId; from: Position; to: Position }
@@ -4926,6 +4928,7 @@ export function applyPlayerAction(
 
   if (
     action.type === "augment_select" ||
+    action.type === "augment_pick" ||
     action.type === "augment_refresh" ||
     action.type === "augment_lock"
   ) {
@@ -4936,6 +4939,11 @@ export function applyPlayerAction(
     try {
       if (action.type === "augment_select") {
         augment.draft = selectAugment(augment.draft, side, action.augmentId);
+      } else if (action.type === "augment_pick") {
+        augment.draft = chooseAndLockAugment(augment.draft, side, action.augmentId);
+        if (state.phase === "augment_draft") {
+          finalizeSecondAugmentDraft(state, nowMs);
+        }
       } else if (action.type === "augment_refresh") {
         augment.draft = refreshAugmentOption(augment.draft, side, action.slot);
       } else {

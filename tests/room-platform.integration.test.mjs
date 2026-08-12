@@ -1246,6 +1246,155 @@ test("authenticated rooms, identity seats, spectator policy, provisioning, and s
   assert.equal(hiddenSpectator.body.snapshot.rulesVersion, "augment-duel-dark-v3");
   assert.equal(hiddenSpectator.body.snapshot.pieces.filter((piece) => piece.type).length, 0);
 
+  const atomicPickRoom = await postJson(`${origin}/api/rooms`, userA.headers, {
+    gameMode: "augment",
+    spectatorPolicy: "hidden",
+  });
+  assert.equal(atomicPickRoom.status, 201);
+  const atomicPickClaim = await postJson(
+    `${origin}/api/rooms/${atomicPickRoom.body.code}/claim`,
+    userB.headers,
+    {
+      inviteToken: atomicPickRoom.body.opponentInviteToken,
+      playerToken: randomBytes(32).toString("base64url"),
+    },
+  );
+  assert.equal(atomicPickClaim.status, 200);
+  const atomicPickVersion = atomicPickClaim.body.version;
+  const atomicPickOptions =
+    atomicPickRoom.body.snapshot.augment.draft.rounds[0].players.black.options;
+  const atomicWhiteOptions =
+    atomicPickClaim.body.snapshot.augment.draft.rounds[0].players.white.options;
+  const atomicPickIds = atomicPickOptions.slice(0, 2);
+  assert.equal(atomicPickIds.length, 2);
+  const concurrentAtomicPicks = await Promise.all([
+    postAction(origin, atomicPickRoom.body.code, userA.headers, atomicPickVersion, {
+      type: "augment_pick",
+      augmentId: atomicPickIds[0],
+    }),
+    postAction(origin, atomicPickRoom.body.code, userA.headers, atomicPickVersion, {
+      type: "augment_pick",
+      augmentId: atomicPickIds[1],
+    }),
+  ]);
+  assert.deepEqual(
+    concurrentAtomicPicks.map((response) => response.status).sort((a, b) => a - b),
+    [200, 409],
+  );
+  assert.equal(
+    concurrentAtomicPicks.find((response) => response.status === 409)?.body.error,
+    "VERSION_CONFLICT",
+  );
+  const atomicPickId = concurrentAtomicPicks.find((response) => response.status === 200)
+    ?.body.snapshot.augment.draft.rounds[0].players.black.selectedId;
+  assert.ok(atomicPickIds.includes(atomicPickId));
+  const afterAtomicPick = await requestJson(`${origin}/api/rooms/${atomicPickRoom.body.code}`, {
+    headers: userA.headers,
+  });
+  assert.equal(afterAtomicPick.body.version, atomicPickVersion + 1);
+  const atomicBlackDraft =
+    afterAtomicPick.body.snapshot.augment.draft.rounds[0].players.black;
+  assert.equal(atomicBlackDraft.selectedId, atomicPickId);
+  assert.equal(atomicBlackDraft.locked, true);
+  assert.deepEqual(afterAtomicPick.body.snapshot.augment.draft.loadouts.black, [atomicPickId]);
+
+  const invalidAtomicPickId = [
+    "spade-grand-maneuver",
+    "heart-rail-turn",
+    "club-forced-march",
+    "diamond-camp-transfer",
+  ].find((id) => !atomicPickOptions.includes(id) && !atomicWhiteOptions.includes(id));
+  assert.ok(invalidAtomicPickId);
+  const invalidAtomicPick = await postAction(
+    origin,
+    atomicPickRoom.body.code,
+    userB.headers,
+    afterAtomicPick.body.version,
+    { type: "augment_pick", augmentId: invalidAtomicPickId },
+  );
+  assert.equal(invalidAtomicPick.status, 422);
+  assert.equal(invalidAtomicPick.body.error, "AUGMENT_NOT_OFFERED");
+  const duplicateAtomicPick = await postAction(
+    origin,
+    atomicPickRoom.body.code,
+    userA.headers,
+    afterAtomicPick.body.version,
+    { type: "augment_pick", augmentId: atomicPickId },
+  );
+  assert.equal(duplicateAtomicPick.status, 422);
+  assert.equal(duplicateAtomicPick.body.error, "SELECTION_LOCKED");
+  const afterRejectedAtomicPicks = await requestJson(
+    `${origin}/api/rooms/${atomicPickRoom.body.code}`,
+    { headers: userA.headers },
+  );
+  assert.equal(afterRejectedAtomicPicks.body.version, afterAtomicPick.body.version);
+
+  const dualAtomicRoom = await postJson(`${origin}/api/rooms`, userA.headers, {
+    gameMode: "augment",
+    spectatorPolicy: "hidden",
+  });
+  assert.equal(dualAtomicRoom.status, 201);
+  const dualAtomicClaim = await postJson(
+    `${origin}/api/rooms/${dualAtomicRoom.body.code}/claim`,
+    userB.headers,
+    {
+      inviteToken: dualAtomicRoom.body.opponentInviteToken,
+      playerToken: randomBytes(32).toString("base64url"),
+    },
+  );
+  assert.equal(dualAtomicClaim.status, 200);
+  const dualVersion = dualAtomicClaim.body.version;
+  const dualSelections = {
+    black: dualAtomicRoom.body.snapshot.augment.draft.rounds[0].players.black.options[0],
+    white: dualAtomicClaim.body.snapshot.augment.draft.rounds[0].players.white.options[0],
+  };
+  const dualConcurrent = await Promise.all([
+    postAction(origin, dualAtomicRoom.body.code, userA.headers, dualVersion, {
+      type: "augment_pick",
+      augmentId: dualSelections.black,
+    }),
+    postAction(origin, dualAtomicRoom.body.code, userB.headers, dualVersion, {
+      type: "augment_pick",
+      augmentId: dualSelections.white,
+    }),
+  ]);
+  assert.deepEqual(
+    dualConcurrent.map((response) => response.status).sort((a, b) => a - b),
+    [200, 409],
+  );
+  const dualWinner = dualConcurrent.find((response) => response.status === 200);
+  const dualConflict = dualConcurrent.find((response) => response.status === 409);
+  assert.ok(dualWinner);
+  assert.equal(dualConflict?.body.error, "VERSION_CONFLICT");
+  const conflictSide = dualConcurrent[0].status === 409 ? "black" : "white";
+  const conflictHeaders = conflictSide === "black" ? userA.headers : userB.headers;
+  const afterDualConflict = await requestJson(`${origin}/api/rooms/${dualAtomicRoom.body.code}`, {
+    headers: conflictHeaders,
+  });
+  assert.equal(afterDualConflict.body.version, dualVersion + 1);
+  const dualRetry = await postAction(
+    origin,
+    dualAtomicRoom.body.code,
+    conflictHeaders,
+    afterDualConflict.body.version,
+    { type: "augment_pick", augmentId: dualSelections[conflictSide] },
+  );
+  assert.equal(dualRetry.status, 200);
+  const [dualBlackView, dualWhiteView] = await Promise.all([
+    requestJson(`${origin}/api/rooms/${dualAtomicRoom.body.code}`, { headers: userA.headers }),
+    requestJson(`${origin}/api/rooms/${dualAtomicRoom.body.code}`, { headers: userB.headers }),
+  ]);
+  assert.equal(dualBlackView.body.snapshot.augment.draft.rounds[0].players.black.locked, true);
+  assert.equal(
+    dualBlackView.body.snapshot.augment.draft.rounds[0].players.black.selectedId,
+    dualSelections.black,
+  );
+  assert.equal(dualWhiteView.body.snapshot.augment.draft.rounds[0].players.white.locked, true);
+  assert.equal(
+    dualWhiteView.body.snapshot.augment.draft.rounds[0].players.white.selectedId,
+    dualSelections.white,
+  );
+
   async function prepareSecondDraftRoom() {
     const created = await postJson(`${origin}/api/rooms`, userA.headers, {
       gameMode: "augment",
@@ -1321,7 +1470,7 @@ test("authenticated rooms, identity seats, spectator policy, provisioning, and s
     postDeadlineCode,
     userA.headers,
     postDeadline.version,
-    { type: "augment_select", augmentId: postDeadline.attemptedId },
+    { type: "augment_pick", augmentId: postDeadline.attemptedId },
   );
   assert.equal(staleSelection.status, 409);
   assert.equal(staleSelection.body.error, "VERSION_CONFLICT");

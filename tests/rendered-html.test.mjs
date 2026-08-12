@@ -31,9 +31,9 @@ test("server-renders the authenticated game entrance", async () => {
   assert.equal(response.status, 200);
   assert.match(response.headers.get("content-type") ?? "", /^text\/html\b/i);
   const html = await response.text();
-  assert.match(html, /<title>军令 · 在线暗军棋<\/title>/i);
+  assert.match(html, /<title>军令 · 陆战棋<\/title>/i);
   assert.match(html, /使用邮箱登录/);
-  assert.match(html, /经典规则 · 军令强化/);
+  assert.match(html, /经典 · 狂野 · 对弈/);
   assert.doesNotMatch(html, /把战场|PRIVATE ROOMS|codex-preview|react-loading-skeleton/i);
 });
 

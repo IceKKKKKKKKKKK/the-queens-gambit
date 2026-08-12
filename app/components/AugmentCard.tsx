@@ -25,12 +25,16 @@ export interface AugmentCardProps {
   disabled?: boolean;
   statusLabel?: string;
   ownerLabel?: string;
+  interactionLabel?: string;
   onSelect?: () => void;
   onKeyDown?: (event: KeyboardEvent<HTMLButtonElement>) => void;
   buttonRef?: Ref<HTMLButtonElement>;
   tabIndex?: number;
   role?: "radio";
   ariaChecked?: boolean;
+  ariaControls?: string;
+  ariaExpanded?: boolean;
+  ariaHasPopup?: "dialog";
   actionCard?: boolean;
   burnState?: AugmentCardBurnState;
 }
@@ -93,7 +97,7 @@ function cardContents(
         <span className={styles.stateBadge}>{status}</span>
         <span className={styles.hiddenFace} aria-hidden="true">
           <span className={styles.hiddenMark}>Q</span>
-          <span className={styles.hiddenText}>强化待揭示</span>
+          <span className={styles.hiddenText}>军令待揭示</span>
         </span>
       </>
     );
@@ -129,7 +133,7 @@ function cardContents(
           <span>{augment.timing}</span>
           <span>{usageLabel}</span>
         </span>
-        <span className={styles.tierLabel}>{suitLabel}强化</span>
+        <span className={styles.tierLabel}>{suitLabel}军令</span>
       </span>
       <span className={joinClasses(styles.corner, styles.cornerBottom)} aria-hidden="true">
         <span>{augment.suitSymbol}</span>
@@ -146,12 +150,16 @@ export default function AugmentCard({
   disabled = false,
   statusLabel,
   ownerLabel,
+  interactionLabel,
   onSelect,
   onKeyDown,
   buttonRef,
   tabIndex,
   role,
   ariaChecked,
+  ariaControls,
+  ariaExpanded,
+  ariaHasPopup,
   actionCard = false,
   burnState = "none",
 }: AugmentCardProps) {
@@ -159,8 +167,8 @@ export default function AugmentCard({
   const status = statusLabel ?? STATE_LABELS[hidden ? "hidden" : state];
   const suitLabel = augment ? AUGMENT_SUIT_META[augment.suit].label : "未知花色";
   const accessibleName = hidden
-    ? `${ownerLabel ? `${ownerLabel}，` : ""}强化尚未公开`
-    : `${ownerLabel ? `${ownerLabel}，` : ""}${augment.name}，${suitLabel}，${status}。${augment.description}，${augment.timing}，${augment.activation === "passive" ? "持续生效" : `可触发 ${augment.charges} 次`}`;
+    ? `${ownerLabel ? `${ownerLabel}，` : ""}军令尚未公开`
+    : `${ownerLabel ? `${ownerLabel}，` : ""}${augment.name}，${suitLabel}，${status}。${augment.description}，${augment.timing}，${augment.activation === "passive" ? "持续生效" : `可触发 ${augment.charges} 次`}${interactionLabel ? `。${interactionLabel}` : ""}`;
   const className = joinClasses(
     styles.card,
     compact && styles.cardCompact,
@@ -191,6 +199,9 @@ export default function AugmentCard({
         role={role}
         aria-checked={role === "radio" ? ariaChecked : undefined}
         aria-pressed={role ? undefined : state === "selected"}
+        aria-controls={ariaControls}
+        aria-expanded={ariaExpanded}
+        aria-haspopup={ariaHasPopup}
         aria-label={accessibleName}
       >
         {cardLayers(augment, hidden, status, burnState)}

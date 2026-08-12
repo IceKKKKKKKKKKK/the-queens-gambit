@@ -196,6 +196,14 @@ test("platform APIs auto-register accounts and support friends, presence, and sa
   assert.equal(invalidRename.status, 400);
   assert.equal(invalidRename.body.error, "INVALID_HANDLE");
 
+  const duplicateRename = await requestJson(`${origin}/api/account`, {
+    method: "PATCH",
+    headers: { ...users[1].headers, "Content-Type": "application/json" },
+    body: JSON.stringify({ handle: users[0].handle }),
+  });
+  assert.equal(duplicateRename.status, 409);
+  assert.equal(duplicateRename.body.error, "HANDLE_TAKEN");
+
   const sent = await postJson(`${origin}/api/friends/requests`, users[0].headers, {
     handle: users[1].handle,
   });

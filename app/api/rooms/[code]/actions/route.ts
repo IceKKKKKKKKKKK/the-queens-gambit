@@ -95,6 +95,13 @@ function parseAction(value: unknown): PlayerAction | null {
     return { type: "augment_select", augmentId: action.augmentId };
   }
   if (
+    action.type === "augment_pick" &&
+    hasOnlyKeys(action, ["type", "augmentId"]) &&
+    isAugmentId(action.augmentId)
+  ) {
+    return { type: "augment_pick", augmentId: action.augmentId };
+  }
+  if (
     action.type === "augment_refresh" &&
     (action.slot === 0 || action.slot === 1 || action.slot === 2)
   ) {

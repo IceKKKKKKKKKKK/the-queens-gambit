@@ -4,8 +4,11 @@ import test from "node:test";
 
 import {
   AUGMENT_DRAFT_MOTION_MS,
+  AUGMENT_REFRESH_MOTION_MS,
+  augmentRefreshPhaseAfterAsh,
   augmentDraftPhaseDuration,
   canInteractWithAugment,
+  didAugmentRefreshReplaceCard,
   reconcileActiveAugmentAfterProjection,
   reduceAugmentDraftMotion,
   shouldAnimateAugmentBurn,
@@ -32,6 +35,14 @@ import {
   type SessionStorageLike,
 } from "../app/components/pendingRoomInvite.ts";
 import { roomEnvelopeFromTransport } from "../app/components/roomEnvelope.ts";
+import {
+  INITIAL_LOBBY_SCENE,
+  markLobbyEntered,
+  playerHandleErrorMessage,
+  recentWinRateFor,
+  reduceLobbyScene,
+  shouldShowLobbyEntry,
+} from "../app/components/lobbyScene.ts";
 import { getAugmentDefinition } from "../lib/augments.ts";
 import {
   movementAnimationForTransition,
@@ -54,6 +65,47 @@ class MemorySessionStorage implements SessionStorageLike {
     this.values.delete(key);
   }
 }
+
+test("the lobby ceremony runs once per session and direct room links bypass it", () => {
+  const storage = new MemorySessionStorage();
+  const key = "junqi:lobby-entered:test";
+  assert.equal(shouldShowLobbyEntry(storage, key, false), true);
+  storage.setItem(key, "1");
+  assert.equal(shouldShowLobbyEntry(storage, key, false), false);
+
+  const directStorage = new MemorySessionStorage();
+  assert.equal(shouldShowLobbyEntry(directStorage, key, true), false);
+  assert.equal(directStorage.getItem(key), "1");
+  assert.equal(shouldShowLobbyEntry(null, key, true), false);
+  const acceptedRoomStorage = new MemorySessionStorage();
+  markLobbyEntered(acceptedRoomStorage, key);
+  assert.equal(shouldShowLobbyEntry(acceptedRoomStorage, key, false), false);
+  const gameSource = readFileSync(new URL("../app/GameApp.tsx", import.meta.url), "utf8");
+  assert.match(gameSource, /if \(hasRoom\) markLobbyEntered\(browserSessionStorage\(\), LOBBY_ENTRY_SESSION_KEY\)/);
+  assert.match(gameSource, /function acceptRoom[\s\S]*?markLobbyEntered\(browserSessionStorage\(\), LOBBY_ENTRY_SESSION_KEY\)/);
+});
+
+test("the personal scene derives recent-ten results and safe handle errors", () => {
+  assert.equal(
+    recentWinRateFor(["win", "loss", "draw", "win", "win", "loss", "win", "loss", "win", "loss", "win"]),
+    0.5,
+  );
+  assert.equal(recentWinRateFor([]), null);
+  assert.equal(playerHandleErrorMessage("HANDLE_TAKEN"), "这个玩家 ID 已被使用。");
+  assert.equal(playerHandleErrorMessage("INVALID_HANDLE"), "这个玩家 ID 不符合规则。");
+  assert.equal(playerHandleErrorMessage("NETWORK"), "暂时无法更新玩家 ID，请稍后重试。");
+});
+
+test("lobby scenes return through a cancellable reducer while preserving focus provenance", () => {
+  const entry = reduceLobbyScene(INITIAL_LOBBY_SCENE, { type: "INITIALIZE", showEntry: true });
+  const opening = reduceLobbyScene(entry, { type: "ENTER" });
+  const hub = reduceLobbyScene(opening, { type: "ENTRY_FINISHED" });
+  const laneOpening = reduceLobbyScene(hub, { type: "OPEN_LANE", lane: "wild" });
+  const interrupted = reduceLobbyScene(laneOpening, { type: "CLOSE_LANE" });
+  const returned = reduceLobbyScene(interrupted, { type: "LANE_CLOSED" });
+  assert.deepEqual(returned, { phase: "hub", lane: null, lastLane: "wild" });
+  assert.equal(reduceLobbyScene(returned, { type: "LANE_OPENED" }), returned);
+});
 
 function projectedGameFixture(
   pieces: ProjectedGame["pieces"],
@@ -195,6 +247,7 @@ test("GameApp accepts the complete create and claim room envelopes immediately",
 
 test("threefold repetition is presented as a public poker-style warning without private evidence", () => {
   const gameSource = readFileSync(new URL("../app/GameApp.tsx", import.meta.url), "utf8");
+  const lobbySource = readFileSync(new URL("../app/components/LobbyExperience.tsx", import.meta.url), "utf8");
   const css = readFileSync(new URL("../app/globals.css", import.meta.url), "utf8");
   const platformSource = readFileSync(new URL("../db/platform.ts", import.meta.url), "utf8");
 
@@ -205,7 +258,7 @@ test("threefold repetition is presented as a public poker-style warning without 
   assert.match(gameSource, /className="repetition-notice"[\s\S]*?重复局面[\s\S]*?2\/3/);
   assert.match(gameSource, /本局和棋 · \$\{drawReasonText\(snapshot\.drawReason\)\}/);
   assert.match(gameSource, /同一局面第三次出现 · 本局和棋/);
-  assert.match(gameSource, /match\.endedReason === "threefold_repetition"[\s\S]*?和 · 重复局面/);
+  assert.match(lobbySource, /match\.endedReason === "threefold_repetition"[\s\S]*?重复局面/);
   assert.match(css, /\.repetition-notice\s*\{[\s\S]*?border:\s*1px solid var\(--black\)/);
   assert.doesNotMatch(gameSource, /repetitionTracker|lastCountedDigest|\.salt\b|\.counts\b/);
   assert.match(platformSource, /reason === "draw" \|\| reason === "threefold_repetition"/);
@@ -312,19 +365,27 @@ test("a 409 resync treats an already-locked requested round as idempotent succes
     {
       number: 1,
       players: {
-        black: { locked: true },
-        white: { locked: true },
+        black: { locked: true, selectedId: "spade-grand-maneuver" as const },
+        white: { locked: true, selectedId: "spade-deep-strike" as const },
       },
     },
     {
       number: 2,
       players: {
-        black: { locked: true },
+        black: { locked: true, selectedId: "heart-rail-turn" as const },
         white: { locked: false },
       },
     },
   ];
   assert.equal(wasAugmentLockConfirmedAfterConflict("black", 2, rounds), true);
+  assert.equal(
+    wasAugmentLockConfirmedAfterConflict("black", 2, rounds, "heart-rail-turn"),
+    true,
+  );
+  assert.equal(
+    wasAugmentLockConfirmedAfterConflict("black", 2, rounds, "heart-targeted-recon"),
+    false,
+  );
   assert.equal(wasAugmentLockConfirmedAfterConflict("white", 2, rounds), false);
   assert.equal(wasAugmentLockConfirmedAfterConflict("black", 3, rounds), false);
   assert.equal(wasAugmentLockConfirmedAfterConflict("spectator", 2, rounds), false);
@@ -333,15 +394,16 @@ test("a 409 resync treats an already-locked requested round as idempotent succes
 
 test("the action conflict path wires the original draft round into its idempotency check", () => {
   const gameSource = readFileSync(new URL("../app/GameApp.tsx", import.meta.url), "utf8");
-  assert.match(gameSource, /const requestedAugmentRound = action\.type === "augment_lock"/);
+  assert.match(gameSource, /const requestedAugmentRound = action\.type === "augment_lock" \|\| action\.type === "augment_pick"/);
   assert.match(gameSource, /wasAugmentLockConfirmedAfterConflict\([\s\S]*?requestedAugmentRound/);
   assert.match(
     gameSource,
-    /强化局以牌面为准：「偷梁换柱」可将军旗放在己方底线任意站点，「深呼吸」可将地雷放在己方后三排/,
+    /狂野局以牌面为准：「偷梁换柱」可将军旗放在己方底线任意站点，「深呼吸」可将地雷放在己方后三排/,
   );
   assert.doesNotMatch(gameSource, /军旗只能在大本营；地雷只能在最后两排/);
-  assert.doesNotMatch(gameSource, /两轮强化，(?:20|50) 张牌池/);
-  assert.match(gameSource, /两轮强化，扩展牌池/);
+  assert.doesNotMatch(gameSource, /(?:20|50) 张牌池/);
+  const lobbySource = readFileSync(new URL("../app/components/LobbyExperience.tsx", import.meta.url), "utf8");
+  assert.match(lobbySource, /七十张军令/);
 });
 
 test("an authenticated room keeps presence fresh for friend spectating", () => {
@@ -462,6 +524,75 @@ test("animation DOM hooks and visual invariants remain inspectable", () => {
   assert.match(draftSource, /clearTimeout/);
   assert.match(draftSource, /clearInterval/);
   assert.match(draftSource, /removeEventListener\("change"/);
+});
+
+test("direct draft pick keeps keyboard navigation focus-only and removes confirmation", () => {
+  const draftSource = readFileSync(new URL("../app/components/AugmentDraft.tsx", import.meta.url), "utf8");
+  const css = readFileSync(new URL("../app/components/Augments.module.css", import.meta.url), "utf8");
+
+  assert.match(draftSource, /onPick: \(augmentId: AugmentId\)/);
+  assert.match(draftSource, /onSelect=\{\(\) => requestPick\(augmentId, index\)\}/);
+  assert.match(draftSource, /setFocusedIndex\(targetIndex\);[\s\S]*?optionRefs\.current\[targetIndex\]\?\.focus\(\)/);
+  assert.match(draftSource, /const motionBusy = motion\.phase === "dealing"/);
+  assert.match(draftSource, /disabled=\{locked \|\| pending \|\| refreshMotion !== null \|\| motionBusy\}/);
+  assert.match(draftSource, /refreshUsed \|\|[\s\S]*?motionBusy/);
+  assert.doesNotMatch(draftSource, /onConfirm|confirmButton|锁定强化/);
+  assert.match(css, /\.card\s*\{[\s\S]*?aspect-ratio:\s*5\s*\/\s*8/);
+  assert.match(css, /@media \(max-width: 720px\)[\s\S]*?grid-auto-flow:\s*column[\s\S]*?scroll-snap-type:\s*x mandatory/);
+});
+
+test("refresh replacement uses ash, flicker, rejection recovery, and reduced motion", () => {
+  const draftSource = readFileSync(new URL("../app/components/AugmentDraft.tsx", import.meta.url), "utf8");
+  const css = readFileSync(new URL("../app/components/Augments.module.css", import.meta.url), "utf8");
+
+  assert.equal(AUGMENT_REFRESH_MOTION_MS.ash, 520);
+  assert.equal(AUGMENT_REFRESH_MOTION_MS.reveal, 280);
+  assert.equal(didAugmentRefreshReplaceCard("spade-grand-maneuver", "heart-steady-advance"), true);
+  assert.equal(didAugmentRefreshReplaceCard("spade-grand-maneuver", "spade-grand-maneuver"), false);
+  assert.equal(didAugmentRefreshReplaceCard("spade-grand-maneuver", null), false);
+  assert.equal(
+    augmentRefreshPhaseAfterAsh("spade-grand-maneuver", "heart-steady-advance", false),
+    "revealing",
+  );
+  assert.equal(
+    augmentRefreshPhaseAfterAsh("spade-grand-maneuver", "spade-grand-maneuver", false),
+    "awaiting-replacement",
+  );
+  assert.equal(
+    augmentRefreshPhaseAfterAsh("spade-grand-maneuver", "heart-steady-advance", true),
+    null,
+  );
+  assert.match(draftSource, /rejectRefresh/);
+  assert.match(draftSource, /phase: "restoring"/);
+  assert.match(draftSource, /data-refresh-phase=/);
+  assert.match(draftSource, /outgoing: AugmentDefinition/);
+  assert.match(draftSource, /slotRefresh\.phase !== "revealing"[\s\S]*?slotRefresh\.outgoing/);
+  assert.match(
+    draftSource,
+    /window\.setTimeout\(\(\) => \{[\s\S]*?augmentRefreshPhaseAfterAsh\(outgoing\.id, incomingId, false\)[\s\S]*?AUGMENT_REFRESH_MOTION_MS\.ash/,
+  );
+  assert.match(css, /refresh-card-ash/);
+  assert.match(css, /refresh-card-flicker/);
+  assert.doesNotMatch(css, /clip-path|filter/);
+  assert.match(css, /\.draft\s*\{[\s\S]*?--augment-paper:\s*var\(--paper, #fffdf7\)/);
+  assert.match(css, /\.rail\s*\{[\s\S]*?--augment-paper:\s*var\(--paper, #fffdf7\)/);
+  assert.match(css, /\.inspectOverlay\s*\{[\s\S]*?--augment-paper:\s*var\(--paper, #fffdf7\)/);
+});
+
+test("rail inspection is private, modal, focus-contained, and explicitly activated", () => {
+  const railSource = readFileSync(new URL("../app/components/AugmentRail.tsx", import.meta.url), "utf8");
+  const dialogSource = readFileSync(new URL("../app/components/AugmentInspectDialog.tsx", import.meta.url), "utf8");
+
+  assert.match(railSource, /inspectable = Boolean\(augmentId && presentation\.augment && !presentation\.hidden\)/);
+  assert.match(railSource, /data-augment-preview="true"/);
+  assert.match(railSource, /<AugmentInspectDialog/);
+  assert.doesNotMatch(railSource, /onSelect=\{[^}]*onActivate/);
+  assert.match(dialogSource, /role="dialog"/);
+  assert.match(dialogSource, /aria-modal="true"/);
+  assert.match(dialogSource, /event\.key === "Escape"/);
+  assert.match(dialogSource, /element\.setAttribute\("inert", ""\)/);
+  assert.match(dialogSource, /returnFocusRef\.current/);
+  assert.match(dialogSource, /pending \? "行动处理中…" : "发动军令"/);
 });
 
 test("the mobile draft neither covers its third card nor exposes background controls", () => {

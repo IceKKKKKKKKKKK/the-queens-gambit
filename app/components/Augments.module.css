@@ -5,7 +5,8 @@
   display: block;
   width: 100%;
   min-width: 0;
-  min-height: 248px;
+  min-height: 0;
+  aspect-ratio: 5 / 8;
   padding: 0;
   border: 0;
   border-radius: 8px;
@@ -56,10 +57,7 @@ button.card:disabled {
   backface-visibility: hidden;
   -webkit-backface-visibility: hidden;
   transform: translateZ(0.1px);
-  transition:
-    border-color 160ms ease,
-    background 160ms ease,
-    opacity 180ms ease;
+  transition: opacity 180ms ease;
 }
 
 .cardFace::after {
@@ -232,14 +230,15 @@ button.card:hover:not(:disabled) .cardFront {
   padding: 3px 5px;
   border: 1px solid currentColor;
   background: var(--augment-paper);
-  content: "点击发动";
+  content: "可发动";
   font-size: 7px;
   font-weight: 800;
   letter-spacing: 0.08em;
 }
 
 .cardCompact {
-  min-height: 132px;
+  min-height: 0;
+  aspect-ratio: 5 / 8;
   border-radius: 5px;
 }
 
@@ -474,6 +473,7 @@ button.card:hover:not(:disabled) .cardFront {
 .cardBurnt .burnLabel { opacity: 1; }
 
 .draft {
+  --augment-paper: var(--paper, #fffdf7);
   --augment-deal-ms: 560ms;
   --augment-deal-stagger-ms: 110ms;
   --augment-fade-ms: 260ms;
@@ -481,8 +481,11 @@ button.card:hover:not(:disabled) .cardFront {
   --augment-turn-ms: 1360ms;
   --augment-dock-ms: 640ms;
   --augment-recover-ms: 320ms;
+  --augment-refresh-ash-ms: 520ms;
+  --augment-refresh-reveal-ms: 280ms;
+  --augment-refresh-restore-ms: 180ms;
   display: grid;
-  width: min(980px, 100%);
+  width: min(860px, 100%);
   gap: 20px;
 }
 
@@ -575,7 +578,8 @@ button.card:hover:not(:disabled) .cardFront {
 .draftOptions {
   position: relative;
   display: grid;
-  grid-template-columns: repeat(3, minmax(0, 1fr));
+  grid-template-columns: repeat(3, minmax(0, 240px));
+  justify-content: center;
   gap: 14px;
   margin: 0;
   padding: 0;
@@ -594,9 +598,73 @@ button.card:hover:not(:disabled) .cardFront {
   transform-origin: center;
   transition:
     transform var(--augment-center-ms) cubic-bezier(0.2, 0.82, 0.2, 1),
-    opacity var(--augment-fade-ms) ease,
-    filter var(--augment-fade-ms) ease;
+    opacity var(--augment-fade-ms) ease;
   will-change: transform, opacity;
+  scroll-snap-align: center;
+  scroll-snap-stop: always;
+}
+
+.refreshAsh {
+  position: absolute;
+  z-index: 10;
+  top: 0;
+  left: 0;
+  display: block;
+  width: 100%;
+  aspect-ratio: 5 / 8;
+  overflow: hidden;
+  border-radius: 8px;
+  opacity: 0;
+  pointer-events: none;
+}
+
+.refreshAsh::before {
+  position: absolute;
+  inset: 0;
+  background:
+    repeating-linear-gradient(145deg, transparent 0 17px, rgb(23 20 15 / 16%) 18px 19px),
+    linear-gradient(155deg, transparent 0 54%, rgb(23 20 15 / 66%) 55% 57%, transparent 58%);
+  content: "";
+}
+
+.refreshAsh span {
+  position: absolute;
+  right: 12%;
+  bottom: 10%;
+  width: 6px;
+  height: 6px;
+  border: 1px solid #5f5b54;
+  background: #f9f4e8;
+  transform: rotate(45deg);
+}
+
+.refreshAsh span:nth-child(2) { right: 28%; bottom: 5%; width: 4px; height: 4px; }
+.refreshAsh span:nth-child(3) { right: 7%; bottom: 28%; width: 3px; height: 3px; }
+
+.draftOption[data-refresh-phase="burning"] .cardFront {
+  animation: refresh-card-ash var(--augment-refresh-ash-ms) cubic-bezier(0.55, 0, 0.45, 1) both;
+}
+
+.draftOption[data-refresh-phase="burning"] .refreshAsh {
+  animation: refresh-ash-rise var(--augment-refresh-ash-ms) ease-out both;
+}
+
+.draftOption[data-refresh-phase="burning"] .refreshAsh span {
+  animation: ember-rise calc(var(--augment-refresh-ash-ms) + 160ms) ease-out both;
+}
+
+.draftOption[data-refresh-phase="awaiting-replacement"] .card { opacity: 0.08; }
+
+.draftOption[data-refresh-phase="awaiting-replacement"] .refreshAsh {
+  opacity: 0.34;
+}
+
+.draftOption[data-refresh-phase="revealing"] .card {
+  animation: refresh-card-flicker var(--augment-refresh-reveal-ms) steps(2, end) both;
+}
+
+.draftOption[data-refresh-phase="restoring"] .card {
+  animation: refresh-card-restore var(--augment-refresh-restore-ms) ease-out both;
 }
 
 /* The completed deal animation must release `transform` before the lock
@@ -613,7 +681,6 @@ button.card:hover:not(:disabled) .cardFront {
 .draft[data-animation-phase="docking"] .draftOption[data-selected="false"],
 .draft[data-animation-phase="settled"] .draftOption[data-selected="false"] {
   opacity: 0;
-  filter: blur(2px);
   pointer-events: none;
   transform: translateY(22px) scale(0.94);
 }
@@ -650,7 +717,6 @@ button.card:hover:not(:disabled) .cardFront {
 
 .draft[data-animation-phase="recovering"] .draftOption {
   opacity: 1;
-  filter: none;
   transform: none;
   transition-duration: var(--augment-recover-ms);
 }
@@ -670,8 +736,7 @@ button.card:hover:not(:disabled) .cardFront {
 }
 
 .refreshButton,
-.resignButton,
-.confirmButton {
+.resignButton {
   min-height: 44px;
   border: 1px solid #17140f;
   border-radius: 4px;
@@ -680,7 +745,7 @@ button.card:hover:not(:disabled) .cardFront {
   cursor: pointer;
   font-size: 12px;
   font-weight: 700;
-  transition: background 150ms ease, color 150ms ease, opacity 150ms ease;
+  transition: opacity 150ms ease;
   -webkit-tap-highlight-color: transparent;
 }
 
@@ -693,15 +758,13 @@ button.card:hover:not(:disabled) .cardFront {
 }
 
 .refreshButton:focus-visible,
-.resignButton:focus-visible,
-.confirmButton:focus-visible {
+.resignButton:focus-visible {
   outline: 3px solid #111111;
   outline-offset: 3px;
 }
 
 .refreshButton:disabled,
-.resignButton:disabled,
-.confirmButton:disabled {
+.resignButton:disabled {
   cursor: not-allowed;
   opacity: 0.36;
 }
@@ -726,18 +789,10 @@ button.card:hover:not(:disabled) .cardFront {
   line-height: 1.45;
 }
 
-.confirmButton {
-  min-width: 156px;
-  padding-inline: 22px;
-  background: #111111;
-  color: #ffffff;
-}
-
-.confirmButton:hover:not(:disabled) { background: #333333; }
-
 .resignButton { min-width: 72px; padding-inline: 16px; }
 
 .rail {
+  --augment-paper: var(--paper, #fffdf7);
   display: grid;
   min-width: 0;
   gap: 8px;
@@ -779,7 +834,148 @@ button.card:hover:not(:disabled) .cardFront {
 }
 
 .railCardsSingle { grid-template-columns: minmax(86px, 156px); }
-.railCardItem { min-width: 0; }
+.railCardItem { position: relative; min-width: 0; }
+
+.railPreview {
+  position: fixed;
+  z-index: 90;
+  top: 50%;
+  left: 50%;
+  display: grid;
+  width: min(250px, calc(100vw - 48px));
+  gap: 7px;
+  padding: 10px;
+  border: 3px double #17140f;
+  background: var(--augment-paper);
+  box-shadow: 0 24px 70px rgb(23 20 15 / 24%);
+  opacity: 0;
+  pointer-events: none;
+  transform: translate(-50%, -48%) scale(0.97);
+  animation: inspect-preview-in 220ms ease-out forwards;
+}
+
+.railPreviewLabel {
+  margin: 0;
+  font-size: 9px;
+  font-weight: 800;
+  letter-spacing: 0.14em;
+  text-align: center;
+}
+
+.inspectOverlay {
+  --augment-paper: var(--paper, #fffdf7);
+  position: fixed;
+  z-index: 1000;
+  inset: 0;
+  display: grid;
+  place-items: center;
+  padding: 24px;
+  overflow: auto;
+  background: rgb(23 20 15 / 64%);
+  animation: inspect-overlay-in 220ms ease both;
+}
+
+.inspectDialog {
+  display: grid;
+  width: min(760px, 100%);
+  max-height: calc(100dvh - 48px);
+  gap: 14px;
+  padding: 18px;
+  overflow: auto;
+  border: 4px double #17140f;
+  border-radius: 6px;
+  background:
+    repeating-linear-gradient(0deg, transparent 0 31px, rgb(23 20 15 / 3%) 31px 32px),
+    var(--augment-paper);
+  color: #17140f;
+  box-shadow: 0 28px 90px rgb(0 0 0 / 42%);
+  animation: inspect-dialog-in 220ms cubic-bezier(0.22, 0.78, 0.18, 1) both;
+}
+
+.inspectHeader,
+.inspectActions {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.inspectEyebrow,
+.inspectTitle,
+.inspectDescription,
+.inspectActivationNote { margin: 0; }
+
+.inspectEyebrow {
+  font-size: 9px;
+  font-weight: 800;
+  letter-spacing: 0.16em;
+}
+
+.inspectTitle {
+  margin-top: 3px;
+  font-family: "Iowan Old Style", Baskerville, "Songti SC", "STSong", serif;
+  font-size: clamp(25px, 5vw, 40px);
+  font-weight: 560;
+  letter-spacing: -0.045em;
+  line-height: 1;
+}
+
+.inspectClose {
+  display: grid;
+  width: 44px;
+  height: 44px;
+  flex: none;
+  place-items: center;
+  border: 1px solid #17140f;
+  border-radius: 50%;
+  background: var(--augment-paper);
+  color: #17140f;
+  cursor: pointer;
+  font: 28px/1 Baskerville, serif;
+}
+
+.inspectCard {
+  width: min(250px, 72vw);
+  justify-self: center;
+}
+
+.inspectDescription {
+  max-width: 58ch;
+  justify-self: center;
+  color: rgb(23 20 15 / 72%);
+  font-size: 12px;
+  line-height: 1.55;
+  text-align: center;
+}
+
+.inspectSecondary,
+.inspectActivate {
+  min-height: 46px;
+  padding: 10px 18px;
+  border: 1px solid #17140f;
+  border-radius: 4px;
+  background: var(--augment-paper);
+  color: #17140f;
+  cursor: pointer;
+  font-size: 12px;
+  font-weight: 800;
+}
+
+.inspectActivate { margin-left: auto; background: #17140f; color: #fffdf7; }
+.inspectActivate:disabled { cursor: not-allowed; opacity: 0.38; }
+
+.inspectClose:focus-visible,
+.inspectSecondary:focus-visible,
+.inspectActivate:focus-visible {
+  outline: 3px solid #17140f;
+  outline-offset: 3px;
+}
+
+.inspectActivationNote {
+  color: rgb(23 20 15 / 68%);
+  font-size: 11px;
+  text-align: right;
+}
 
 .railEmpty {
   display: grid;
@@ -833,10 +1029,10 @@ button.card:hover:not(:disabled) .cardFront {
 }
 
 @keyframes card-burn-away {
-  0% { clip-path: inset(0 0 0 0); opacity: 1; }
-  24% { clip-path: polygon(0 0, 100% 0, 100% 88%, 87% 100%, 0 100%); opacity: 1; }
-  66% { clip-path: polygon(0 0, 100% 0, 100% 36%, 65% 68%, 28% 100%, 0 100%); opacity: 0.76; }
-  100% { clip-path: polygon(0 0, 25% 0, 0 22%); opacity: 0.08; }
+  0% { opacity: 1; transform: translateY(0) scale(1); }
+  24% { opacity: 1; transform: translateY(-1px) scale(0.995); }
+  66% { opacity: 0.62; transform: translateY(-7px) scale(0.965); }
+  100% { opacity: 0.08; transform: translateY(-18px) scale(0.9); }
 }
 
 @keyframes burn-edge-pulse {
@@ -857,6 +1053,45 @@ button.card:hover:not(:disabled) .cardFront {
   100% { opacity: 1; transform: translate(-50%, -50%) scale(1); }
 }
 
+@keyframes refresh-card-ash {
+  0% { opacity: 1; transform: translateY(0) scale(1); }
+  42% { opacity: 0.82; transform: translateY(-3px) scale(0.985); }
+  100% { opacity: 0.04; transform: translateY(-16px) scale(0.91); }
+}
+
+@keyframes refresh-ash-rise {
+  0% { opacity: 0; transform: translateY(0); }
+  35% { opacity: 0.88; }
+  100% { opacity: 0; transform: translate(-9px, -28px); }
+}
+
+@keyframes refresh-card-flicker {
+  0% { opacity: 0; transform: scale(0.975); }
+  28% { opacity: 1; transform: scale(0.99); }
+  48% { opacity: 0.32; }
+  72% { opacity: 1; transform: scale(0.997); }
+  100% { opacity: 1; transform: scale(1); }
+}
+
+@keyframes refresh-card-restore {
+  from { opacity: 0.1; transform: scale(0.98); }
+  to { opacity: 1; transform: scale(1); }
+}
+
+@keyframes inspect-preview-in {
+  to { opacity: 1; transform: translate(-50%, -50%) scale(1); }
+}
+
+@keyframes inspect-overlay-in {
+  from { opacity: 0; }
+  to { opacity: 1; }
+}
+
+@keyframes inspect-dialog-in {
+  from { opacity: 0; transform: translateY(12px) scale(0.98); }
+  to { opacity: 1; transform: none; }
+}
+
 @media (max-width: 720px) {
   .draftHeader,
   .draftFooter {
@@ -873,9 +1108,19 @@ button.card:hover:not(:disabled) .cardFront {
 
   .draftTimer { width: 100%; }
 
-  .draftOptions { grid-template-columns: 1fr; }
-
-  .card { min-height: 196px; }
+  .draftOptions {
+    grid-template-columns: none;
+    grid-auto-flow: column;
+    grid-auto-columns: min(78vw, 260px);
+    justify-content: start;
+    gap: 16px;
+    padding: 0 24px 10px;
+    overflow-x: auto;
+    overscroll-behavior-inline: contain;
+    scroll-padding-inline: 24px;
+    scroll-snap-type: x mandatory;
+    scrollbar-width: thin;
+  }
 
   .draft[data-animation-phase="centering"] .draftOption[data-selected="true"],
   .draft[data-animation-phase="turning"] .draftOption[data-selected="true"],
@@ -891,13 +1136,33 @@ button.card:hover:not(:disabled) .cardFront {
   }
 
   .draftActions { width: 100%; }
-  .confirmButton { flex: 1; }
+
+  .railCards {
+    grid-auto-flow: column;
+    grid-auto-columns: minmax(96px, 132px);
+    grid-template-columns: none;
+    padding: 2px 2px 8px;
+    overflow-x: auto;
+    scroll-snap-type: x proximity;
+  }
+
+  .railCardItem { scroll-snap-align: start; }
+
+  .inspectDialog { width: min(520px, 100%); }
 }
 
 @media (max-width: 420px) {
-  .card { min-height: 180px; }
   .face { padding-block: 25px 20px; }
-  .railCards { grid-template-columns: repeat(2, minmax(72px, 1fr)); }
+  .draftOptions { grid-auto-columns: min(82vw, 252px); padding-inline: 16px; }
+  .inspectOverlay { padding: 12px; }
+  .inspectDialog { max-height: calc(100dvh - 24px); padding: 14px; }
+  .inspectActions { align-items: stretch; flex-direction: column-reverse; }
+  .inspectActivate { width: 100%; margin-left: 0; }
+  .inspectSecondary { width: 100%; }
+}
+
+@media (hover: none) and (pointer: coarse) {
+  .railPreview { display: none; }
 }
 
 @media (prefers-reduced-motion: reduce) {
@@ -906,7 +1171,10 @@ button.card:hover:not(:disabled) .cardFront {
   .draftOption,
   .refreshButton,
   .resignButton,
-  .confirmButton {
+  .refreshAsh,
+  .railPreview,
+  .inspectOverlay,
+  .inspectDialog {
     scroll-behavior: auto;
     animation: none !important;
     transition-duration: 0.01ms !important;
@@ -924,13 +1192,24 @@ button.card:hover:not(:disabled) .cardFront {
 
   .cardBurning .ember { display: none; }
   .cardBurning .burnLabel { opacity: 1; }
+
+  .draftOption[data-refresh-phase] .card,
+  .draftOption[data-refresh-phase] .cardFront {
+    opacity: 1;
+    transform: none;
+  }
+
+  .draftOption[data-refresh-phase] .refreshAsh { display: none; }
 }
 
 @media (forced-colors: active) {
   .cardFace,
   .refreshButton,
   .resignButton,
-  .confirmButton { border: 2px solid CanvasText; }
+  .inspectDialog,
+  .inspectClose,
+  .inspectSecondary,
+  .inspectActivate { border: 2px solid CanvasText; }
 
   .cardSelected .cardFront { outline: 4px double Highlight; }
   .cardBack { background: Canvas; color: CanvasText; }

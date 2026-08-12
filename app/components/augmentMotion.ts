@@ -19,6 +19,36 @@ export const AUGMENT_DRAFT_MOTION_MS = {
 
 export const AUGMENT_BURN_MOTION_MS = 1_280;
 
+export const AUGMENT_REFRESH_MOTION_MS = {
+  ash: 520,
+  reveal: 280,
+  restore: 180,
+} as const;
+
+export type AugmentRefreshMotionPhase =
+  | "burning"
+  | "awaiting-replacement"
+  | "revealing"
+  | "restoring";
+
+export function didAugmentRefreshReplaceCard(
+  outgoingId: AugmentId,
+  incomingId: AugmentId | null | undefined,
+) {
+  return Boolean(incomingId && incomingId !== outgoingId);
+}
+
+export function augmentRefreshPhaseAfterAsh(
+  outgoingId: AugmentId,
+  incomingId: AugmentId | null | undefined,
+  reducedMotion: boolean,
+): AugmentRefreshMotionPhase | null {
+  if (reducedMotion) return null;
+  return didAugmentRefreshReplaceCard(outgoingId, incomingId)
+    ? "revealing"
+    : "awaiting-replacement";
+}
+
 export function shouldAnimateAugmentBurn(
   activation: AugmentActivation,
   charges: number,
@@ -79,8 +109,8 @@ export function reconcileActiveAugmentAfterProjection(
 export interface AugmentRoundLockProjection {
   number: number;
   players: {
-    black: { locked: boolean };
-    white: { locked: boolean };
+    black: { locked: boolean; selectedId?: AugmentId | null };
+    white: { locked: boolean; selectedId?: AugmentId | null };
   };
 }
 
@@ -88,9 +118,13 @@ export function wasAugmentLockConfirmedAfterConflict(
   viewer: "black" | "white" | "spectator" | null | undefined,
   requestedRound: number | null | undefined,
   rounds: readonly AugmentRoundLockProjection[] | null | undefined,
+  requestedAugmentId: AugmentId | null = null,
 ) {
   if ((viewer !== "black" && viewer !== "white") || requestedRound == null) return false;
-  return rounds?.find((round) => round.number === requestedRound)?.players[viewer].locked === true;
+  const player = rounds?.find((round) => round.number === requestedRound)?.players[viewer];
+  return player?.locked === true && (
+    requestedAugmentId === null || player.selectedId === requestedAugmentId
+  );
 }
 
 export type AugmentDraftMotionPhase =

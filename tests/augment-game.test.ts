@@ -1377,6 +1377,72 @@ test("opening selections stay private until both layouts lock, then reveal toget
   }
 });
 
+test("augment_pick selects and locks an opening choice in one immutable action", () => {
+  const state = createAugmentGame();
+  state.augment!.draft = openingDraft("heart-rail-turn");
+  const before = structuredClone(state);
+
+  const picked = applyPlayerAction(state, "black", {
+    type: "augment_pick",
+    augmentId: "heart-rail-turn",
+  });
+
+  assert.deepEqual(state, before);
+  assert.equal(picked.phase, "setup");
+  assert.equal(picked.augment?.draft.rounds[0].players.black.selectedId, "heart-rail-turn");
+  assert.equal(picked.augment?.draft.rounds[0].players.black.locked, true);
+  assert.deepEqual(picked.augment?.draft.loadouts.black, ["heart-rail-turn"]);
+  expectRuleError(
+    picked,
+    "black",
+    { type: "augment_pick", augmentId: "heart-rail-turn" },
+    "SELECTION_LOCKED",
+  );
+  expectRuleError(
+    state,
+    "black",
+    { type: "augment_pick", augmentId: "spade-grand-maneuver" },
+    "AUGMENT_NOT_OFFERED",
+  );
+  expectRuleError(
+    createInitialGame(),
+    "black",
+    { type: "augment_pick", augmentId: "heart-rail-turn" },
+    "AUGMENT_MODE_REQUIRED",
+  );
+});
+
+test("augment_pick finalizes the second draft when the other side is already locked", () => {
+  let state = enterSecondDraft(10_000);
+  const round = forceSecondRoundOption(state, "club-forced-march");
+  const blackPick = round.players.black.options[0];
+  const whitePick = round.players.white.options[0];
+
+  state = applyPlayerAction(
+    state,
+    "black",
+    { type: "augment_pick", augmentId: blackPick },
+    11_000,
+  );
+  assert.equal(state.phase, "augment_draft");
+  assert.equal(state.augment?.draft.rounds[1].players.black.locked, true);
+
+  state = applyPlayerAction(
+    state,
+    "white",
+    { type: "augment_pick", augmentId: whitePick },
+    12_000,
+  );
+  assert.equal(state.phase, "playing");
+  assert.equal(state.turn, "white");
+  assert.equal(state.clock?.turnStartedAt, 12_000);
+  assert.equal(state.augment?.draft.activeRound, null);
+  assert.equal(state.augment?.draft.rounds[1].revealed, true);
+  assert.equal(state.augment?.draft.rounds[1].players.white.locked, true);
+  assert.deepEqual(state.augment?.draft.loadouts.black, ["heart-rail-turn", blackPick]);
+  assert.deepEqual(state.augment?.draft.loadouts.white, ["heart-rail-turn", whitePick]);
+});
+
 test("refresh is one-slot-per-round, clears a replaced selection, and never repeats a seen card", () => {
   let state = createAugmentGame();
   state.augment!.draft = openingDraft("club-forced-march");

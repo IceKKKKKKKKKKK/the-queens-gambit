@@ -1,6 +1,5 @@
 "use client";
 
-import Link from "next/link";
 import {
   useEffect,
   useEffectEvent,
@@ -65,6 +64,11 @@ import {
 } from "../lib/augments";
 import AugmentDraft from "./components/AugmentDraft";
 import AugmentRail from "./components/AugmentRail";
+import LobbyExperience from "./components/LobbyExperience";
+import {
+  LOBBY_ENTRY_SESSION_KEY,
+  markLobbyEntered,
+} from "./components/lobbyScene";
 import {
   canInteractWithAugment,
   reconcileActiveAugmentAfterProjection,
@@ -321,7 +325,7 @@ const ERROR_TEXT: Record<string, string> = {
   SEAT_ALREADY_CLAIMED: "玩家席位已经被领取。",
   CLAIM_FAILED: "暂时无法领取玩家席位。",
   AUTH_REQUIRED: "请先使用邮箱登录。",
-  AUGMENT_MODE_REQUIRED: "这局不是军令强化模式。",
+  AUGMENT_MODE_REQUIRED: "这局不是狂野模式。",
   AUGMENT_SELECTION_REQUIRED: "请先选择并锁定一张军令牌。",
   NO_ACTIVE_DRAFT: "当前没有进行中的军令选择。",
   SELECTION_LOCKED: "这轮军令已经锁定。",
@@ -1420,9 +1424,9 @@ function SignInLanding({ signInPath }: { signInPath: string }) {
       <div className="auth-stage">
         <div className="auth-court-card auth-queen" aria-hidden="true" />
         <section className="landing-core auth-panel">
-          <span className="product-kicker">经典规则 · 军令强化</span>
+          <span className="product-kicker">经典 · 狂野 · 对弈</span>
           <h1><span>军令</span><span>陆战棋</span></h1>
-          <p>邮件账号 · 在线匹配 · 公平三选一</p>
+          <p>暖白纸牌桌上的双人暗军棋</p>
           {authResolution.path ? (
             <a className="button primary sign-in-button" href={authResolution.path}>使用邮箱登录</a>
           ) : (
@@ -1431,172 +1435,6 @@ function SignInLanding({ signInPath }: { signInPath: string }) {
           <small className="auth-note" role="status">{authResolution.note}</small>
         </section>
         <div className="auth-court-card auth-king" aria-hidden="true" />
-      </div>
-    </main>
-  );
-}
-
-function Landing({
-  user,
-  signOutPath,
-  account,
-  recentMatches,
-  friends,
-  matchmaking,
-  watchingMatchId,
-  onCreate,
-  creating,
-  onOpen,
-  onMatchmaking,
-  onCancelMatchmaking,
-  onFriendRequest,
-  onAcceptFriend,
-  onWatchFriend,
-}: {
-  user: SessionUser;
-  signOutPath: string;
-  account: AccountSummary | null;
-  recentMatches: RecentMatch[];
-  friends: FriendsEnvelope;
-  matchmaking: MatchmakingEnvelope;
-  watchingMatchId: string | null;
-  onCreate: (mode: "classic" | "augment", spectatorPolicy: "hidden" | "full") => void;
-  creating: boolean;
-  onOpen: (code: string) => void;
-  onMatchmaking: () => void;
-  onCancelMatchmaking: () => void;
-  onFriendRequest: (handle: string) => void;
-  onAcceptFriend: (requestId: string) => void;
-  onWatchFriend: (matchId: string) => void;
-}) {
-  const [code, setCode] = useState("");
-  const [mode, setMode] = useState<"classic" | "augment">("classic");
-  const [spectatorPolicy, setSpectatorPolicy] = useState<"hidden" | "full">("hidden");
-  const [friendHandle, setFriendHandle] = useState("");
-  const searching = matchmaking.state === "queued";
-  return (
-    <main className="lobby-shell">
-      <header className="lobby-header">
-        <Link className="wordmark" href="/" aria-label="军令首页">
-          <span className="wordmark-mark">令</span><span>军令 · 陆战棋</span>
-        </Link>
-        <div className="account-chip">
-          <span>{account?.handle ?? user.displayName}</span>
-          <small>{account?.rank.label ?? "正在载入段位"}</small>
-          <a href={signOutPath}>退出</a>
-        </div>
-      </header>
-
-      <section className="lobby-hero">
-        <div>
-          <span className="product-kicker">保留经典，也允许每局不同</span>
-          <h1>今天下哪一种军棋？</h1>
-          <p>经典模式完整保留原规则；军令强化模式在布阵和第 10 手前各进行一次同等级三选一。</p>
-        </div>
-        <div className="rank-card">
-          <span>当前段位</span>
-          <strong>{account?.rank.label ?? "—"}</strong>
-          <small>{account ? `${account.rating} 分 · ${Math.round(account.record.winRate * 100)}% 胜率` : "正在同步战绩"}</small>
-          <div className="rank-progress" aria-hidden="true"><span style={{ width: `${Math.round((account?.rank.progress ?? 0) * 100)}%` }} /></div>
-        </div>
-      </section>
-
-      <div className="lobby-grid">
-        <section className="lobby-panel play-panel">
-          <div className="panel-title-row"><strong>开始对局</strong><span>好友房不改变排位分</span></div>
-          <div className="mode-picker" role="radiogroup" aria-label="房间模式">
-            <button className={mode === "classic" ? "is-selected" : ""} type="button" role="radio" aria-checked={mode === "classic"} onClick={() => setMode("classic")}>
-              <strong>经典暗军棋</strong><small>原版规则，完全不变</small>
-            </button>
-            <button className={mode === "augment" ? "is-selected" : ""} type="button" role="radio" aria-checked={mode === "augment"} onClick={() => setMode("augment")}>
-              <strong>军令强化</strong><small>两轮强化，扩展牌池</small>
-            </button>
-          </div>
-          <label className="spectator-setting">
-            <span>好友房观战</span>
-            <select value={spectatorPolicy} onChange={(event) => setSpectatorPolicy(event.target.value as "hidden" | "full")}>
-              <option value="hidden">隐藏双方暗牌</option>
-              <option value="full">允许明牌观战</option>
-            </select>
-          </label>
-          <button className="button primary" type="button" onClick={() => onCreate(mode, spectatorPolicy)} disabled={creating}>
-            {creating ? "正在创建…" : `创建${mode === "classic" ? "经典" : "军令"}好友房`}
-          </button>
-          <div className="ranked-callout">
-            <div><strong>军令排位</strong><small>10:00 · 落子扣时后余时≤5:00，则 +5 秒</small></div>
-            <button className="button secondary compact" type="button" onClick={searching ? onCancelMatchmaking : onMatchmaking}>
-              {searching ? `取消匹配 · ±${matchmaking.ratingRange ?? 100}` : "寻找实力相近的对手"}
-            </button>
-          </div>
-          <form
-            className="join-form"
-            onSubmit={(event) => {
-              event.preventDefault();
-              if (cleanCode(code).length === 8) onOpen(cleanCode(code));
-            }}
-          >
-            <input
-              aria-label="房间码"
-              value={displayCode(code)}
-              onChange={(event) => setCode(cleanCode(event.target.value))}
-              placeholder="房间码"
-              maxLength={9}
-            />
-            <button type="submit" aria-label="进入房间" disabled={cleanCode(code).length !== 8}>→</button>
-          </form>
-        </section>
-
-        <section className="lobby-panel stats-panel">
-          <div className="panel-title-row"><strong>最近 10 局</strong><span>{account?.record.games ?? 0} 局总战绩</span></div>
-          <div className="stat-strip">
-            <span><strong>{account?.record.wins ?? 0}</strong><small>胜</small></span>
-            <span><strong>{account?.record.losses ?? 0}</strong><small>负</small></span>
-            <span><strong>{account?.record.draws ?? 0}</strong><small>和</small></span>
-          </div>
-          <ol className="history-list">
-            {recentMatches.length ? recentMatches.map((match) => (
-              <li key={match.id}>
-                <span className={`outcome outcome-${match.outcome}`}>{match.outcome === "win" ? "胜" : match.outcome === "loss" ? "负" : "和"}</span>
-                <span className="history-opponent">
-                  <strong>{match.opponentHandle}</strong>
-                  {match.outcome === "draw" && match.endedReason === "threefold_repetition"
-                    ? <small>和 · 重复局面</small>
-                    : null}
-                </span>
-                <small>{match.ratingDelta > 0 ? "+" : ""}{match.ratingDelta} · {new Date(match.completedAt).toLocaleDateString("zh-CN")}</small>
-              </li>
-            )) : <li className="empty-row">完成第一局后，这里会显示最近战绩。</li>}
-          </ol>
-        </section>
-
-        <section className="lobby-panel friends-panel">
-          <div className="panel-title-row"><strong>好友</strong><span>{friends.friends.filter((friend) => friend.presence !== "offline").length} 人在线</span></div>
-          <form className="friend-form" onSubmit={(event) => { event.preventDefault(); if (friendHandle.trim()) { onFriendRequest(friendHandle.trim()); setFriendHandle(""); } }}>
-            <input aria-label="好友昵称" placeholder="输入玩家昵称" value={friendHandle} onChange={(event) => setFriendHandle(event.target.value)} />
-            <button type="submit">添加</button>
-          </form>
-          {friends.incoming.map((request) => (
-            <div className="friend-request" key={request.requestId}><span>{request.player.handle} 请求加你为好友</span><button type="button" onClick={() => onAcceptFriend(request.requestId)}>接受</button></div>
-          ))}
-          <ul className="friend-list">
-            {friends.friends.length ? friends.friends.map((friend) => (
-              <li key={friend.relationshipId}>
-                <span className={`presence-dot presence-${friend.presence}`} aria-hidden="true" />
-                <div><strong>{friend.player.handle}</strong><small>{friend.player.rank.label}</small></div>
-                {friend.presence === "in_game" && friend.currentMatchId ? (
-                  <button
-                    type="button"
-                    disabled={watchingMatchId !== null}
-                    aria-busy={watchingMatchId === friend.currentMatchId}
-                    onClick={() => onWatchFriend(friend.currentMatchId!)}
-                  >
-                    {watchingMatchId === friend.currentMatchId ? "进入中…" : "观战"}
-                  </button>
-                ) : <small>{friend.presence === "offline" ? "离线" : friend.presence === "searching" ? "匹配中" : "在线"}</small>}
-              </li>
-            )) : <li className="empty-row">添加好友后，可以看到在线状态并安全观战。</li>}
-          </ul>
-        </section>
       </div>
     </main>
   );
@@ -1640,6 +1478,10 @@ export default function GameApp({
   const [connection, setConnection] = useState<"live" | "syncing" | "offline">("live");
   const [account, setAccount] = useState<AccountSummary | null>(null);
   const [recentMatches, setRecentMatches] = useState<RecentMatch[]>([]);
+
+  useEffect(() => {
+    if (hasRoom) markLobbyEntered(browserSessionStorage(), LOBBY_ENTRY_SESSION_KEY);
+  }, [hasRoom]);
   const [friends, setFriends] = useState<FriendsEnvelope>({ friends: [], incoming: [], outgoing: [] });
   const [matchmaking, setMatchmaking] = useState<MatchmakingEnvelope>({ state: "idle" });
   const [watchingMatchId, setWatchingMatchId] = useState<string | null>(null);
@@ -1793,6 +1635,18 @@ export default function GameApp({
     setFriends(friendsPayload);
   }
 
+  async function updateHandle(handle: string) {
+    const response = await fetch("/api/account", {
+      method: "PATCH",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ handle }),
+    });
+    const payload = (await parseResponse(response)) as AccountEnvelope;
+    setAccount(payload.account);
+    setRecentMatches(payload.recentMatches);
+    showToast("玩家 ID 已更新。");
+  }
+
   async function enterAuthenticatedRoom(code: string) {
     const normalized = cleanCode(code);
     if (normalized.length !== 8 || roomRef.current?.code === normalized) return;
@@ -1876,6 +1730,7 @@ export default function GameApp({
     const current = roomRef.current;
     if (current && current.code !== next.code && !allowRoomChange) return false;
     if (current && current.code === next.code && next.version < current.version) return false;
+    markLobbyEntered(browserSessionStorage(), LOBBY_ENTRY_SESSION_KEY);
     const preservesInteractionContext = Boolean(
       current && current.code === next.code && current.viewer === next.viewer,
     );
@@ -2296,7 +2151,7 @@ export default function GameApp({
       showToast("好友请求已发送。");
     } catch (error) {
       const code = error instanceof RequestError ? error.code : "";
-      const message = code === "PLAYER_NOT_FOUND" ? "没有找到这个玩家昵称。" : code === "ALREADY_FRIENDS" ? "你们已经是好友。" : "好友请求没有发送成功。";
+      const message = code === "PLAYER_NOT_FOUND" ? "没有找到这个玩家 ID。" : code === "ALREADY_FRIENDS" ? "你们已经是好友。" : "好友请求没有发送成功。";
       showToast(message);
     }
   }
@@ -2346,7 +2201,7 @@ export default function GameApp({
   async function performAction(action: PlayerAction) {
     const current = roomRef.current;
     if (!current || !isPlayer(current.viewer) || busyRef.current) return false;
-    const requestedAugmentRound = action.type === "augment_lock"
+    const requestedAugmentRound = action.type === "augment_lock" || action.type === "augment_pick"
       ? current.snapshot.augment?.draft.activeRound ?? null
       : null;
     const session = roomSessionRef.current;
@@ -2392,19 +2247,19 @@ export default function GameApp({
       // the neutral board before showing the authoritative server explanation.
       clearBoardInteractionState();
       if (error instanceof RequestError && error.status === 409) {
-        showToast(ERROR_TEXT.VERSION_CONFLICT);
         try {
           const latest = await fetchRoom(current.code, token);
           if (session !== roomSessionRef.current || roomRef.current?.code !== current.code) return false;
           if (latest) acceptRoom(latest);
           setConnection("live");
           if (
-            action.type === "augment_lock" &&
+            (action.type === "augment_lock" || action.type === "augment_pick") &&
             latest &&
             wasAugmentLockConfirmedAfterConflict(
               latest.viewer,
               requestedAugmentRound,
               latest.snapshot.augment?.draft.rounds,
+              action.type === "augment_pick" ? action.augmentId : null,
             )
           ) {
             return true;
@@ -2419,6 +2274,9 @@ export default function GameApp({
           } else {
             setConnection("offline");
           }
+        }
+        if (session === roomSessionRef.current && roomRef.current?.code === current.code) {
+          showToast(ERROR_TEXT.VERSION_CONFLICT);
         }
       } else if (error instanceof RequestError && [401, 404, 410].includes(error.status)) {
         setFatalError(ERROR_TEXT[error.code] ?? "这个房间已经不可用。");
@@ -3132,11 +2990,11 @@ export default function GameApp({
       pendingReconId,
     })) {
       if (augment.activation !== "active") {
-        showToast("这张强化会在满足条件时自动生效。");
+        showToast("这张军令会在满足条件时自动生效。");
       } else if (effect.kind === "reconnaissance") {
         showToast("这张侦察牌尚未进入选取目标阶段。");
       } else {
-        showToast("轮到你行动时才能发动这张强化。");
+        showToast("轮到你行动时才能发动这张军令。");
       }
       return;
     }
@@ -3148,7 +3006,7 @@ export default function GameApp({
       effect.kind !== "sacrifice_reconnaissance" &&
       !(effect.kind === "reconnaissance" && effect.mode === "choose_enemy")
     ) {
-      showToast("这张强化会在满足条件时自动生效。");
+      showToast("这张军令会在满足条件时自动生效。");
       return;
     }
     if (!hasProjectedAugmentTarget(room.snapshot, room.viewer, augmentId)) {
@@ -3271,7 +3129,7 @@ export default function GameApp({
     }
     return (
       <>
-        <Landing
+        <LobbyExperience
           user={user}
           signOutPath={signOutPath}
           account={account}
@@ -3287,6 +3145,8 @@ export default function GameApp({
           onFriendRequest={requestFriend}
           onAcceptFriend={acceptFriend}
           onWatchFriend={watchFriendMatch}
+          onUpdateHandle={updateHandle}
+          skipEntryGate={hasRoom}
         />
         {fatalError ? <div className="toast error-toast" role="alert" aria-live="assertive">{fatalError}</div> : null}
         {toast ? <div className="toast" role="status" aria-live="polite">{toast}</div> : null}
@@ -3590,7 +3450,7 @@ export default function GameApp({
       </header>
 
       {draftPresentation ? (
-        <div className="augment-draft-overlay" role="dialog" aria-modal="true" aria-label="强化选择">
+        <div className="augment-draft-overlay" role="dialog" aria-modal="true" aria-label="军令选择">
           <AugmentDraft
             key={`${room.code}-${draftPresentation.round}`}
             round={draftPresentation.round}
@@ -3602,21 +3462,24 @@ export default function GameApp({
             seenCount={draftPresentation.seenCount}
             deadlineAt={draftPresentation.deadlineAt}
             pending={busy}
-            onSelect={(augmentId) => void performAction({ type: "augment_select", augmentId })}
-            onRefresh={(slot: AugmentSlot) => void performAction({ type: "augment_refresh", slot })}
-            onConfirm={() => {
-              if (!liveDraftPresentation?.selectedId) return false;
+            onPick={(augmentId) => {
+              if (!liveDraftPresentation) return false;
               setAugmentDraftVisualHold({
                 roomCode: room.code,
                 round: liveDraftPresentation.round,
                 options: liveDraftPresentation.options,
-                selectedId: liveDraftPresentation.selectedId,
+                selectedId: augmentId,
                 opponentLocked: liveDraftPresentation.opponentLocked,
                 refreshUsed: liveDraftPresentation.refreshUsed,
                 seenCount: liveDraftPresentation.seenCount,
                 deadlineAt: liveDraftPresentation.deadlineAt,
               });
-              return performAction({ type: "augment_lock" });
+              return performAction({ type: "augment_pick", augmentId });
+            }}
+            onRefresh={async (slot: AugmentSlot) => {
+              const accepted = await performAction({ type: "augment_refresh", slot });
+              if (!accepted) setAugmentDraftVisualHold(null);
+              return accepted;
             }}
             onResign={
               game.phase === "augment_draft"
@@ -3648,26 +3511,40 @@ export default function GameApp({
             </div>
           ) : null}
           {game.augment ? (
-            <AugmentRail
-              key={`${room.code}-${primaryRailSide}`}
-              label={viewerSide ? "我的" : sideName(primaryRailSide)}
-              items={augmentRailItems(primaryRailSide)}
-              activeId={viewerSide === primaryRailSide ? activeAugmentId : null}
-              canActivate={Boolean(viewerSide === primaryRailSide && game.phase === "playing")}
-              isOwnTurn={Boolean(viewerSide === primaryRailSide && game.turn === viewerSide)}
-              pendingReconId={viewerSide === primaryRailSide
-                ? game.augment.pendingRecon?.augmentId ?? null
-                : null}
-              pending={busy}
-              dockTarget={Boolean(viewerSide === primaryRailSide)}
-              onActivate={viewerSide === primaryRailSide ? activateAugment : undefined}
-            />
+            <div className="command-rails" aria-label="双方军令牌轨">
+              <AugmentRail
+                key={`${room.code}-${primaryRailSide}`}
+                label={viewerSide ? "我的" : sideName(primaryRailSide)}
+                items={augmentRailItems(primaryRailSide)}
+                activeId={viewerSide === primaryRailSide ? activeAugmentId : null}
+                canActivate={Boolean(viewerSide === primaryRailSide && game.phase === "playing")}
+                isOwnTurn={Boolean(viewerSide === primaryRailSide && game.turn === viewerSide)}
+                pendingReconId={viewerSide === primaryRailSide
+                  ? game.augment.pendingRecon?.augmentId ?? null
+                  : null}
+                pending={busy}
+                dockTarget={Boolean(viewerSide === primaryRailSide)}
+                onActivate={viewerSide === primaryRailSide ? activateAugment : undefined}
+              />
+              <AugmentRail
+                key={`${room.code}-${secondaryRailSide}`}
+                label={sideName(secondaryRailSide)}
+                items={augmentRailItems(secondaryRailSide)}
+              />
+            </div>
           ) : null}
           {game.augment && game.phase !== "setup" ? (
             <AugmentRuleStatusPanel
               game={game}
               side={primaryRailSide}
               ownerLabel={viewerSide ? "我的" : sideName(primaryRailSide)}
+            />
+          ) : null}
+          {game.augment && game.phase !== "setup" ? (
+            <AugmentRuleStatusPanel
+              game={game}
+              side={secondaryRailSide}
+              ownerLabel={sideName(secondaryRailSide)}
             />
           ) : null}
           {game.phase === "setup" && timeControlMinutes !== null ? (
@@ -3753,7 +3630,7 @@ export default function GameApp({
                 {game.ready[viewerSide]
                   ? "撤销确认"
                   : game.augment && !game.augment.draft.rounds[0]?.players[viewerSide].locked
-                    ? "先锁定强化"
+                    ? "先选择军令"
                     : "完成布阵"}
               </button>
               {room.roomKind === "ranked" ? (
@@ -3923,20 +3800,6 @@ export default function GameApp({
         </section>
 
         <aside className="side-panel activity-panel">
-          {game.augment ? (
-            <AugmentRail
-              key={`${room.code}-${secondaryRailSide}`}
-              label={sideName(secondaryRailSide)}
-              items={augmentRailItems(secondaryRailSide)}
-            />
-          ) : null}
-          {game.augment && game.phase !== "setup" ? (
-            <AugmentRuleStatusPanel
-              game={game}
-              side={secondaryRailSide}
-              ownerLabel={sideName(secondaryRailSide)}
-            />
-          ) : null}
           <div className="invite-block">
             {room.viewer === "black" && inviteToken && !game.joined.white ? (
               <button className="button primary compact" type="button" onClick={() => void copyLink("player")}>复制玩家邀请</button>
@@ -3969,7 +3832,7 @@ export default function GameApp({
         >
         <div className="rules-dialog-header">
           <h2 id="game-rules-title" ref={rulesTitleRef} tabIndex={-1}>
-            {game.mode === "augment" ? "强化陆战棋规则" : "经典暗军棋规则"}
+            {game.mode === "augment" ? "狂野陆战棋规则" : "经典暗军棋规则"}
           </h2>
           <form method="dialog">
             <button className="rules-close" type="submit">关闭</button>
@@ -3980,8 +3843,8 @@ export default function GameApp({
             <h3>本局模式</h3>
             <p>
               {game.mode === "augment"
-                ? "本局为强化模式：经典棋盘与基础规则不变，另外加入两轮公开强化。"
-                : "本局为经典模式：完全沿用原版布阵、移动、交战与胜负规则，不生成或使用强化。"}
+                ? "本局为狂野模式：经典棋盘与基础规则不变，另外加入两轮公开军令。"
+                : "本局为经典模式：完全沿用原版布阵、移动、交战与胜负规则，不生成或使用军令牌。"}
             </p>
           </section>
           <section>
@@ -3989,7 +3852,7 @@ export default function GameApp({
             <p>
               夺取对方军旗、使对方无合法着法、用尽对局时间，或对方认输即可获胜。
               {game.repetition
-                ? " 强化局中，同一完整局面第三次出现时自动和棋；第二次出现会在牌桌旁提示。"
+                ? " 狂野局中，同一完整局面第三次出现时自动和棋；第二次出现会在牌桌旁提示。"
                 : " 本局没有自动和棋或回合上限。"}
             </p>
           </section>
@@ -4006,19 +3869,19 @@ export default function GameApp({
           </section>
           <section>
             <h3>布阵</h3>
-            <p>默认布阵中，棋子只能放在本方兵站或大本营，行营必须留空；军旗须在大本营，地雷须在最后两排，炸弹不能在第一排。强化局以牌面为准：「偷梁换柱」可将军旗放在己方底线任意站点，「深呼吸」可将地雷放在己方后三排；其他布阵军令也按牌面额度覆盖默认限制。双方确认后随机决定先手。</p>
+            <p>默认布阵中，棋子只能放在本方兵站或大本营，行营必须留空；军旗须在大本营，地雷须在最后两排，炸弹不能在第一排。狂野局以牌面为准：「偷梁换柱」可将军旗放在己方底线任意站点，「深呼吸」可将地雷放在己方后三排；其他布阵军令也按牌面额度覆盖默认限制。双方确认后随机决定先手。</p>
           </section>
           <section>
-            <h3>强化选择</h3>
-            <p>强化局每轮双方获得同一花色、同一强度的三张候选，但具体牌可以不同。每人每轮可刷新其中一张；本局见过或刷掉的牌不会再次出现。候选与未公开选择仅本人可见。</p>
+            <h3>军令选择</h3>
+            <p>狂野局每轮双方获得同一花色、同一强度的三张候选，但具体牌可以不同。每人每轮可刷新其中一张；本局见过或刷掉的牌不会再次出现。候选与未公开选择仅本人可见。</p>
           </section>
           <section>
             <h3>两轮公开</h3>
-            <p>第一项强化在布阵时选择，双方都确认阵型后同时亮出。完成前 9 手后、执行第 10 手前暂停棋钟并选择第二项；双方锁定后同时亮出，再恢复原行动方。已公开强化始终显示在牌桌旁。</p>
+            <p>第一项军令在布阵时选择，双方都确认阵型后同时亮出。完成前 9 手后、执行第 10 手前暂停棋钟并选择第二项；双方锁定后同时亮出，再恢复原行动方。已公开军令始终显示在牌桌旁。</p>
           </section>
           <section>
-            <h3>强化次数</h3>
-            <p>主动强化需从牌桌旁启用，自动强化会在条件满足时结算。牌面显示已触发次数；只有达到总次数才标为“已耗尽”。非法请求、取消或网络失败不会消耗次数。</p>
+            <h3>军令次数</h3>
+            <p>主动军令需从牌桌旁发动，自动军令会在条件满足时结算。牌面显示已触发次数；只有达到总次数才标为“已耗尽”。非法请求、取消或网络失败不会消耗次数。</p>
           </section>
           <section>
             <h3>追加行动</h3>
@@ -4046,7 +3909,7 @@ export default function GameApp({
           </section>
           <section>
             <h3>军旗暴露</h3>
-            <p>司令阵亡后，己方军旗公开。若被进攻的大本营内不是军旗，另一座大本营中的军旗也会公开。强化局中，「濒死悟道」尚未解锁时，进攻军旗会消耗行动但被保护阻止，军旗同时永久公开；敌方占领另一座大本营后保护解除。</p>
+            <p>司令阵亡后，己方军旗公开。若被进攻的大本营内不是军旗，另一座大本营中的军旗也会公开。狂野局中，「濒死悟道」尚未解锁时，进攻军旗会消耗行动但被保护阻止，军旗同时永久公开；敌方占领另一座大本营后保护解除。</p>
           </section>
           <section>
             <h3>复盘</h3>
@@ -4056,7 +3919,7 @@ export default function GameApp({
             <h3>用时</h3>
             <p>
               {room.roomKind === "ranked"
-                ? "排位每方初始 10 分钟。一次合法落子扣除本步思考时间后，若该方余时不超过 5 分钟，则增加 5 秒。强化选择期间棋钟暂停。"
+                ? "排位每方初始 10 分钟。一次合法落子扣除本步思考时间后，若该方余时不超过 5 分钟，则增加 5 秒。军令选择期间棋钟暂停。"
                 : game.clock
                   ? `本私人房每方初始 ${Math.round(game.clock.initialMs / 60_000)} 分钟；房主可在任何一方确认布阵前修改。`
                   : "本私人房不设棋钟。"}
@@ -4065,7 +3928,7 @@ export default function GameApp({
           </section>
           <section>
             <h3>排位与认输</h3>
-            <p>只有服务器匹配并正式结算的排位局改变分数；经典好友房和强化好友房均不改变排位分。对局进行中或第二轮强化选择时都可以从“本局选项”认输。</p>
+            <p>只有服务器匹配并正式结算的排位局改变分数；经典好友房和狂野好友房均不改变排位分。对局进行中或第二轮军令选择时都可以从“本局选项”认输。</p>
           </section>
         </div>
       </dialog>

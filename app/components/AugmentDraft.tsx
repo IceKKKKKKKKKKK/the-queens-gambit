@@ -19,10 +19,14 @@ import AugmentCard, { type AugmentCardState } from "./AugmentCard";
 import styles from "./Augments.module.css";
 import {
   AUGMENT_DRAFT_MOTION_MS,
+  AUGMENT_REFRESH_MOTION_MS,
+  augmentRefreshPhaseAfterAsh,
   augmentDraftPhaseDuration,
+  didAugmentRefreshReplaceCard,
   reduceAugmentDraftMotion,
   type AugmentDraftMotionEvent,
   type AugmentDraftMotionPhase,
+  type AugmentRefreshMotionPhase,
 } from "./augmentMotion";
 
 export interface AugmentDraftProps {
@@ -36,9 +40,8 @@ export interface AugmentDraftProps {
   seenCount?: number;
   deadlineAt?: number | null;
   pending?: boolean;
-  onSelect: (augmentId: AugmentId) => void;
-  onRefresh: (slot: AugmentSlot) => void;
-  onConfirm: () => boolean | void | Promise<boolean | void>;
+  onPick: (augmentId: AugmentId) => boolean | void | Promise<boolean | void>;
+  onRefresh: (slot: AugmentSlot) => boolean | void | Promise<boolean | void>;
   onResign?: () => void;
   resignLabel?: string;
   onMotionComplete?: (outcome: "docked" | "recovered") => void;
@@ -49,6 +52,14 @@ interface MotionVector {
   centerY: number;
   dockX: number;
   dockY: number;
+}
+
+interface RefreshMotionState {
+  attempt: number;
+  slot: AugmentSlot;
+  outgoingId: AugmentId;
+  outgoing: AugmentDefinition;
+  phase: AugmentRefreshMotionPhase;
 }
 
 const ZERO_VECTOR: MotionVector = {
@@ -98,9 +109,8 @@ export default function AugmentDraft({
   seenCount = 0,
   deadlineAt = null,
   pending = false,
-  onSelect,
+  onPick,
   onRefresh,
-  onConfirm,
   onResign,
   resignLabel = "认输",
   onMotionComplete,
@@ -114,20 +124,29 @@ export default function AugmentDraft({
   const mountedRef = useRef(true);
   const lockAttemptRef = useRef(0);
   const previousMotionPhaseRef = useRef<AugmentDraftMotionPhase>(locked ? "settled" : "dealing");
+  const refreshAttemptRef = useRef(0);
+  const refreshAcceptedAttemptRef = useRef<number | null>(null);
+  const refreshPromiseAttemptRef = useRef<number | null>(null);
+  const refreshPendingObservedRef = useRef(false);
+  const refreshTimerRef = useRef<number | null>(null);
+  const optionsRef = useRef(options);
   const [now, setNow] = useState(() => Date.now());
   const [reducedMotion, setReducedMotion] = useState(false);
   const [motionVector, setMotionVector] = useState<MotionVector>(ZERO_VECTOR);
+  const [focusedIndex, setFocusedIndex] = useState(0);
+  const [requestedId, setRequestedId] = useState<AugmentId | null>(null);
+  const [refreshMotion, setRefreshMotion] = useState<RefreshMotionState | null>(null);
   const [motion, dispatchMotion] = useReducer(reduceAugmentDraftMotion, {
     phase: locked ? "settled" : "dealing",
     serverAcknowledged: locked,
   });
-  const selectedIndex = options.findIndex((augment) => augment.id === selectedId);
-  const focusableIndex = selectedIndex >= 0 ? selectedIndex : 0;
-  const title = round === 1 ? "选择开局强化" : "选择第二项强化";
+  const presentedSelectedId = requestedId ?? selectedId;
+  const focusableIndex = Math.min(Math.max(0, focusedIndex), Math.max(0, options.length - 1));
+  const title = round === 1 ? "选择开局军令" : "选择第二项军令";
   const eyebrow = round === 1 ? "布阵阶段 · 第一轮" : "第 10 回合 · 第二轮";
   const description = round === 1
-    ? "从三张牌中选择一项。你可以刷新其中一张；双方确认阵型后同时亮出选择。"
-    : "棋钟已暂停。选择并锁定后，双方同时亮出第二项强化，再继续对局；超时会保留当前选择，尚未选择则自动锁定第一张。";
+    ? "点击一张牌即可选择并锁定。你可以先刷新其中一张；双方确认阵型后同时亮出军令。"
+    : "棋钟已暂停。点击一张牌即可锁定，双方会同时亮出第二项军令；超时未选择时自动锁定第一张。";
   const remainingSeconds = round === 2 && deadlineAt !== null
     ? Math.max(0, Math.ceil((deadlineAt - now) / 1000))
     : null;
@@ -139,7 +158,10 @@ export default function AugmentDraft({
     "awaiting-late-server",
     "docking",
   ].includes(motion.phase);
-  const motionBusy = inLockSequence || motion.phase === "recovering" || motion.phase === "settled";
+  const motionBusy = motion.phase === "dealing" ||
+    inLockSequence ||
+    motion.phase === "recovering" ||
+    motion.phase === "settled";
   const status = motion.phase === "awaiting-server"
     ? "牌面已确认，正在等待服务器回执。"
     : motion.phase === "awaiting-late-server"
@@ -147,20 +169,20 @@ export default function AugmentDraft({
     : motion.phase === "recovering"
       ? "本次锁定未完成，正在恢复选择。"
       : motion.phase === "docking"
-        ? "强化已锁定，正在归入你的牌盒。"
+        ? "军令已锁定，正在归入你的牌盒。"
         : locked
           ? opponentLocked
-            ? "双方均已锁定，正在揭示强化。"
-            : "你的强化已锁定，正在等待对手。"
-          : selectedId
-            ? "已选中一项强化；锁定前仍可更换。"
-            : "请选择一项强化。";
+            ? "双方均已锁定，正在揭示军令。"
+            : "你的军令已锁定，正在等待对手。"
+          : "点击一张牌即可选择并锁定。";
 
   useEffect(() => {
     mountedRef.current = true;
     return () => {
       mountedRef.current = false;
       lockAttemptRef.current += 1;
+      refreshAttemptRef.current += 1;
+      if (refreshTimerRef.current !== null) window.clearTimeout(refreshTimerRef.current);
     };
   }, []);
 
@@ -171,6 +193,10 @@ export default function AugmentDraft({
     media.addEventListener("change", syncPreference);
     return () => media.removeEventListener("change", syncPreference);
   }, []);
+
+  useEffect(() => {
+    optionsRef.current = options;
+  }, [options]);
 
   useEffect(() => {
     const draft = draftRef.current;
@@ -269,6 +295,76 @@ export default function AugmentDraft({
   }, [locked, motion.phase, pending]);
 
   useEffect(() => {
+    if (!refreshMotion || refreshMotion.phase !== "awaiting-replacement") return;
+    const incomingId = options[refreshMotion.slot]?.id;
+    if (!didAugmentRefreshReplaceCard(refreshMotion.outgoingId, incomingId)) return;
+    if (refreshTimerRef.current !== null) return;
+    const attempt = refreshMotion.attempt;
+    refreshTimerRef.current = window.setTimeout(() => {
+      if (!mountedRef.current || refreshAttemptRef.current !== attempt) return;
+      if (reducedMotion) {
+        refreshTimerRef.current = null;
+        setRefreshMotion((current) => current?.attempt === attempt ? null : current);
+        return;
+      }
+      refreshTimerRef.current = null;
+      setRefreshMotion((current) => current?.attempt === attempt
+        ? { ...current, phase: "revealing" }
+        : current);
+      refreshTimerRef.current = window.setTimeout(() => {
+        refreshTimerRef.current = null;
+        refreshAcceptedAttemptRef.current = null;
+        refreshPromiseAttemptRef.current = null;
+        setRefreshMotion((current) => current?.attempt === attempt ? null : current);
+      }, AUGMENT_REFRESH_MOTION_MS.reveal);
+    }, 0);
+  }, [options, reducedMotion, refreshMotion]);
+
+  useEffect(() => {
+    if (!refreshMotion) return;
+    if (pending || refreshingSlot !== null) {
+      refreshPendingObservedRef.current = true;
+      return;
+    }
+    if (!refreshPendingObservedRef.current) return;
+    const incomingId = options[refreshMotion.slot]?.id;
+    if (didAugmentRefreshReplaceCard(refreshMotion.outgoingId, incomingId)) return;
+    if (
+      refreshAcceptedAttemptRef.current === refreshMotion.attempt ||
+      refreshPromiseAttemptRef.current === refreshMotion.attempt
+    ) return;
+    refreshPendingObservedRef.current = false;
+    const attempt = refreshMotion.attempt;
+    if (refreshTimerRef.current !== null) window.clearTimeout(refreshTimerRef.current);
+    refreshTimerRef.current = window.setTimeout(() => {
+      if (!mountedRef.current || refreshAttemptRef.current !== attempt) return;
+      if (reducedMotion) {
+        refreshTimerRef.current = null;
+        setRefreshMotion((current) => current?.attempt === attempt ? null : current);
+        return;
+      }
+      refreshTimerRef.current = null;
+      setRefreshMotion((current) => current?.attempt === attempt
+        ? { ...current, phase: "restoring" }
+        : current);
+      refreshTimerRef.current = window.setTimeout(() => {
+        refreshTimerRef.current = null;
+        setRefreshMotion((current) => current?.attempt === attempt ? null : current);
+      }, AUGMENT_REFRESH_MOTION_MS.restore);
+    }, 0);
+  }, [options, pending, reducedMotion, refreshMotion, refreshingSlot]);
+
+  useEffect(() => {
+    if (!reducedMotion || !refreshMotion || refreshMotion.phase === "awaiting-replacement") return;
+    const attempt = refreshMotion.attempt;
+    if (refreshTimerRef.current !== null) window.clearTimeout(refreshTimerRef.current);
+    refreshTimerRef.current = window.setTimeout(() => {
+      refreshTimerRef.current = null;
+      setRefreshMotion((current) => current?.attempt === attempt ? null : current);
+    }, 0);
+  }, [reducedMotion, refreshMotion]);
+
+  useEffect(() => {
     const previousPhase = previousMotionPhaseRef.current;
     previousMotionPhaseRef.current = motion.phase;
     if (!lockRequestedRef.current || completionReportedRef.current) return;
@@ -281,6 +377,7 @@ export default function AugmentDraft({
     ) {
       completionReportedRef.current = true;
       lockRequestedRef.current = false;
+      setRequestedId(null);
       onMotionComplete?.("recovered");
     }
   }, [motion.phase, onMotionComplete]);
@@ -292,12 +389,17 @@ export default function AugmentDraft({
     const targetIndex = nextOptionIndex(event.key, currentIndex, options.length);
     if (targetIndex === null || !options[targetIndex] || motionBusy) return;
     event.preventDefault();
-    onSelect(options[targetIndex].id);
+    setFocusedIndex(targetIndex);
     optionRefs.current[targetIndex]?.focus();
+    optionShellRefs.current[targetIndex]?.scrollIntoView({
+      block: "nearest",
+      inline: "center",
+      behavior: reducedMotion ? "auto" : "smooth",
+    });
   };
 
-  const measureMotionVector = () => {
-    const selectedShell = optionShellRefs.current[selectedIndex];
+  const measureMotionVector = (optionIndex: number) => {
+    const selectedShell = optionShellRefs.current[optionIndex];
     if (!selectedShell) return ZERO_VECTOR;
     const cardRect = selectedShell.getBoundingClientRect();
     const cardCenterX = cardRect.left + cardRect.width / 2;
@@ -324,17 +426,19 @@ export default function AugmentDraft({
     };
   };
 
-  const requestLock = () => {
-    if (!selectedId || locked || pending || motion.phase !== "choosing" || lockRequestedRef.current) return;
+  const requestPick = (augmentId: AugmentId, optionIndex: number) => {
+    if (locked || pending || refreshingSlot !== null || refreshMotion || motion.phase !== "choosing" || lockRequestedRef.current) return;
     lockRequestedRef.current = true;
     pendingObservedRef.current = false;
     completionReportedRef.current = false;
-    setMotionVector(measureMotionVector());
+    setFocusedIndex(optionIndex);
+    setRequestedId(augmentId);
+    setMotionVector(measureMotionVector(optionIndex));
     dispatchMotion({ type: "LOCK_REQUESTED" });
     const attempt = lockAttemptRef.current + 1;
     lockAttemptRef.current = attempt;
     try {
-      const result = onConfirm();
+      const result = onPick(augmentId);
       if (result && typeof (result as PromiseLike<boolean | void>).then === "function") {
         void Promise.resolve(result).then(
           (accepted) => {
@@ -354,12 +458,98 @@ export default function AugmentDraft({
     }
   };
 
+  const rejectRefresh = (attempt: number) => {
+    if (!mountedRef.current || refreshAttemptRef.current !== attempt) return;
+    refreshAcceptedAttemptRef.current = null;
+    refreshPromiseAttemptRef.current = null;
+    refreshPendingObservedRef.current = false;
+    if (refreshTimerRef.current !== null) window.clearTimeout(refreshTimerRef.current);
+    if (reducedMotion) {
+      refreshTimerRef.current = null;
+      setRefreshMotion((current) => current?.attempt === attempt ? null : current);
+      return;
+    }
+    setRefreshMotion((current) => current?.attempt === attempt
+      ? { ...current, phase: "restoring" }
+      : current);
+    refreshTimerRef.current = window.setTimeout(() => {
+      refreshTimerRef.current = null;
+      setRefreshMotion((current) => current?.attempt === attempt ? null : current);
+    }, AUGMENT_REFRESH_MOTION_MS.restore);
+  };
+
+  const requestRefresh = (slot: AugmentSlot) => {
+    const outgoing = options[slot];
+    if (
+      !outgoing ||
+      locked ||
+      pending ||
+      refreshUsed ||
+      refreshingSlot !== null ||
+      refreshMotion ||
+      motionBusy
+    ) return;
+    const attempt = refreshAttemptRef.current + 1;
+    refreshAttemptRef.current = attempt;
+    refreshAcceptedAttemptRef.current = null;
+    refreshPromiseAttemptRef.current = null;
+    refreshPendingObservedRef.current = false;
+    setRefreshMotion({
+      attempt,
+      slot,
+      outgoingId: outgoing.id,
+      outgoing,
+      phase: reducedMotion ? "awaiting-replacement" : "burning",
+    });
+    if (!reducedMotion) {
+      refreshTimerRef.current = window.setTimeout(() => {
+        if (!mountedRef.current || refreshAttemptRef.current !== attempt) return;
+        refreshTimerRef.current = null;
+        const incomingId = optionsRef.current[slot]?.id;
+        const nextPhase = augmentRefreshPhaseAfterAsh(outgoing.id, incomingId, false);
+        setRefreshMotion((current) => current?.attempt === attempt && nextPhase
+          ? { ...current, phase: nextPhase }
+          : current);
+        if (nextPhase === "revealing") {
+          refreshTimerRef.current = window.setTimeout(() => {
+            refreshTimerRef.current = null;
+            refreshAcceptedAttemptRef.current = null;
+            refreshPromiseAttemptRef.current = null;
+            setRefreshMotion((current) => current?.attempt === attempt ? null : current);
+          }, AUGMENT_REFRESH_MOTION_MS.reveal);
+        }
+      }, AUGMENT_REFRESH_MOTION_MS.ash);
+    }
+    try {
+      const result = onRefresh(slot);
+      if (result && typeof (result as PromiseLike<boolean | void>).then === "function") {
+        refreshPromiseAttemptRef.current = attempt;
+        void Promise.resolve(result).then(
+          (accepted) => {
+            if (accepted === false) {
+              rejectRefresh(attempt);
+            } else if (mountedRef.current && refreshAttemptRef.current === attempt) {
+              refreshAcceptedAttemptRef.current = attempt;
+            }
+          },
+          () => rejectRefresh(attempt),
+        );
+      } else if (result === false) {
+        rejectRefresh(attempt);
+      } else if (result === true) {
+        refreshAcceptedAttemptRef.current = attempt;
+      }
+    } catch {
+      rejectRefresh(attempt);
+    }
+  };
+
   return (
     <section
       ref={draftRef}
       className={styles.draft}
       aria-labelledby={`augment-draft-title-${round}`}
-      aria-busy={pending || refreshingSlot !== null || inLockSequence}
+      aria-busy={pending || refreshingSlot !== null || refreshMotion !== null || inLockSequence}
       data-animation-phase={motion.phase}
       data-reduced-motion={reducedMotion ? "true" : "false"}
       style={{
@@ -370,6 +560,9 @@ export default function AugmentDraft({
         "--augment-turn-ms": `${AUGMENT_DRAFT_MOTION_MS.turnSelection}ms`,
         "--augment-dock-ms": `${AUGMENT_DRAFT_MOTION_MS.dockSelection}ms`,
         "--augment-recover-ms": `${AUGMENT_DRAFT_MOTION_MS.recoverSelection}ms`,
+        "--augment-refresh-ash-ms": `${AUGMENT_REFRESH_MOTION_MS.ash}ms`,
+        "--augment-refresh-reveal-ms": `${AUGMENT_REFRESH_MOTION_MS.reveal}ms`,
+        "--augment-refresh-restore-ms": `${AUGMENT_REFRESH_MOTION_MS.restore}ms`,
       } as CSSProperties}
     >
       <header className={styles.draftHeader}>
@@ -383,7 +576,7 @@ export default function AugmentDraft({
             <p
               className={`${styles.draftTimer} ${remainingSeconds <= 10 ? styles.draftTimerUrgent : ""}`}
               role="timer"
-              aria-label={remainingSeconds > 0 ? `强化选择剩余 ${remainingSeconds} 秒` : "选择已超时，正在自动锁定"}
+              aria-label={remainingSeconds > 0 ? `军令选择剩余 ${remainingSeconds} 秒` : "选择已超时，正在自动锁定"}
             >
               <span>{remainingSeconds > 0 ? "剩余" : "超时"}</span>
               <strong>{remainingSeconds > 0 ? `00:${String(remainingSeconds).padStart(2, "0")}` : "自动锁定中"}</strong>
@@ -398,20 +591,25 @@ export default function AugmentDraft({
 
       <fieldset
         className={styles.draftOptions}
-        role="radiogroup"
+        role="group"
         aria-label={`${title}，三选一`}
-        disabled={locked || pending || motionBusy}
+        disabled={locked || pending || refreshMotion !== null || motionBusy}
       >
-        <legend className={styles.visuallyHidden}>选择一项强化</legend>
+        <legend className={styles.visuallyHidden}>选择并锁定一项军令</legend>
         {options.map((augment, index) => {
+          const slotRefresh = refreshMotion?.slot === index ? refreshMotion : null;
+          const displayedAugment = slotRefresh && slotRefresh.phase !== "revealing"
+            ? slotRefresh.outgoing
+            : augment;
           const augmentId = augment.id;
-          const selected = augment.id === selectedId;
+          const selected = augment.id === presentedSelectedId;
           const cardState: AugmentCardState = locked && selected
             ? "locked"
             : selected
               ? "selected"
               : "available";
-          const refreshing = refreshingSlot === index;
+          const refreshing = refreshingSlot === index || slotRefresh !== null;
+          const refreshPhase = slotRefresh?.phase;
           const shellStyle = {
             "--card-motion-index": index,
             "--card-center-x": `${selected ? motionVector.centerX : 0}px`,
@@ -423,33 +621,38 @@ export default function AugmentDraft({
           return (
             <div
               className={styles.draftOption}
-              key={augment.id}
+              key={`augment-slot-${index}`}
               ref={(node) => { optionShellRefs.current[index] = node; }}
               data-card-motion-index={index}
               data-selected={selected ? "true" : "false"}
               data-card-motion={selected ? motion.phase : motion.phase === "dealing" ? "dealing" : "alternative"}
+              data-refresh-phase={refreshPhase}
               style={shellStyle}
             >
               <AugmentCard
-                augment={augment}
+                augment={displayedAugment}
                 state={cardState}
                 statusLabel={locked && !selected ? "未选择" : undefined}
-                disabled={locked || pending || refreshingSlot !== null || motionBusy}
-                onSelect={() => onSelect(augmentId)}
+                disabled={locked || pending || refreshingSlot !== null || refreshMotion !== null || motionBusy}
+                interactionLabel="按下后立即选择并锁定"
+                onSelect={() => requestPick(augmentId, index)}
                 onKeyDown={(event) => handleOptionKeyDown(event, index)}
                 buttonRef={(node) => { optionRefs.current[index] = node; }}
                 tabIndex={index === focusableIndex ? 0 : -1}
-                role="radio"
-                ariaChecked={selected}
               />
+              <span className={styles.refreshAsh} aria-hidden="true">
+                <span />
+                <span />
+                <span />
+              </span>
               <button
                 className={styles.refreshButton}
                 type="button"
-                disabled={locked || pending || refreshUsed || refreshingSlot !== null || motionBusy}
-                onClick={() => onRefresh(index as AugmentSlot)}
-                aria-label={`刷新${augment.name}；刷新后本局不会再次出现`}
+                disabled={locked || pending || refreshUsed || refreshingSlot !== null || refreshMotion !== null || motionBusy}
+                onClick={() => requestRefresh(index as AugmentSlot)}
+                aria-label={`刷新${displayedAugment.name}；刷新后本局不会再次出现`}
               >
-                {refreshing ? "正在刷新…" : "刷新这张"}
+                {refreshing ? "正在重铸…" : "刷新这张"}
               </button>
             </div>
           );
@@ -458,8 +661,8 @@ export default function AugmentDraft({
 
       <footer className={styles.draftFooter}>
         <p className={styles.draftStatus} role="status" aria-live="polite">{status}</p>
-        <div className={styles.draftActions}>
-          {onResign ? (
+        {onResign ? (
+          <div className={styles.draftActions}>
             <button
               className={styles.resignButton}
               type="button"
@@ -468,16 +671,8 @@ export default function AugmentDraft({
             >
               {resignLabel}
             </button>
-          ) : null}
-          <button
-            className={styles.confirmButton}
-            type="button"
-            disabled={!selectedId || locked || pending || refreshingSlot !== null || motion.phase !== "choosing"}
-            onClick={requestLock}
-          >
-            {locked ? "已锁定" : pending ? "正在锁定…" : inLockSequence ? "正在收牌…" : "锁定强化"}
-          </button>
-        </div>
+          </div>
+        ) : null}
       </footer>
     </section>
   );

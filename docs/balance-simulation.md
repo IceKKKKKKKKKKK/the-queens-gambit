@@ -1,4 +1,4 @@
-# 军令强化 v3：产品稳定性模拟
+# 狂野 v3：产品稳定性模拟
 
 `scripts/augment-balance-simulation.ts` 现在用于产品稳定性验证，不再承担反复调强度的任务。它的目标是尽快跑完整局，发现异常、卡死、回放分叉、隐藏信息泄漏、三次重复错误、主动牌不可达和长期不终局；胜率与档位结果只保留为诊断数据，永远不作为验收或自动调牌依据。
 
@@ -84,6 +84,6 @@ node --experimental-transform-types scripts/augment-balance-simulation.ts --mode
 
 ## 发布证据边界
 
-截至 2026-08-11 ET，最终代码回归为 273/273：HTML 9 项、集成服务器契约 4 项、TypeScript 257 项、真实集成 3 项；production build、全项目 ESLint、非增量 TypeScript 检查与差异检查均通过。三套真实集成各连续执行 4 轮，共 12/12 通过；端口每轮可重新绑定，结束后孤儿进程为 0。API 集成另在同一隔离工作区连续执行 64/64 次且零自动重试，全部返回 JSON、64 个动态端口均可重绑、D1 文件与 Vinext/Workerd 残留均为 0；独立双启动哨兵验证显式持久状态可在停服后读回并安全清理。
+截至 2026-08-11 ET，最终代码回归为 281/281：HTML 9 项、集成服务器契约 4 项、TypeScript 265 项、真实集成 3 项；production build、全项目 ESLint、非增量 TypeScript 检查与差异检查均通过。三套真实集成各连续执行 4 轮，共 12/12 通过；端口每轮可重新绑定，结束后孤儿进程为 0。API 集成另在同一隔离工作区连续执行 64/64 次且零自动重试，全部返回 JSON、64 个动态端口均可重绑、D1 文件与 Vinext/Workerd 残留均为 0；独立双启动哨兵验证显式持久状态可在停服后读回房间并安全清理。
 
-这些回归证明当前覆盖路径可工作，不替代冻结提交上的正式持续测试。发布必须以准确的冻结提交连续运行四个 worker 不少于 4 小时、完成至少一整圈 63 个同花色环形四腿组，并让所有技术 gate 通过；随后才进入 Sites 部署与生产 QA。quick 的默认证据写入 `outputs/balance/augment-balance-report.json`，正式持续测试的权威结果写入 `outputs/soak/<run-id>/final.json`。`outputs/` 只保存本机证据，不提交到源码仓库。
+这些回归证明当前覆盖路径可工作。本次沉浸式纸牌 UI/动作协议发布不要求新跑四小时 worker；当前硬门槛是同一冻结提交上的完整回归、真实 API、私有 Sites 候选和三档 Browser QA。quick 报告与可选长跑仍写入 `outputs/` 供引擎或基础设施诊断，但不替代、也不阻塞本次界面发布。

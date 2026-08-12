@@ -531,6 +531,12 @@ summary:focus-visible {
   line-height: 1.15;
 }
 
+.command-rails {
+  display: grid;
+  min-width: 0;
+  gap: 18px;
+}
+
 .repetition-notice {
   display: grid;
   min-height: 64px;
@@ -2875,21 +2881,13 @@ body:has(.augment-draft-overlay) {
   }
 
   .board-column {
-    order: 1;
+    order: 2;
     width: min(100%, 430px);
     margin: 0 auto;
   }
 
   .setup-panel {
-    order: 2;
-  }
-
-  .game-shell.is-setup .setup-panel {
     order: 1;
-  }
-
-  .game-shell.is-setup .board-column {
-    order: 2;
   }
 
   .activity-panel {
@@ -2906,6 +2904,22 @@ body:has(.augment-draft-overlay) {
 
   .side-panel h2 {
     font-size: 29px;
+  }
+
+  .command-rails {
+    display: flex;
+    width: 100%;
+    padding: 3px 2px 11px;
+    gap: 14px;
+    overflow-x: auto;
+    overscroll-behavior-inline: contain;
+    scroll-snap-type: inline mandatory;
+    scrollbar-width: thin;
+  }
+
+  .command-rails > * {
+    flex: 0 0 min(82vw, 310px);
+    scroll-snap-align: start;
   }
 
   .activity-panel {

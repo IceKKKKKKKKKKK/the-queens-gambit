@@ -1,0 +1,1444 @@
+.shell {
+  --ink: #17140f;
+  --paper: #fffdf7;
+  --ground: #faf6ec;
+  --muted: rgba(23, 20, 15, 0.66);
+  --line: rgba(23, 20, 15, 0.24);
+  --line-strong: rgba(23, 20, 15, 0.52);
+  --micro-motion: 160ms;
+  --box-motion: 480ms;
+  --compass-motion: 650ms;
+  --door-motion: 780ms;
+  position: relative;
+  isolation: isolate;
+  width: 100%;
+  min-width: 0;
+  min-height: 100vh;
+  min-height: 100dvh;
+  overflow-x: clip;
+  background: var(--ground);
+  color: var(--ink);
+}
+
+.shell,
+.shell * {
+  box-sizing: border-box;
+}
+
+.shell button,
+.shell input,
+.shell select {
+  color: inherit;
+  font: inherit;
+}
+
+.shell button,
+.shell a,
+.shell input,
+.shell select,
+.shell summary {
+  -webkit-tap-highlight-color: transparent;
+}
+
+.shell button:focus-visible,
+.shell a:focus-visible,
+.shell input:focus-visible,
+.shell select:focus-visible,
+.shell summary:focus-visible {
+  outline: 2px solid var(--ink);
+  outline-offset: 4px;
+}
+
+.paperTexture {
+  position: fixed;
+  z-index: -1;
+  inset: 0;
+  overflow: hidden;
+  background-color: var(--ground);
+  background-image:
+    repeating-linear-gradient(0deg, transparent 0 7px, rgba(23, 20, 15, 0.012) 7px 8px),
+    radial-gradient(circle at 18% 22%, rgba(23, 20, 15, 0.035) 0 1px, transparent 1.5px),
+    radial-gradient(circle at 82% 68%, rgba(23, 20, 15, 0.026) 0 1px, transparent 1.5px);
+  background-size: auto, 17px 19px, 23px 29px;
+  pointer-events: none;
+}
+
+.header {
+  position: relative;
+  z-index: 40;
+  display: flex;
+  width: min(1240px, calc(100% - 40px));
+  min-width: 0;
+  min-height: 74px;
+  margin-inline: auto;
+  align-items: center;
+  justify-content: space-between;
+  gap: 20px;
+  border-bottom: 1px solid var(--line);
+}
+
+.wordmark {
+  display: inline-flex;
+  min-width: 0;
+  align-items: center;
+  gap: 10px;
+  font-size: 15px;
+  font-weight: 720;
+  letter-spacing: 0.04em;
+  white-space: nowrap;
+}
+
+.wordmarkSeal {
+  display: grid;
+  width: 34px;
+  height: 34px;
+  flex: 0 0 auto;
+  place-items: center;
+  border: 1px solid var(--ink);
+  background: var(--paper);
+  font-family: "Iowan Old Style", Baskerville, "Times New Roman", serif;
+}
+
+.accountSummary {
+  display: grid;
+  min-width: 0;
+  justify-items: end;
+  line-height: 1.15;
+}
+
+.accountSummary span,
+.accountSummary small {
+  max-width: min(40vw, 260px);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.accountSummary span {
+  font-size: 14px;
+  font-weight: 720;
+}
+
+.accountSummary small {
+  margin-top: 4px;
+  color: var(--muted);
+  font-size: 11px;
+  letter-spacing: 0.08em;
+}
+
+.hub {
+  position: relative;
+  z-index: 1;
+  display: grid;
+  width: min(1160px, calc(100% - 32px));
+  min-height: calc(100vh - 74px);
+  min-height: calc(100dvh - 74px);
+  margin-inline: auto;
+  padding: 24px 0 34px;
+  grid-template-rows: auto minmax(420px, 1fr) auto;
+  align-items: center;
+}
+
+.hubHeading {
+  text-align: center;
+}
+
+.hubHeading > span,
+.laneTitle > span {
+  display: inline-block;
+  color: var(--muted);
+  font-size: 11px;
+  font-weight: 760;
+  letter-spacing: 0.2em;
+}
+
+.hubHeading h1 {
+  margin: 7px 0 0;
+  font-family: "Iowan Old Style", Baskerville, "Times New Roman", serif;
+  font-size: clamp(32px, 5vw, 48px);
+  font-weight: 500;
+  letter-spacing: 0.12em;
+}
+
+.compassStage {
+  position: relative;
+  width: min(620px, 100%);
+  aspect-ratio: 1;
+  margin: 0 auto;
+}
+
+.compass {
+  position: absolute;
+  top: 50%;
+  left: 50%;
+  width: 56%;
+  aspect-ratio: 1;
+  border: 1px solid var(--ink);
+  border-radius: 50%;
+  background:
+    linear-gradient(45deg, transparent 49.6%, var(--line) 49.7% 50.3%, transparent 50.4%),
+    linear-gradient(-45deg, transparent 49.6%, var(--line) 49.7% 50.3%, transparent 50.4%),
+    var(--paper);
+  box-shadow: 0 14px 34px rgba(23, 20, 15, 0.08);
+  transform: translate(-50%, -50%);
+  transition: transform var(--compass-motion) cubic-bezier(0.22, 0.78, 0.2, 1);
+}
+
+.compass::before,
+.compass::after,
+.compassOuter,
+.compassInner {
+  position: absolute;
+  border: 1px solid var(--line-strong);
+  border-radius: 50%;
+  content: "";
+}
+
+.compass::before {
+  inset: 4.5%;
+  border-style: double;
+  border-width: 4px;
+}
+
+.compass::after {
+  inset: 18%;
+  border-style: dotted;
+}
+
+.compassOuter {
+  inset: 10%;
+}
+
+.compassInner {
+  inset: 29%;
+  background:
+    conic-gradient(
+      from 22.5deg,
+      transparent 0 11.25deg,
+      rgba(23, 20, 15, 0.08) 11.25deg 22.5deg,
+      transparent 22.5deg 45deg
+    );
+}
+
+.compassNeedle {
+  position: absolute;
+  z-index: 2;
+  top: 12%;
+  left: 49%;
+  width: 2%;
+  height: 76%;
+  background: var(--ink);
+  clip-path: polygon(50% 0, 100% 48%, 62% 48%, 62% 100%, 38% 100%, 38% 48%, 0 48%);
+  transform-origin: center;
+}
+
+.compassNeedle::after {
+  position: absolute;
+  top: 48%;
+  left: 50%;
+  width: 14px;
+  height: 14px;
+  border: 1px solid var(--ink);
+  border-radius: 50%;
+  background: var(--paper);
+  content: "";
+  transform: translate(-50%, -50%);
+}
+
+.tuckBox {
+  position: absolute;
+  z-index: 4;
+  top: 50%;
+  left: 50%;
+  width: 20%;
+  aspect-ratio: 5 / 8;
+  perspective: 800px;
+  transform: translate(-50%, -50%);
+}
+
+.tuckFace {
+  position: absolute;
+  z-index: 2;
+  display: grid;
+  inset: 0;
+  place-items: center;
+  border: 1px solid var(--ink);
+  background: var(--paper);
+  box-shadow: 7px 9px 0 rgba(23, 20, 15, 0.12);
+}
+
+.tuckFace::before,
+.tuckFace::after {
+  position: absolute;
+  inset: 7px;
+  border: 1px solid var(--line-strong);
+  content: "";
+}
+
+.tuckFace::after {
+  inset: 14px;
+  border-style: double;
+  border-width: 3px;
+}
+
+.tuckFace i {
+  position: relative;
+  z-index: 2;
+  display: grid;
+  width: 52%;
+  aspect-ratio: 1;
+  place-items: center;
+  border: 1px solid var(--ink);
+  border-radius: 50%;
+  background: var(--paper);
+  font-family: "Iowan Old Style", Baskerville, "Times New Roman", serif;
+  font-size: clamp(24px, 4vw, 42px);
+  font-style: normal;
+}
+
+.tuckFlap {
+  position: absolute;
+  z-index: 1;
+  right: 4%;
+  bottom: 96%;
+  left: 4%;
+  height: 26%;
+  border: 1px solid var(--ink);
+  border-bottom: 0;
+  background: var(--paper);
+  clip-path: polygon(0 100%, 12% 18%, 50% 0, 88% 18%, 100% 100%);
+  transform: rotateX(78deg);
+  transform-origin: bottom;
+  transition: transform var(--box-motion) cubic-bezier(0.22, 0.78, 0.2, 1);
+}
+
+.laneButton {
+  position: absolute;
+  z-index: 5;
+  display: grid;
+  width: clamp(94px, 18%, 112px);
+  aspect-ratio: 5 / 8;
+  place-items: center;
+  border: 1px solid var(--ink);
+  border-radius: 4px;
+  background: var(--paper);
+  box-shadow: 5px 7px 0 rgba(23, 20, 15, 0.13);
+  cursor: pointer;
+  transition:
+    box-shadow var(--micro-motion) ease,
+    transform var(--micro-motion) ease;
+}
+
+.laneButton::before,
+.laneButton::after {
+  position: absolute;
+  pointer-events: none;
+  content: "";
+}
+
+.laneButton::before {
+  inset: 7px;
+  border: 1px solid var(--line-strong);
+  border-radius: 2px;
+}
+
+.laneButton::after {
+  top: 13%;
+  right: 16%;
+  bottom: 13%;
+  left: 16%;
+  border-block: 1px solid var(--line);
+}
+
+.laneButton span {
+  position: relative;
+  z-index: 1;
+  display: grid;
+  width: 68%;
+  aspect-ratio: 1;
+  place-items: center;
+  border: 1px solid var(--ink);
+  border-radius: 50%;
+  background: var(--paper);
+  font-family: "Iowan Old Style", Baskerville, "Times New Roman", serif;
+  font-size: clamp(20px, 3vw, 29px);
+  font-weight: 600;
+  letter-spacing: 0.12em;
+  text-indent: 0.12em;
+}
+
+.laneButton:hover {
+  box-shadow: 8px 11px 0 rgba(23, 20, 15, 0.16);
+}
+
+.laneClassic {
+  top: 50%;
+  left: 2%;
+  transform: translateY(-50%) rotate(-3deg);
+}
+
+.laneClassic:hover {
+  transform: translateY(calc(-50% - 7px)) rotate(-2deg);
+}
+
+.laneWild {
+  top: 50%;
+  right: 2%;
+  transform: translateY(-50%) rotate(3deg);
+}
+
+.laneWild:hover {
+  transform: translateY(calc(-50% - 7px)) rotate(2deg);
+}
+
+.lanePersonal {
+  bottom: 0;
+  left: 50%;
+  transform: translateX(-50%);
+}
+
+.lanePersonal:hover {
+  transform: translate(-50%, -7px);
+}
+
+.shell[data-phase="lane-opening"] .compass {
+  transform: translate(-50%, -50%) rotate(420deg) scale(1.08);
+}
+
+.shell[data-phase="lane-opening"] .tuckFlap {
+  transform: rotateX(-155deg);
+}
+
+.shell[data-phase="lane-opening"] .laneButton {
+  pointer-events: none;
+}
+
+.roomCodeForm {
+  width: min(390px, 100%);
+  margin: 2px auto 0;
+}
+
+.roomCodeForm label,
+.field > span,
+.handleForm > label,
+.friendForm > label {
+  display: block;
+  margin-bottom: 7px;
+  color: var(--muted);
+  font-size: 11px;
+  font-weight: 740;
+  letter-spacing: 0.12em;
+}
+
+.roomCodeForm > div,
+.handleForm > div,
+.friendForm > div {
+  display: grid;
+  min-width: 0;
+  grid-template-columns: minmax(0, 1fr) auto;
+}
+
+.roomCodeForm input,
+.handleForm input,
+.friendForm input,
+.field select {
+  width: 100%;
+  min-width: 0;
+  min-height: 46px;
+  border: 1px solid var(--ink);
+  border-radius: 0;
+  background: var(--paper);
+  padding: 0 13px;
+}
+
+.roomCodeForm input {
+  border-right: 0;
+  font-family: ui-monospace, "SFMono-Regular", Consolas, monospace;
+  font-size: 16px;
+  font-weight: 720;
+  letter-spacing: 0.16em;
+  text-transform: uppercase;
+}
+
+.roomCodeForm button,
+.handleForm button,
+.friendForm button,
+.requests button,
+.friendList button {
+  min-height: 46px;
+  border: 1px solid var(--ink);
+  background: var(--ink);
+  color: var(--paper);
+  cursor: pointer;
+  font-size: 13px;
+  font-weight: 720;
+}
+
+.roomCodeForm button {
+  min-width: 76px;
+}
+
+.shell button:disabled,
+.shell input:disabled {
+  cursor: not-allowed;
+  opacity: 0.48;
+}
+
+.laneScene {
+  position: absolute;
+  z-index: 20;
+  inset: 0;
+  min-width: 0;
+  min-height: 100vh;
+  min-height: 100dvh;
+  overflow-x: clip;
+  overflow-y: auto;
+  background: var(--ground);
+  overscroll-behavior: contain;
+  padding: 98px 20px 48px;
+}
+
+.laneScene::before,
+.laneScene::after {
+  position: fixed;
+  z-index: -1;
+  border: 1px solid var(--line);
+  border-radius: 50%;
+  content: "";
+  pointer-events: none;
+}
+
+.laneScene::before {
+  top: 17%;
+  left: -9vw;
+  width: 28vw;
+  aspect-ratio: 1;
+}
+
+.laneScene::after {
+  right: -8vw;
+  bottom: 5%;
+  width: 24vw;
+  aspect-ratio: 1;
+  border-style: double;
+  border-width: 4px;
+}
+
+.laneSceneOpening {
+  animation: laneEnter var(--compass-motion) cubic-bezier(0.22, 0.78, 0.2, 1) both;
+}
+
+.laneSceneClosing {
+  pointer-events: none;
+  animation: laneLeave var(--box-motion) cubic-bezier(0.4, 0, 0.7, 0.2) both;
+}
+
+.laneSceneOpen {
+  animation: none;
+}
+
+@keyframes laneEnter {
+  0% {
+    opacity: 0;
+    transform: scale(0.94) translateY(24px);
+  }
+  58% { opacity: 0; }
+  100% {
+    opacity: 1;
+    transform: scale(1) translateY(0);
+  }
+}
+
+@keyframes laneLeave {
+  from {
+    opacity: 1;
+    transform: scale(1);
+  }
+  to {
+    opacity: 0;
+    transform: scale(0.95) translateY(20px);
+  }
+}
+
+.backButton {
+  position: fixed;
+  z-index: 42;
+  top: 86px;
+  left: max(20px, calc((100vw - 1240px) / 2));
+  display: inline-flex;
+  min-height: 42px;
+  align-items: center;
+  gap: 9px;
+  border: 0;
+  border-bottom: 1px solid var(--ink);
+  background: var(--ground);
+  cursor: pointer;
+  font-size: 13px;
+  font-weight: 720;
+}
+
+.backButton span {
+  font-size: 19px;
+  transition: transform var(--micro-motion) ease;
+}
+
+.backButton:hover span {
+  transform: translateX(-4px);
+}
+
+.laneContent {
+  width: min(1050px, 100%);
+  min-width: 0;
+  margin: 0 auto;
+}
+
+.laneTitle {
+  max-width: 620px;
+  margin: 38px auto 32px;
+  text-align: center;
+}
+
+.laneTitle h2 {
+  margin: 6px 0 8px;
+  font-family: "Iowan Old Style", Baskerville, "Times New Roman", serif;
+  font-size: clamp(58px, 9vw, 94px);
+  font-weight: 500;
+  letter-spacing: 0.16em;
+  line-height: 0.95;
+  text-indent: 0.16em;
+}
+
+.laneTitle p {
+  margin: 0;
+  color: var(--muted);
+  font-size: 15px;
+  line-height: 1.7;
+}
+
+.playCard,
+.profilePanel,
+.historyPanel,
+.friendsPanel {
+  position: relative;
+  min-width: 0;
+  border: 1px solid var(--ink);
+  background: var(--paper);
+  box-shadow: 8px 10px 0 rgba(23, 20, 15, 0.1);
+}
+
+.playCard {
+  width: min(410px, 100%);
+  margin-inline: auto;
+  padding: 40px clamp(22px, 5vw, 42px) 34px;
+}
+
+.playCard::before,
+.profilePanel::before,
+.historyPanel::before,
+.friendsPanel::before {
+  position: absolute;
+  inset: 7px;
+  border: 1px solid var(--line-strong);
+  content: "";
+  pointer-events: none;
+}
+
+.playCard h3,
+.panelHeading h3 {
+  margin: 0;
+  font-family: "Iowan Old Style", Baskerville, "Times New Roman", serif;
+  font-size: 25px;
+  font-weight: 600;
+}
+
+.playCard > p {
+  min-height: 48px;
+  margin: 8px 0 24px;
+  color: var(--muted);
+  font-size: 13px;
+  line-height: 1.7;
+}
+
+.cardSuit {
+  position: absolute;
+  top: 15px;
+  right: 18px;
+  font-family: "Iowan Old Style", Baskerville, "Times New Roman", serif;
+  font-size: 19px;
+}
+
+.field {
+  display: block;
+  margin-bottom: 16px;
+}
+
+.primaryAction,
+.secondaryAction {
+  width: 100%;
+  min-height: 50px;
+  border: 1px solid var(--ink);
+  cursor: pointer;
+  font-size: 14px;
+  font-weight: 760;
+  letter-spacing: 0.04em;
+  transition:
+    background var(--micro-motion) ease,
+    color var(--micro-motion) ease,
+    transform var(--micro-motion) ease;
+}
+
+.primaryAction {
+  background: var(--ink);
+  color: var(--paper) !important;
+}
+
+.secondaryAction {
+  background: var(--paper);
+}
+
+.primaryAction:hover,
+.secondaryAction:hover {
+  transform: translateY(-2px);
+}
+
+.secondaryAction:hover {
+  background: var(--ink);
+  color: var(--paper);
+}
+
+.wildGrid {
+  display: grid;
+  width: min(870px, 100%);
+  min-width: 0;
+  margin-inline: auto;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 24px;
+}
+
+.wildGrid .playCard {
+  width: 100%;
+  margin: 0;
+}
+
+.rankLine {
+  display: flex;
+  margin-bottom: 16px;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 12px;
+  border-block: 1px solid var(--line);
+  padding-block: 13px;
+}
+
+.rankLine span {
+  font-size: 13px;
+  font-weight: 720;
+}
+
+.rankLine strong {
+  font-family: "Iowan Old Style", Baskerville, "Times New Roman", serif;
+  font-size: 21px;
+}
+
+.rulesNote {
+  width: min(870px, 100%);
+  margin: 22px auto 0;
+  border-block: 1px solid var(--line);
+  padding: 14px 4px;
+}
+
+.rulesNote summary {
+  cursor: pointer;
+  font-size: 13px;
+  font-weight: 740;
+}
+
+.rulesNote p {
+  margin: 10px 0 0;
+  color: var(--muted);
+  font-size: 13px;
+  line-height: 1.7;
+}
+
+.personalContent {
+  width: min(1160px, 100%);
+}
+
+.personalGrid {
+  display: grid;
+  min-width: 0;
+  grid-template-columns: minmax(0, 0.92fr) minmax(0, 1.08fr);
+  grid-template-areas:
+    "profile history"
+    "friends friends";
+  gap: 20px;
+}
+
+.profilePanel,
+.historyPanel,
+.friendsPanel {
+  padding: 32px;
+}
+
+.profilePanel { grid-area: profile; }
+.historyPanel { grid-area: history; }
+.friendsPanel { grid-area: friends; }
+
+.panelHeading {
+  position: relative;
+  z-index: 1;
+  display: flex;
+  margin-bottom: 24px;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 12px;
+  border-bottom: 1px solid var(--line);
+  padding-bottom: 13px;
+}
+
+.panelHeading span {
+  color: var(--muted);
+  font-size: 11px;
+  font-weight: 720;
+  letter-spacing: 0.08em;
+}
+
+.handleForm,
+.friendForm,
+.stats,
+.rankProgress,
+.signOutLink,
+.historyList,
+.requests,
+.outgoing,
+.friendList {
+  position: relative;
+  z-index: 1;
+}
+
+.handleForm button,
+.friendForm button {
+  min-width: 70px;
+}
+
+.handleForm small {
+  display: block;
+  margin-top: 8px;
+  color: var(--muted);
+  font-size: 12px;
+  line-height: 1.5;
+}
+
+.stats {
+  display: grid;
+  margin-top: 24px;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  border-block: 1px solid var(--line);
+}
+
+.stats div {
+  display: grid;
+  min-width: 0;
+  padding: 16px 8px;
+  text-align: center;
+}
+
+.stats div + div {
+  border-left: 1px solid var(--line);
+}
+
+.stats span {
+  color: var(--muted);
+  font-size: 10px;
+  letter-spacing: 0.08em;
+}
+
+.stats strong {
+  margin-top: 5px;
+  font-family: "Iowan Old Style", Baskerville, "Times New Roman", serif;
+  font-size: 24px;
+}
+
+.rankProgress {
+  height: 5px;
+  margin-top: 18px;
+  overflow: hidden;
+  border: 1px solid var(--ink);
+  background: var(--paper);
+}
+
+.rankProgress span {
+  display: block;
+  height: 100%;
+  background: var(--ink);
+}
+
+.signOutLink {
+  display: inline-block;
+  margin-top: 20px;
+  border-bottom: 1px solid var(--ink);
+  color: var(--ink);
+  font-size: 12px;
+  font-weight: 720;
+  text-decoration: none;
+}
+
+.historyList,
+.friendList {
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.historyList {
+  max-height: 298px;
+  overflow-y: auto;
+  scrollbar-gutter: stable;
+}
+
+.historyList li {
+  display: grid;
+  min-width: 0;
+  grid-template-columns: 34px minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 10px;
+  border-bottom: 1px solid var(--line);
+  padding: 10px 2px;
+}
+
+.historyList li > span:nth-child(2) {
+  display: grid;
+  min-width: 0;
+}
+
+.historyList strong,
+.friendList strong {
+  overflow: hidden;
+  font-size: 13px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.historyList small,
+.friendList small {
+  margin-top: 2px;
+  color: var(--muted);
+  font-size: 10px;
+}
+
+.historyList em {
+  font-family: ui-monospace, "SFMono-Regular", Consolas, monospace;
+  font-size: 12px;
+  font-style: normal;
+  font-weight: 720;
+}
+
+.outcome {
+  display: grid;
+  width: 27px;
+  aspect-ratio: 1;
+  place-items: center;
+  border: 1px solid var(--ink);
+  border-radius: 50%;
+  font-family: "Iowan Old Style", Baskerville, "Times New Roman", serif;
+  font-weight: 700;
+}
+
+.friendForm {
+  width: min(480px, 100%);
+}
+
+.requests,
+.outgoing {
+  margin-top: 18px;
+  border-block: 1px solid var(--line);
+  padding: 12px 0;
+}
+
+.requests h4,
+.outgoing h4 {
+  margin: 0 0 8px;
+  font-size: 11px;
+  letter-spacing: 0.1em;
+}
+
+.requests > div {
+  display: flex;
+  min-width: 0;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.requests > div + div {
+  margin-top: 7px;
+}
+
+.requests span {
+  min-width: 0;
+  overflow: hidden;
+  font-size: 13px;
+  font-weight: 720;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.requests button,
+.friendList button {
+  min-height: 34px;
+  padding-inline: 14px;
+}
+
+.outgoing p {
+  margin: 0;
+  overflow-wrap: anywhere;
+  color: var(--muted);
+  font-size: 12px;
+  line-height: 1.6;
+}
+
+.friendList {
+  display: grid;
+  margin-top: 18px;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 1px;
+  background: var(--line);
+  border: 1px solid var(--line);
+}
+
+.friendList li {
+  display: grid;
+  min-width: 0;
+  min-height: 58px;
+  grid-template-columns: auto minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 10px;
+  background: var(--paper);
+  padding: 10px 12px;
+}
+
+.friendList li > span:nth-child(2) {
+  display: grid;
+  min-width: 0;
+}
+
+.presence {
+  width: 8px;
+  height: 8px;
+  border: 1px solid var(--ink);
+  border-radius: 50%;
+  background: var(--paper);
+}
+
+.presence[data-presence="online"],
+.presence[data-presence="searching"],
+.presence[data-presence="in_game"] {
+  background: var(--ink);
+}
+
+.emptyRow {
+  display: block !important;
+  grid-column: 1 / -1;
+  min-height: 0 !important;
+  padding: 18px !important;
+  color: var(--muted);
+  font-size: 12px;
+  line-height: 1.6;
+  text-align: center;
+}
+
+.entryGate {
+  position: fixed;
+  z-index: 100;
+  display: grid;
+  inset: 0;
+  overflow: hidden;
+  place-items: center;
+  background: var(--ground);
+  perspective: 1300px;
+}
+
+.courtDoor {
+  position: absolute;
+  top: 50%;
+  width: min(37vw, 420px);
+  aspect-ratio: 836 / 941;
+  border: 1px solid var(--ink);
+  border-radius: 4px;
+  background-image: url("/queen-vs-king.png");
+  background-repeat: no-repeat;
+  background-size: 200% 100%;
+  box-shadow: 0 18px 44px rgba(23, 20, 15, 0.13);
+  transform: translate(-50%, -50%);
+  transform-style: preserve-3d;
+}
+
+.courtDoor::after {
+  position: absolute;
+  inset: 8px;
+  border: 1px solid var(--line-strong);
+  content: "";
+}
+
+.queenDoor {
+  left: 25%;
+  background-position: left center;
+}
+
+.kingDoor {
+  left: 75%;
+  background-position: right center;
+}
+
+.entryGateOpening .queenDoor {
+  animation: queenDoorOpen var(--door-motion) cubic-bezier(0.55, 0.05, 0.15, 1) both;
+}
+
+.entryGateOpening .kingDoor {
+  animation: kingDoorOpen var(--door-motion) cubic-bezier(0.55, 0.05, 0.15, 1) both;
+}
+
+@keyframes queenDoorOpen {
+  from { transform: translate(-50%, -50%) rotateY(0); }
+  to { transform: translate(-195%, -50%) rotateY(-28deg); }
+}
+
+@keyframes kingDoorOpen {
+  from { transform: translate(-50%, -50%) rotateY(0); }
+  to { transform: translate(95%, -50%) rotateY(28deg); }
+}
+
+.entryInvitation {
+  position: relative;
+  z-index: 3;
+  width: min(410px, calc(100% - 32px));
+  border-block: 1px solid var(--ink);
+  background: var(--ground);
+  padding: 42px 28px;
+  text-align: center;
+}
+
+.entryInvitation::before,
+.entryInvitation::after {
+  position: absolute;
+  left: 50%;
+  content: "♠";
+  font-family: "Iowan Old Style", Baskerville, "Times New Roman", serif;
+  font-size: 12px;
+  transform: translateX(-50%);
+}
+
+.entryInvitation::before { top: 11px; }
+.entryInvitation::after { bottom: 11px; }
+
+.entryInvitation > span {
+  color: var(--muted);
+  font-size: 11px;
+  font-weight: 720;
+  letter-spacing: 0.1em;
+}
+
+.entryInvitation h1 {
+  margin: 9px 0 7px;
+  font-family: "Iowan Old Style", Baskerville, "Times New Roman", serif;
+  font-size: clamp(38px, 7vw, 58px);
+  font-weight: 500;
+  letter-spacing: 0.08em;
+}
+
+.entryInvitation p {
+  margin: 0 0 24px;
+  color: var(--muted);
+  font-size: 13px;
+}
+
+.entryInvitation button {
+  min-width: 176px;
+  min-height: 49px;
+  border: 1px solid var(--ink);
+  background: var(--ink);
+  color: var(--paper);
+  cursor: pointer;
+  font-size: 14px;
+  font-weight: 760;
+  letter-spacing: 0.12em;
+  transition: transform var(--micro-motion) ease;
+}
+
+.entryInvitation button:hover {
+  transform: translateY(-2px);
+}
+
+.entryGateOpening .entryInvitation {
+  animation: invitationFade 300ms ease both;
+  pointer-events: none;
+}
+
+@keyframes invitationFade {
+  to {
+    opacity: 0;
+    transform: scale(0.94);
+  }
+}
+
+.loadingMark {
+  display: grid;
+  width: 58px;
+  aspect-ratio: 1;
+  place-items: center;
+  border: 1px solid var(--ink);
+  border-radius: 50%;
+  background: var(--paper);
+  font-family: "Iowan Old Style", Baskerville, "Times New Roman", serif;
+  font-size: 23px;
+  animation: loadingTurn 1.2s linear infinite;
+}
+
+@keyframes loadingTurn {
+  to { transform: rotate(360deg); }
+}
+
+.liveRegion {
+  position: fixed;
+  width: 1px;
+  height: 1px;
+  overflow: hidden;
+  clip: rect(0 0 0 0);
+  clip-path: inset(50%);
+  white-space: nowrap;
+}
+
+@media (max-width: 780px) {
+  .header {
+    width: calc(100% - 28px);
+    min-height: 64px;
+  }
+
+  .wordmark {
+    gap: 7px;
+    font-size: 13px;
+  }
+
+  .wordmarkSeal {
+    width: 30px;
+    height: 30px;
+  }
+
+  .accountSummary span,
+  .accountSummary small {
+    max-width: 32vw;
+  }
+
+  .hub {
+    width: calc(100% - 24px);
+    min-height: calc(100dvh - 64px);
+    padding: 20px 0 26px;
+    grid-template-rows: auto minmax(350px, 1fr) auto;
+  }
+
+  .hubHeading h1 {
+    font-size: 31px;
+  }
+
+  .compassStage {
+    width: min(100%, 430px);
+  }
+
+  .compass {
+    width: 56%;
+  }
+
+  .tuckBox {
+    width: 21%;
+  }
+
+  .laneButton {
+    width: clamp(76px, 23%, 96px);
+  }
+
+  .laneButton span {
+    font-size: clamp(17px, 5vw, 23px);
+  }
+
+  .laneClassic { left: 0; }
+  .laneWild { right: 0; }
+
+  .roomCodeForm {
+    width: min(350px, 100%);
+  }
+
+  .laneScene {
+    padding: 88px 14px 38px;
+  }
+
+  .backButton {
+    top: 72px;
+    left: 14px;
+  }
+
+  .laneTitle {
+    margin: 48px auto 25px;
+  }
+
+  .laneTitle h2 {
+    font-size: 58px;
+  }
+
+  .wildGrid,
+  .personalGrid {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .personalGrid {
+    grid-template-areas:
+      "profile"
+      "history"
+      "friends";
+  }
+
+  .profilePanel,
+  .historyPanel,
+  .friendsPanel {
+    padding: 27px 22px;
+  }
+
+  .friendList {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .courtDoor {
+    width: min(45vw, 320px);
+  }
+
+  .entryInvitation {
+    padding-inline: 20px;
+  }
+}
+
+@media (max-width: 430px) {
+  .header {
+    gap: 8px;
+  }
+
+  .wordmark > span:last-child {
+    max-width: 126px;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+
+  .accountSummary span,
+  .accountSummary small {
+    max-width: 112px;
+  }
+
+  .hub {
+    grid-template-rows: auto minmax(315px, 1fr) auto;
+  }
+
+  .hubHeading > span {
+    font-size: 10px;
+  }
+
+  .hubHeading h1 {
+    margin-top: 4px;
+    font-size: 27px;
+  }
+
+  .compassStage {
+    width: min(100%, 350px);
+  }
+
+  .compass {
+    width: 53%;
+  }
+
+  .tuckBox {
+    width: 20%;
+  }
+
+  .laneButton {
+    width: 78px;
+  }
+
+  .laneButton::before { inset: 5px; }
+
+  .laneButton span {
+    width: 70%;
+    font-size: 18px;
+  }
+
+  .lanePersonal { bottom: -4px; }
+
+  .roomCodeForm label {
+    margin-bottom: 5px;
+  }
+
+  .roomCodeForm input {
+    letter-spacing: 0.1em;
+  }
+
+  .laneScene {
+    padding-right: 12px;
+    padding-left: 12px;
+  }
+
+  .laneTitle p {
+    font-size: 13px;
+  }
+
+  .playCard {
+    padding: 36px 22px 26px;
+  }
+
+  .stats strong {
+    font-size: 20px;
+  }
+
+  .stats span {
+    font-size: 9px;
+  }
+
+  .historyList li {
+    grid-template-columns: 30px minmax(0, 1fr) auto;
+    gap: 8px;
+  }
+
+  .friendList li {
+    grid-template-columns: auto minmax(0, 1fr) auto;
+    padding-inline: 8px;
+  }
+
+  .entryInvitation {
+    width: calc(100% - 28px);
+  }
+
+  .entryInvitation h1 {
+    font-size: 39px;
+  }
+}
+
+@media (max-height: 730px) and (min-width: 781px) {
+  .hub {
+    grid-template-rows: auto minmax(390px, 1fr) auto;
+  }
+
+  .compassStage {
+    width: min(480px, 80vh);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .shell *,
+  .shell *::before,
+  .shell *::after {
+    scroll-behavior: auto !important;
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+  }
+
+  .shell[data-phase="lane-opening"] .compass {
+    transform: translate(-50%, -50%);
+  }
+}
