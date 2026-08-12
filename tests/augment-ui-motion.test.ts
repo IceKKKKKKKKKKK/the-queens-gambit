@@ -657,6 +657,18 @@ test("desktop setup docks the command rails beside the piece box and mobile keep
   );
   assert.match(
     globalCss,
+    /@media \(min-width: 900px\) and \(max-width: 1180px\)[\s\S]*?\.activity-panel\s*\{[\s\S]*?position:\s*static[\s\S]*?top:\s*auto/,
+  );
+  assert.match(
+    globalCss,
+    /@media \(min-width: 781px\) and \(max-width: 899px\)[\s\S]*?\.command-panel\s*\{[\s\S]*?grid-template-columns:\s*repeat\(2, minmax\(0, 1fr\)\)/,
+  );
+  assert.match(
+    globalCss,
+    /@media \(min-width: 781px\) and \(max-width: 899px\)[\s\S]*?\.board-column,[\s\S]*?\.setup-controls-panel,[\s\S]*?\.activity-panel\s*\{[\s\S]*?position:\s*static/,
+  );
+  assert.match(
+    globalCss,
     /@media \(min-width: 1181px\)[\s\S]*?grid-template-columns:\s*repeat\(2, minmax\(200px, 232px\)\) minmax\(360px, 440px\) minmax\(230px, 280px\)/,
   );
   assert.match(globalCss, /@media \(max-width: 780px\)[\s\S]*?\.command-panel\s*\{\s*order:\s*1/);
