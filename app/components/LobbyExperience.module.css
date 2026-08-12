@@ -324,9 +324,7 @@
   background: var(--paper);
   box-shadow: 5px 7px 0 rgba(23, 20, 15, 0.13);
   cursor: pointer;
-  transition:
-    box-shadow var(--micro-motion) ease,
-    transform var(--micro-motion) ease;
+  transition: transform var(--micro-motion) ease;
 }
 
 .laneButton::before,
@@ -681,10 +679,7 @@
   font-size: 14px;
   font-weight: 760;
   letter-spacing: 0.04em;
-  transition:
-    background var(--micro-motion) ease,
-    color var(--micro-motion) ease,
-    transform var(--micro-motion) ease;
+  transition: transform var(--micro-motion) ease;
 }
 
 .primaryAction {
@@ -1170,7 +1165,7 @@
 }
 
 .entryGateOpening .entryInvitation {
-  animation: invitationFade 300ms ease both;
+  animation: invitationFade var(--micro-motion) ease both;
   pointer-events: none;
 }
 
