@@ -599,6 +599,73 @@ test("rail inspection is private, modal, focus-contained, and explicitly activat
   assert.match(dialogSource, /pending \? "行动处理中…" : "发动军令"/);
 });
 
+test("rail hover preview portals above the board on an opaque paper surface", () => {
+  const railSource = readFileSync(new URL("../app/components/AugmentRail.tsx", import.meta.url), "utf8");
+  const css = readFileSync(new URL("../app/components/Augments.module.css", import.meta.url), "utf8");
+  const globalCss = readFileSync(new URL("../app/globals.css", import.meta.url), "utf8");
+  const previewRule = css.slice(css.indexOf(".railPreview {"), css.indexOf(".railPreviewLabel"));
+  const previewKeyframes = css.slice(
+    css.indexOf("@keyframes inspect-preview-in"),
+    css.indexOf("@keyframes inspect-overlay-in"),
+  );
+
+  assert.match(railSource, /import \{ createPortal \} from "react-dom"/);
+  assert.match(railSource, /createPortal\([\s\S]*?data-augment-preview="true"[\s\S]*?document\.body/);
+  assert.match(railSource, /previewAnchorX/);
+  assert.match(railSource, /boundary\.left - 137/);
+  assert.match(railSource, /previewBoundarySelector/);
+  assert.match(railSource, /getBoundingClientRect\(\)/);
+  assert.match(railSource, /--augment-preview-x/);
+  assert.match(previewRule, /--augment-paper:\s*var\(--paper, #fffdf7\)/);
+  assert.match(previewRule, /left:\s*var\(--augment-preview-x, 50%\)/);
+  assert.match(previewRule, /background:\s*var\(--augment-paper, #fffdf7\)/);
+  assert.match(previewRule, /z-index:\s*60/);
+  assert.match(globalCss, /\.augment-draft-overlay\s*\{[\s\S]*?z-index:\s*80/);
+  assert.match(previewRule, /opacity:\s*1/);
+  assert.match(css, /@media \(max-width:\s*780px\)[\s\S]*?\.railPreview\s*\{\s*display:\s*none/);
+  assert.doesNotMatch(previewKeyframes, /opacity:/);
+  assert.match(
+    css,
+    /@media \(prefers-reduced-motion: reduce\)[\s\S]*?\.railPreview\s*\{[\s\S]*?opacity:\s*1;[\s\S]*?translate\(-50%, -50%\) scale\(1\)/,
+  );
+});
+
+test("desktop setup docks the command rails beside the piece box and mobile keeps local scrolling", () => {
+  const gameSource = readFileSync(new URL("../app/GameApp.tsx", import.meta.url), "utf8");
+  const globalCss = readFileSync(new URL("../app/globals.css", import.meta.url), "utf8");
+  const railsIndex = gameSource.indexOf('<div className="command-rails"');
+  const trayIndex = gameSource.indexOf("<PieceTray", railsIndex);
+  const boardIndex = gameSource.indexOf('className="board-column"', railsIndex);
+
+  assert.ok(railsIndex >= 0 && trayIndex > railsIndex, "the setup piece box follows the command rails");
+  assert.ok(
+    boardIndex > trayIndex,
+    "the DOM follows command rails, setup piece box, then board for a coherent keyboard flow",
+  );
+  assert.match(gameSource, /game\.phase === "setup" && game\.augment && viewerSide \? "has-setup-command-dock"/);
+  assert.match(
+    globalCss,
+    /@media \(min-width: 900px\)[\s\S]*?grid-template-columns:\s*repeat\(2, minmax\(200px, 232px\)\) minmax\(340px, 440px\)/,
+  );
+  assert.match(globalCss, /\.command-panel > \.command-rails\s*\{[\s\S]*?grid-column:\s*1/);
+  assert.match(globalCss, /\.command-panel > \.piece-box\s*\{[\s\S]*?grid-column:\s*2/);
+  assert.match(globalCss, /\.game-shell\.has-setup-command-dock \.setup-controls-panel\s*\{[\s\S]*?min-width:\s*0[\s\S]*?grid-column:\s*1 \/ 3/);
+  assert.match(globalCss, /\.game-shell > \.command-panel,[\s\S]*?\.game-shell > \.setup-controls-panel\s*\{[\s\S]*?position:\s*static/);
+  assert.match(
+    globalCss,
+    /@media \(min-width: 900px\) and \(max-width: 1180px\)[\s\S]*?\.activity-panel\s*\{[\s\S]*?grid-column:\s*1 \/ 4/,
+  );
+  assert.match(
+    globalCss,
+    /@media \(min-width: 1181px\)[\s\S]*?grid-template-columns:\s*repeat\(2, minmax\(200px, 232px\)\) minmax\(360px, 440px\) minmax\(230px, 280px\)/,
+  );
+  assert.match(globalCss, /@media \(max-width: 780px\)[\s\S]*?\.command-panel\s*\{\s*order:\s*1/);
+  assert.match(globalCss, /@media \(max-width: 780px\)[\s\S]*?\.setup-controls-panel\s*\{\s*order:\s*3/);
+  assert.match(globalCss, /@media \(max-width: 780px\)[\s\S]*?\.game-shell\.has-setup-command-dock \.command-panel\s*\{[\s\S]*?grid-template-columns:\s*repeat\(2, minmax\(0, 1fr\)\)/);
+  assert.match(globalCss, /@media \(max-width: 780px\)[\s\S]*?\.game-shell\.has-setup-command-dock \.command-rails > \*\s*\{[\s\S]*?flex-basis:\s*100%/);
+  assert.match(globalCss, /@media \(max-width: 780px\)[\s\S]*?\.command-rails\s*\{[\s\S]*?overflow-x:\s*auto/);
+});
+
 test("the mobile draft neither covers its third card nor exposes background controls", () => {
   const draftSource = readFileSync(new URL("../app/components/AugmentDraft.tsx", import.meta.url), "utf8");
   const augmentCss = readFileSync(new URL("../app/components/Augments.module.css", import.meta.url), "utf8");
@@ -620,8 +687,8 @@ test("the mobile draft neither covers its third card nor exposes background cont
   assert.match(globalCss, /\.time-control-form button\s*\{[\s\S]*?min-height:\s*44px/);
   assert.match(globalCss, /@media \(max-width: 780px\)[\s\S]*?grid-template-columns:\s*minmax\(0, 1fr\)/);
   assert.match(globalCss, /\.board-column,\s*\n\s*\.side-panel\s*\{\s*min-width:\s*0/);
-  assert.match(globalCss, /\.setup-panel\s*\{\s*display:\s*contents/);
-  assert.match(globalCss, /\.setup-panel > \.command-rails\s*\{\s*order:\s*1/);
+  assert.match(globalCss, /\.command-panel\s*\{\s*order:\s*1/);
+  assert.match(globalCss, /\.setup-controls-panel\s*\{\s*order:\s*3/);
 });
 
 test("a pending extra move exposes a monochrome touch-safe pass control and clear rules", () => {

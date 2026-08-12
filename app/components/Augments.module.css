@@ -837,21 +837,26 @@ button.card:hover:not(:disabled) .cardFront {
 .railCardItem { position: relative; min-width: 0; }
 
 .railPreview {
+  --augment-paper: var(--paper, #fffdf7);
   position: fixed;
-  z-index: 90;
+  z-index: 60;
   top: 50%;
-  left: 50%;
+  left: var(--augment-preview-x, 50%);
   display: grid;
   width: min(250px, calc(100vw - 48px));
   gap: 7px;
   padding: 10px;
   border: 3px double #17140f;
-  background: var(--augment-paper);
+  background: var(--augment-paper, #fffdf7);
   box-shadow: 0 24px 70px rgb(23 20 15 / 24%);
-  opacity: 0;
+  opacity: 1;
   pointer-events: none;
-  transform: translate(-50%, -48%) scale(0.97);
+  transform: translate(-50%, -50%) scale(1);
   animation: inspect-preview-in 220ms ease-out forwards;
+}
+
+.railPreview > .card {
+  background: var(--augment-paper, #fffdf7);
 }
 
 .railPreviewLabel {
@@ -860,6 +865,10 @@ button.card:hover:not(:disabled) .cardFront {
   font-weight: 800;
   letter-spacing: 0.14em;
   text-align: center;
+}
+
+@media (max-width: 780px) {
+  .railPreview { display: none; }
 }
 
 .inspectOverlay {
@@ -1079,7 +1088,8 @@ button.card:hover:not(:disabled) .cardFront {
 }
 
 @keyframes inspect-preview-in {
-  to { opacity: 1; transform: translate(-50%, -50%) scale(1); }
+  from { transform: translate(-50%, -48%) scale(0.97); }
+  to { transform: translate(-50%, -50%) scale(1); }
 }
 
 @keyframes inspect-overlay-in {
@@ -1192,6 +1202,11 @@ button.card:hover:not(:disabled) .cardFront {
 
   .cardBurning .ember { display: none; }
   .cardBurning .burnLabel { opacity: 1; }
+
+  .railPreview {
+    opacity: 1;
+    transform: translate(-50%, -50%) scale(1);
+  }
 
   .draftOption[data-refresh-phase] .card,
   .draftOption[data-refresh-phase] .cardFront {

@@ -3500,8 +3500,12 @@ export default function GameApp({
         </div>
       ) : null}
 
-      <section className={`game-shell ${game.phase === "setup" ? "is-setup" : ""}`}>
-        <aside className="side-panel setup-panel">
+      <section
+        className={`game-shell ${game.phase === "setup" ? "is-setup" : ""} ${
+          game.phase === "setup" && game.augment && viewerSide ? "has-setup-command-dock" : ""
+        }`}
+      >
+        <aside className="side-panel setup-panel command-panel" aria-label="军令与布阵">
           <h2>{statusText(room, placedSetupCount)}</h2>
           {showRepetitionWarning ? (
             <div className="repetition-notice" role="status" aria-live="polite" aria-label="重复局面第二次出现">
@@ -3533,67 +3537,6 @@ export default function GameApp({
               />
             </div>
           ) : null}
-          {game.augment && game.phase !== "setup" ? (
-            <AugmentRuleStatusPanel
-              game={game}
-              side={primaryRailSide}
-              ownerLabel={viewerSide ? "我的" : sideName(primaryRailSide)}
-            />
-          ) : null}
-          {game.augment && game.phase !== "setup" ? (
-            <AugmentRuleStatusPanel
-              game={game}
-              side={secondaryRailSide}
-              ownerLabel={sideName(secondaryRailSide)}
-            />
-          ) : null}
-          {game.phase === "setup" && timeControlMinutes !== null ? (
-            <div className="time-control-card">
-              {room.viewer === "black" && room.roomKind !== "ranked" ? (
-                <form
-                  className="time-control-form"
-                  key={`${room.code}-${game.clock?.initialMs}`}
-                  onSubmit={(event) => {
-                    event.preventDefault();
-                    const minutes = Number(new FormData(event.currentTarget).get("minutes"));
-                    if (!Number.isInteger(minutes)) {
-                      showToast(ERROR_TEXT.INVALID_TIME_CONTROL);
-                      return;
-                    }
-                    void performAction({ type: "set_time_control", minutes });
-                  }}
-                >
-                  <label htmlFor="time-control-minutes">每方限时</label>
-                  <div className="time-control-input">
-                    <input
-                      id="time-control-minutes"
-                      name="minutes"
-                      type="number"
-                      min={MIN_TIME_CONTROL_MINUTES}
-                      max={MAX_TIME_CONTROL_MINUTES}
-                      step="1"
-                      defaultValue={timeControlMinutes}
-                      disabled={busy || timeControlLocked}
-                      inputMode="numeric"
-                    />
-                    <span>分钟</span>
-                  </div>
-                  <button type="submit" disabled={busy || timeControlLocked}>应用</button>
-                </form>
-              ) : (
-                <div className="time-control-summary">
-                  <span>每方限时</span>
-                  <strong>{timeControlMinutes} 分钟</strong>
-                </div>
-              )}
-              <small>{room.roomKind === "ranked" ? "排位标准：合法落子扣时后余时≤5:00，则增加 5 秒" : timeControlLocked ? "限时已锁定" : room.viewer === "black" ? "房主可在确认布阵前修改" : "由房主设置"}</small>
-              {room.roomKind === "ranked" && room.setupDeadlineAt ? (
-                <small>
-                  请在 {new Date(room.setupDeadlineAt).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })} 前完成布阵；开局前任一方均可无损取消。
-                </small>
-              ) : null}
-            </div>
-          ) : null}
           {viewerSide && game.phase === "setup" ? (
             <PieceTray
               pieces={trayPieces}
@@ -3605,51 +3548,6 @@ export default function GameApp({
               onDragStartPiece={beginTrayPieceDrag}
               onDragEnd={handlePieceDragEnd}
             />
-          ) : null}
-          {viewerSide && game.phase !== "setup" ? (
-            <CapturedPieceBox pieces={capturedOwnPieces} />
-          ) : null}
-          <div className="seat-list">
-            {(["black", "white"] as Side[]).map((side) => (
-              <div className={`seat ${game.turn === side && game.phase === "playing" ? "active" : ""}`} key={side}>
-                <span className={`seat-stone ${side}`} />
-                <div><strong>{sideName(side)}</strong><small>{visiblePieceCount(side)} 枚棋子</small></div>
-                <span className="seat-state">{seatState(side)}</span>
-              </div>
-            ))}
-          </div>
-          {viewerSide && game.phase === "setup" ? (
-            <div className="setup-actions">
-              <button className="button secondary" type="button" disabled={busy || game.ready[viewerSide]} onClick={randomizeLocalSetup}>随机布阵</button>
-              <button
-                className="button primary"
-                type="button"
-                disabled={busy || Boolean(game.augment && !game.augment.draft.rounds[0]?.players[viewerSide].locked)}
-                onClick={toggleSetupReady}
-              >
-                {game.ready[viewerSide]
-                  ? "撤销确认"
-                  : game.augment && !game.augment.draft.rounds[0]?.players[viewerSide].locked
-                    ? "先选择军令"
-                    : "完成布阵"}
-              </button>
-              {room.roomKind === "ranked" ? (
-                <button
-                  className="button secondary"
-                  type="button"
-                  disabled={busy}
-                  onClick={() => void cancelRankedSetup()}
-                >
-                  取消本次排位（不计分）
-                </button>
-              ) : null}
-            </div>
-          ) : null}
-          {viewerSide && (game.phase === "playing" || game.phase === "augment_draft") ? (
-            <details className="quiet-menu">
-              <summary>本局选项</summary>
-              <button type="button" disabled={busy} onClick={requestResign}>认输</button>
-            </details>
           ) : null}
         </aside>
 
@@ -3799,7 +3697,116 @@ export default function GameApp({
           ) : null}
         </section>
 
-        <aside className="side-panel activity-panel">
+        <aside className="side-panel setup-panel setup-controls-panel" aria-label="对局状态与操作">
+          {game.augment && game.phase !== "setup" ? (
+            <AugmentRuleStatusPanel
+              game={game}
+              side={primaryRailSide}
+              ownerLabel={viewerSide ? "我的" : sideName(primaryRailSide)}
+            />
+          ) : null}
+          {game.augment && game.phase !== "setup" ? (
+            <AugmentRuleStatusPanel
+              game={game}
+              side={secondaryRailSide}
+              ownerLabel={sideName(secondaryRailSide)}
+            />
+          ) : null}
+          {game.phase === "setup" && timeControlMinutes !== null ? (
+            <div className="time-control-card">
+              {room.viewer === "black" && room.roomKind !== "ranked" ? (
+                <form
+                  className="time-control-form"
+                  key={`${room.code}-${game.clock?.initialMs}`}
+                  onSubmit={(event) => {
+                    event.preventDefault();
+                    const minutes = Number(new FormData(event.currentTarget).get("minutes"));
+                    if (!Number.isInteger(minutes)) {
+                      showToast(ERROR_TEXT.INVALID_TIME_CONTROL);
+                      return;
+                    }
+                    void performAction({ type: "set_time_control", minutes });
+                  }}
+                >
+                  <label htmlFor="time-control-minutes">每方限时</label>
+                  <div className="time-control-input">
+                    <input
+                      id="time-control-minutes"
+                      name="minutes"
+                      type="number"
+                      min={MIN_TIME_CONTROL_MINUTES}
+                      max={MAX_TIME_CONTROL_MINUTES}
+                      step="1"
+                      defaultValue={timeControlMinutes}
+                      disabled={busy || timeControlLocked}
+                      inputMode="numeric"
+                    />
+                    <span>分钟</span>
+                  </div>
+                  <button type="submit" disabled={busy || timeControlLocked}>应用</button>
+                </form>
+              ) : (
+                <div className="time-control-summary">
+                  <span>每方限时</span>
+                  <strong>{timeControlMinutes} 分钟</strong>
+                </div>
+              )}
+              <small>{room.roomKind === "ranked" ? "排位标准：合法落子扣时后余时≤5:00，则增加 5 秒" : timeControlLocked ? "限时已锁定" : room.viewer === "black" ? "房主可在确认布阵前修改" : "由房主设置"}</small>
+              {room.roomKind === "ranked" && room.setupDeadlineAt ? (
+                <small>
+                  请在 {new Date(room.setupDeadlineAt).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })} 前完成布阵；开局前任一方均可无损取消。
+                </small>
+              ) : null}
+            </div>
+          ) : null}
+          {viewerSide && game.phase !== "setup" ? (
+            <CapturedPieceBox pieces={capturedOwnPieces} />
+          ) : null}
+          <div className="seat-list">
+            {(["black", "white"] as Side[]).map((side) => (
+              <div className={`seat ${game.turn === side && game.phase === "playing" ? "active" : ""}`} key={side}>
+                <span className={`seat-stone ${side}`} />
+                <div><strong>{sideName(side)}</strong><small>{visiblePieceCount(side)} 枚棋子</small></div>
+                <span className="seat-state">{seatState(side)}</span>
+              </div>
+            ))}
+          </div>
+          {viewerSide && game.phase === "setup" ? (
+            <div className="setup-actions">
+              <button className="button secondary" type="button" disabled={busy || game.ready[viewerSide]} onClick={randomizeLocalSetup}>随机布阵</button>
+              <button
+                className="button primary"
+                type="button"
+                disabled={busy || Boolean(game.augment && !game.augment.draft.rounds[0]?.players[viewerSide].locked)}
+                onClick={toggleSetupReady}
+              >
+                {game.ready[viewerSide]
+                  ? "撤销确认"
+                  : game.augment && !game.augment.draft.rounds[0]?.players[viewerSide].locked
+                    ? "先选择军令"
+                    : "完成布阵"}
+              </button>
+              {room.roomKind === "ranked" ? (
+                <button
+                  className="button secondary"
+                  type="button"
+                  disabled={busy}
+                  onClick={() => void cancelRankedSetup()}
+                >
+                  取消本次排位（不计分）
+                </button>
+              ) : null}
+            </div>
+          ) : null}
+          {viewerSide && (game.phase === "playing" || game.phase === "augment_draft") ? (
+            <details className="quiet-menu">
+              <summary>本局选项</summary>
+              <button type="button" disabled={busy} onClick={requestResign}>认输</button>
+            </details>
+          ) : null}
+        </aside>
+
+        <aside className="side-panel activity-panel" aria-label="战报与邀请">
           <div className="invite-block">
             {room.viewer === "black" && inviteToken && !game.joined.white ? (
               <button className="button primary compact" type="button" onClick={() => void copyLink("player")}>复制玩家邀请</button>

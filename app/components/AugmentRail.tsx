@@ -1,6 +1,7 @@
 "use client";
 
 import { useEffect, useMemo, useRef, useState, type CSSProperties } from "react";
+import { createPortal } from "react-dom";
 
 import type { AugmentDefinition, AugmentId } from "@/lib/augments";
 
@@ -34,6 +35,7 @@ export interface AugmentRailProps {
   pending?: boolean;
   onActivate?: (augmentId: AugmentId) => void;
   dockTarget?: boolean;
+  previewBoundarySelector?: string;
 }
 
 interface RailCardPresentation {
@@ -171,6 +173,7 @@ export default function AugmentRail({
   pending = false,
   onActivate,
   dockTarget = false,
+  previewBoundarySelector = ".board-frame",
 }: AugmentRailProps) {
   const previousCountsRef = useRef(new Map<AugmentId, number>());
   const initializedRef = useRef(false);
@@ -181,6 +184,7 @@ export default function AugmentRail({
   const [burningIds, setBurningIds] = useState<ReadonlySet<AugmentId>>(() => new Set());
   const [burntIds, setBurntIds] = useState<ReadonlySet<AugmentId>>(() => new Set());
   const [previewId, setPreviewId] = useState<AugmentId | null>(null);
+  const [previewAnchorX, setPreviewAnchorX] = useState<number | null>(null);
   const [inspectedId, setInspectedId] = useState<AugmentId | null>(null);
   const possessiveLabel = label === "我的" ? "我的" : `${label}的`;
   const visibleCount = items.filter((item) => item.augment && !item.hidden).length;
@@ -204,6 +208,14 @@ export default function AugmentRail({
   })), [activeId, canActivate, isOwnTurn, items, onActivate, pending, pendingReconId]);
   const preview = presentations.find((item) => item.augmentId === previewId && !item.hidden) ?? null;
   const inspected = presentations.find((item) => item.augmentId === inspectedId && !item.hidden) ?? null;
+
+  const anchorPreviewTo = (element: HTMLElement) => {
+    const rect = element.getBoundingClientRect();
+    const boundary = document.querySelector<HTMLElement>(previewBoundarySelector)?.getBoundingClientRect();
+    const safeViewportCenter = Math.max(137, Math.min(window.innerWidth - 137, rect.left + rect.width / 2));
+    const safeBoundaryCenter = boundary && boundary.left >= 274 ? boundary.left - 137 : safeViewportCenter;
+    setPreviewAnchorX(Math.min(safeViewportCenter, safeBoundaryCenter));
+  };
 
   useEffect(() => {
     const media = window.matchMedia("(prefers-reduced-motion: reduce)");
@@ -350,14 +362,20 @@ export default function AugmentRail({
               <li
                 className={styles.railCardItem}
                 key={presentation.hidden ? `hidden-${index}` : augmentId}
-                onPointerEnter={() => {
-                  if (inspectable && augmentId) setPreviewId(augmentId);
+                onPointerEnter={(event) => {
+                  if (inspectable && augmentId) {
+                    anchorPreviewTo(event.currentTarget);
+                    setPreviewId(augmentId);
+                  }
                 }}
                 onPointerLeave={() => {
                   if (previewId === augmentId) setPreviewId(null);
                 }}
-                onFocus={() => {
-                  if (inspectable && augmentId) setPreviewId(augmentId);
+                onFocus={(event) => {
+                  if (inspectable && augmentId) {
+                    anchorPreviewTo(event.currentTarget);
+                    setPreviewId(augmentId);
+                  }
                 }}
                 onBlur={(event) => {
                   if (!event.currentTarget.contains(event.relatedTarget)) setPreviewId(null);
@@ -390,16 +408,24 @@ export default function AugmentRail({
         <p className={styles.railEmpty}>军令将在选择并公开后显示</p>
       )}
 
-      {preview?.augment && !inspected ? (
-        <div className={styles.railPreview} aria-hidden="true" data-augment-preview="true">
-          <p className={styles.railPreviewLabel}>{possessiveLabel}军令 · 悬停预览</p>
-          <AugmentCard
-            augment={preview.augment}
-            state={preview.state}
-            statusLabel={preview.statusLabel}
-          />
-        </div>
-      ) : null}
+      {preview?.augment && !inspected && typeof document !== "undefined"
+        ? createPortal(
+            <div
+              className={styles.railPreview}
+              aria-hidden="true"
+              data-augment-preview="true"
+              style={{ "--augment-preview-x": `${previewAnchorX ?? window.innerWidth / 2}px` } as CSSProperties}
+            >
+              <p className={styles.railPreviewLabel}>{possessiveLabel}军令 · 悬停预览</p>
+              <AugmentCard
+                augment={preview.augment}
+                state={preview.state}
+                statusLabel={preview.statusLabel}
+              />
+            </div>,
+            document.body,
+          )
+        : null}
 
       {inspected?.augment ? (
         <AugmentInspectDialog

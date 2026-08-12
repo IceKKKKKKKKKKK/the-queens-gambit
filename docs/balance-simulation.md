@@ -84,6 +84,6 @@ node --experimental-transform-types scripts/augment-balance-simulation.ts --mode
 
 ## 发布证据边界
 
-截至 2026-08-11 ET，最终代码回归为 281/281：HTML 9 项、集成服务器契约 4 项、TypeScript 265 项、真实集成 3 项；production build、全项目 ESLint、非增量 TypeScript 检查与差异检查均通过。三套真实集成各连续执行 4 轮，共 12/12 通过；端口每轮可重新绑定，结束后孤儿进程为 0。API 集成另在同一隔离工作区连续执行 64/64 次且零自动重试，全部返回 JSON、64 个动态端口均可重绑、D1 文件与 Vinext/Workerd 残留均为 0；独立双启动哨兵验证显式持久状态可在停服后读回房间并安全清理。
+截至 2026-08-12 ET，最终代码回归为 283/283：HTML 9 项、集成服务器契约 4 项、TypeScript 267 项、真实集成 3 项；production build、全项目 ESLint、非增量 TypeScript 检查与差异检查均通过。三套真实集成各连续执行 4 轮，共 12/12 通过；端口每轮可重新绑定，结束后孤儿进程为 0。API 集成另在同一隔离工作区连续执行 64/64 次且零自动重试，全部返回 JSON、64 个动态端口均可重绑、D1 文件与 Vinext/Workerd 残留均为 0；独立双启动哨兵验证显式持久状态可在停服后读回房间并安全清理。
 
 这些回归证明当前覆盖路径可工作。本次沉浸式纸牌 UI/动作协议发布不要求新跑四小时 worker；当前硬门槛是同一冻结提交上的完整回归、真实 API、私有 Sites 候选和三档 Browser QA。quick 报告与可选长跑仍写入 `outputs/` 供引擎或基础设施诊断，但不替代、也不阻塞本次界面发布。

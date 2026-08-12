@@ -83,7 +83,7 @@ checkpoint 指纹必须绑定实际零时间配置、搜索深度、eligible/exc
 - 四张新主动牌 opportunity/use；
 - 回放、隐私、API、动画和恢复证据。
 
-截至 2026-08-11 ET，最终代码回归为 281/281：HTML 9 项、集成服务器契约 4 项、TypeScript 265 项、真实集成 3 项；production build、全项目 ESLint、`tsc --noEmit --incremental false` 与 `git diff --check` 均通过。三套真实集成各连续执行 4 轮，共 12/12 通过；每轮端口可重新绑定，结束后孤儿进程为 0。API 集成另在同一隔离工作区连续执行 64/64 次且零自动重试，全部返回 JSON、64 个动态端口均可重绑、D1 文件与 Vinext/Workerd 残留均为 0；独立双启动哨兵验证显式持久状态可在停服后读回并安全清理。
+截至 2026-08-12 ET，最终代码回归为 283/283：HTML 9 项、集成服务器契约 4 项、TypeScript 267 项、真实集成 3 项；production build、全项目 ESLint、`tsc --noEmit --incremental false` 与 `git diff --check` 均通过。三套真实集成各连续执行 4 轮，共 12/12 通过；每轮端口可重新绑定，结束后孤儿进程为 0。API 集成另在同一隔离工作区连续执行 64/64 次且零自动重试，全部返回 JSON、64 个动态端口均可重绑、D1 文件与 Vinext/Workerd 残留均为 0；独立双启动哨兵验证显式持久状态可在停服后读回并安全清理。
 
 本次沉浸式纸牌 UI/动作协议发布采用完整回归、真实 API、私有 Sites 候选和三档 Browser QA 作为冻结提交门槛，不安排新的四小时循环测试。四 worker soak 与 quick 报告继续作为可选的产品引擎/基础设施诊断证据写入 `outputs/`，不随源码提交。
 
