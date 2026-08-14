@@ -273,6 +273,7 @@ export default function LobbyExperience({
   );
   const onlineFriends = friends.friends.filter((friend) => friend.presence !== "offline").length;
   const searching = matchmaking.state === "queued";
+  const accountMark = Array.from(account?.handle ?? "棋")[0]?.toUpperCase() ?? "棋";
 
   useEffect(() => {
     dispatch({
@@ -364,9 +365,12 @@ export default function LobbyExperience({
           <span className={styles.wordmarkSeal} aria-hidden="true">令</span>
           <span>军令 · 陆战棋</span>
         </div>
-        <div className={styles.accountSummary}>
-          <span>{account?.handle ?? "棋手"}</span>
-          <small>{account?.rank.label ?? "战绩同步中"}</small>
+        <div className={styles.accountSummary} aria-label="当前玩家">
+          <span className={styles.accountCrest} aria-hidden="true">{accountMark}</span>
+          <span className={styles.accountCopy}>
+            <strong>{account?.handle ?? "棋手"}</strong>
+            <small>{account?.rank.label ?? "战绩同步中"}</small>
+          </span>
         </div>
       </header>
 
@@ -390,31 +394,32 @@ export default function LobbyExperience({
             <span className={styles.tuckFlap} />
             <span className={styles.tuckFace}><i>令</i></span>
           </div>
-
-          <button
-            ref={(node) => { laneButtonRefs.current.classic = node; }}
-            className={`${styles.laneButton} ${styles.laneClassic}`}
-            type="button"
-            onClick={() => openLane("classic")}
-          >
-            <span>经典</span>
-          </button>
-          <button
-            ref={(node) => { laneButtonRefs.current.wild = node; }}
-            className={`${styles.laneButton} ${styles.laneWild}`}
-            type="button"
-            onClick={() => openLane("wild")}
-          >
-            <span>狂野</span>
-          </button>
-          <button
-            ref={(node) => { laneButtonRefs.current.personal = node; }}
-            className={`${styles.laneButton} ${styles.lanePersonal}`}
-            type="button"
-            onClick={() => openLane("personal")}
-          >
-            <span>个人</span>
-          </button>
+          <nav className={styles.laneMenu} aria-label="选择战局">
+            <button
+              ref={(node) => { laneButtonRefs.current.classic = node; }}
+              className={styles.laneButton}
+              type="button"
+              onClick={() => openLane("classic")}
+            >
+              <span>经典</span>
+            </button>
+            <button
+              ref={(node) => { laneButtonRefs.current.wild = node; }}
+              className={styles.laneButton}
+              type="button"
+              onClick={() => openLane("wild")}
+            >
+              <span>狂野</span>
+            </button>
+            <button
+              ref={(node) => { laneButtonRefs.current.personal = node; }}
+              className={styles.laneButton}
+              type="button"
+              onClick={() => openLane("personal")}
+            >
+              <span>个人</span>
+            </button>
+          </nav>
         </div>
 
         <form className={styles.roomCodeForm} onSubmit={submitRoomCode}>

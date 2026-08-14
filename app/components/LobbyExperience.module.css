@@ -1,10 +1,15 @@
 .shell {
-  --ink: #17140f;
-  --paper: #fffdf7;
-  --ground: #faf6ec;
-  --muted: rgba(23, 20, 15, 0.66);
-  --line: rgba(23, 20, 15, 0.24);
-  --line-strong: rgba(23, 20, 15, 0.52);
+  --ink: #211914;
+  --paper: #eee4cf;
+  --paper-deep: #d6c5a7;
+  --ground: #b9ae97;
+  --wine: #54262a;
+  --wine-dark: #35191b;
+  --brass: #6e552d;
+  --muted: #4b4136;
+  --line: rgba(61, 46, 31, 0.3);
+  --line-strong: rgba(61, 46, 31, 0.58);
+  --display: "Songti SC", "STSong", "Noto Serif CJK SC", "Iowan Old Style", Baskerville, serif;
   --micro-motion: 160ms;
   --box-motion: 480ms;
   --compass-motion: 650ms;
@@ -18,6 +23,15 @@
   overflow-x: clip;
   background: var(--ground);
   color: var(--ink);
+}
+
+.shell::before {
+  position: fixed;
+  z-index: 0;
+  inset: 14px;
+  border: 1px solid var(--brass);
+  content: "";
+  pointer-events: none;
 }
 
 .shell,
@@ -45,7 +59,7 @@
 .shell input:focus-visible,
 .shell select:focus-visible,
 .shell summary:focus-visible {
-  outline: 2px solid var(--ink);
+  outline: 2px solid var(--wine);
   outline-offset: 4px;
 }
 
@@ -56,10 +70,9 @@
   overflow: hidden;
   background-color: var(--ground);
   background-image:
-    repeating-linear-gradient(0deg, transparent 0 7px, rgba(23, 20, 15, 0.012) 7px 8px),
-    radial-gradient(circle at 18% 22%, rgba(23, 20, 15, 0.035) 0 1px, transparent 1.5px),
-    radial-gradient(circle at 82% 68%, rgba(23, 20, 15, 0.026) 0 1px, transparent 1.5px);
-  background-size: auto, 17px 19px, 23px 29px;
+    radial-gradient(circle at 50% 42%, rgba(238, 228, 207, 0.52), transparent 56%),
+    repeating-linear-gradient(135deg, transparent 0 10px, rgba(53, 25, 27, 0.025) 10px 11px);
+  background-size: auto, 24px 24px;
   pointer-events: none;
 }
 
@@ -69,12 +82,13 @@
   display: flex;
   width: min(1240px, calc(100% - 40px));
   min-width: 0;
-  min-height: 74px;
+  min-height: 82px;
   margin-inline: auto;
   align-items: center;
   justify-content: space-between;
   gap: 20px;
-  border-bottom: 1px solid var(--line);
+  padding-inline: 8px;
+  border-bottom: 1px solid rgba(53, 25, 27, 0.26);
 }
 
 .wordmark {
@@ -82,6 +96,7 @@
   min-width: 0;
   align-items: center;
   gap: 10px;
+  font-family: var(--display);
   font-size: 15px;
   font-weight: 720;
   letter-spacing: 0.04em;
@@ -94,32 +109,57 @@
   height: 34px;
   flex: 0 0 auto;
   place-items: center;
-  border: 1px solid var(--ink);
-  background: var(--paper);
-  font-family: "Iowan Old Style", Baskerville, "Times New Roman", serif;
+  border: 1px solid var(--wine-dark);
+  border-radius: 50% 50% 46% 46%;
+  background: var(--wine);
+  box-shadow: inset 0 0 0 3px var(--paper-deep);
+  color: var(--paper);
+  font-family: var(--display);
 }
 
 .accountSummary {
-  display: grid;
+  display: flex;
   min-width: 0;
-  justify-items: end;
+  align-items: center;
+  gap: 10px;
   line-height: 1.15;
 }
 
-.accountSummary span,
-.accountSummary small {
+.accountCrest {
+  display: grid;
+  width: 42px;
+  height: 42px;
+  flex: 0 0 auto;
+  place-items: center;
+  border: 3px double var(--brass);
+  border-radius: 50%;
+  background: var(--paper);
+  color: var(--wine-dark);
+  font-family: var(--display);
+  font-size: 15px;
+  font-weight: 760;
+}
+
+.accountCopy {
+  display: grid;
+  min-width: 0;
+  justify-items: end;
+}
+
+.accountCopy strong,
+.accountCopy small {
   max-width: min(40vw, 260px);
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
 
-.accountSummary span {
+.accountCopy strong {
   font-size: 14px;
   font-weight: 720;
 }
 
-.accountSummary small {
+.accountCopy small {
   margin-top: 4px;
   color: var(--muted);
   font-size: 11px;
@@ -131,11 +171,11 @@
   z-index: 1;
   display: grid;
   width: min(1160px, calc(100% - 32px));
-  min-height: calc(100vh - 74px);
-  min-height: calc(100dvh - 74px);
+  min-height: calc(100vh - 82px);
+  min-height: calc(100dvh - 82px);
   margin-inline: auto;
-  padding: 24px 0 34px;
-  grid-template-rows: auto minmax(420px, 1fr) auto;
+  padding: 18px 0 30px;
+  grid-template-rows: auto minmax(0, 1fr) auto;
   align-items: center;
 }
 
@@ -146,48 +186,73 @@
 .hubHeading > span,
 .laneTitle > span {
   display: inline-block;
-  color: var(--muted);
+  color: var(--wine-dark);
   font-size: 11px;
   font-weight: 760;
   letter-spacing: 0.2em;
 }
 
 .hubHeading h1 {
-  margin: 7px 0 0;
-  font-family: "Iowan Old Style", Baskerville, "Times New Roman", serif;
-  font-size: clamp(32px, 5vw, 48px);
+  margin: 4px 0 0;
+  font-family: var(--display);
+  font-size: clamp(26px, 3vw, 36px);
   font-weight: 500;
   letter-spacing: 0.12em;
 }
 
 .compassStage {
   position: relative;
-  width: min(620px, 100%);
+  z-index: 1;
+  width: min(560px, max(360px, 72vmin), max(350px, calc(100dvh - 340px)), 100%);
   aspect-ratio: 1;
   margin: 0 auto;
+}
+
+.compassStage::before,
+.compassStage::after {
+  position: absolute;
+  z-index: 0;
+  background: linear-gradient(90deg, transparent, var(--brass) 18%, var(--brass) 82%, transparent);
+  content: "";
+  pointer-events: none;
+}
+
+.compassStage::before {
+  top: 50%;
+  right: -28vw;
+  left: -28vw;
+  height: 1px;
+}
+
+.compassStage::after {
+  top: -56px;
+  bottom: -56px;
+  left: 50%;
+  width: 1px;
+  background: linear-gradient(transparent, var(--brass) 16%, var(--brass) 84%, transparent);
 }
 
 .compass {
   position: absolute;
   top: 50%;
   left: 50%;
-  width: 56%;
+  z-index: 1;
+  width: 90%;
   aspect-ratio: 1;
-  border: 1px solid var(--ink);
+  border: 1px solid var(--brass);
   border-radius: 50%;
   background:
-    linear-gradient(45deg, transparent 49.6%, var(--line) 49.7% 50.3%, transparent 50.4%),
-    linear-gradient(-45deg, transparent 49.6%, var(--line) 49.7% 50.3%, transparent 50.4%),
+    radial-gradient(circle, transparent 0 48%, rgba(84, 38, 42, 0.1) 48.2% 48.6%, transparent 48.8%),
     var(--paper);
-  box-shadow: 0 14px 34px rgba(23, 20, 15, 0.08);
+  box-shadow:
+    0 18px 38px rgba(53, 25, 27, 0.12),
+    inset 0 0 0 7px rgba(214, 197, 167, 0.52);
   transform: translate(-50%, -50%);
   transition: transform var(--compass-motion) cubic-bezier(0.22, 0.78, 0.2, 1);
 }
 
 .compass::before,
-.compass::after,
-.compassOuter,
-.compassInner {
+.compassOuter {
   position: absolute;
   border: 1px solid var(--line-strong);
   border-radius: 50%;
@@ -195,53 +260,51 @@
 }
 
 .compass::before {
-  inset: 4.5%;
-  border-style: double;
-  border-width: 4px;
-}
-
-.compass::after {
-  inset: 18%;
-  border-style: dotted;
+  inset: 4%;
 }
 
 .compassOuter {
-  inset: 10%;
+  inset: 15%;
+  border-color: rgba(110, 85, 45, 0.72);
 }
 
+.compass::after,
 .compassInner {
-  inset: 29%;
-  background:
-    conic-gradient(
-      from 22.5deg,
-      transparent 0 11.25deg,
-      rgba(23, 20, 15, 0.08) 11.25deg 22.5deg,
-      transparent 22.5deg 45deg
-    );
+  display: none;
 }
 
 .compassNeedle {
   position: absolute;
   z-index: 2;
-  top: 12%;
-  left: 49%;
-  width: 2%;
-  height: 76%;
-  background: var(--ink);
-  clip-path: polygon(50% 0, 100% 48%, 62% 48%, 62% 100%, 38% 100%, 38% 48%, 0 48%);
+  top: 8%;
+  left: 50%;
+  width: 1px;
+  height: 84%;
+  background: var(--wine);
   transform-origin: center;
 }
 
+.compassNeedle::before,
 .compassNeedle::after {
   position: absolute;
-  top: 48%;
+  top: 50%;
   left: 50%;
-  width: 14px;
-  height: 14px;
-  border: 1px solid var(--ink);
-  border-radius: 50%;
-  background: var(--paper);
   content: "";
+}
+
+.compassNeedle::before {
+  width: min(46vw, 264px);
+  height: 1px;
+  background: var(--wine);
+  transform: translate(-50%, -50%);
+}
+
+.compassNeedle::after {
+  width: 18px;
+  height: 18px;
+  border: 3px double var(--brass);
+  border-radius: 50%;
+  background: var(--wine);
   transform: translate(-50%, -50%);
 }
 
@@ -250,8 +313,8 @@
   z-index: 4;
   top: 50%;
   left: 50%;
-  width: 20%;
-  aspect-ratio: 5 / 8;
+  width: 60%;
+  height: 59%;
   perspective: 800px;
   transform: translate(-50%, -50%);
 }
@@ -262,37 +325,38 @@
   display: grid;
   inset: 0;
   place-items: center;
-  border: 1px solid var(--ink);
-  background: var(--paper);
-  box-shadow: 7px 9px 0 rgba(23, 20, 15, 0.12);
+  border: 1px solid var(--wine-dark);
+  background:
+    linear-gradient(90deg, rgba(110, 85, 45, 0.08), transparent 18% 82%, rgba(110, 85, 45, 0.08)),
+    var(--paper-deep);
+  box-shadow: 10px 12px 0 rgba(53, 25, 27, 0.14);
 }
 
-.tuckFace::before,
-.tuckFace::after {
+.tuckFace::before {
   position: absolute;
   inset: 7px;
-  border: 1px solid var(--line-strong);
+  border: 1px solid var(--brass);
   content: "";
 }
 
 .tuckFace::after {
-  inset: 14px;
-  border-style: double;
-  border-width: 3px;
+  display: none;
 }
 
 .tuckFace i {
   position: relative;
   z-index: 2;
   display: grid;
-  width: 52%;
+  top: -35%;
+  width: 38px;
   aspect-ratio: 1;
   place-items: center;
-  border: 1px solid var(--ink);
+  border: 3px double var(--brass);
   border-radius: 50%;
-  background: var(--paper);
-  font-family: "Iowan Old Style", Baskerville, "Times New Roman", serif;
-  font-size: clamp(24px, 4vw, 42px);
+  background: var(--wine);
+  color: var(--paper);
+  font-family: var(--display);
+  font-size: 18px;
   font-style: normal;
 }
 
@@ -303,28 +367,38 @@
   bottom: 96%;
   left: 4%;
   height: 26%;
-  border: 1px solid var(--ink);
+  border: 1px solid var(--wine-dark);
   border-bottom: 0;
-  background: var(--paper);
+  background: var(--paper-deep);
   clip-path: polygon(0 100%, 12% 18%, 50% 0, 88% 18%, 100% 100%);
   transform: rotateX(78deg);
   transform-origin: bottom;
   transition: transform var(--box-motion) cubic-bezier(0.22, 0.78, 0.2, 1);
 }
 
-.laneButton {
+.laneMenu {
   position: absolute;
   z-index: 5;
+  top: 50%;
+  left: 50%;
   display: grid;
-  width: clamp(94px, 18%, 112px);
-  aspect-ratio: 5 / 8;
+  width: 48%;
+  gap: 8px;
+  transform: translate(-50%, -50%);
+}
+
+.laneButton {
+  position: relative;
+  display: grid;
+  width: 100%;
+  min-height: 60px;
   place-items: center;
-  border: 1px solid var(--ink);
-  border-radius: 4px;
+  border: 1px solid var(--wine-dark);
+  border-radius: 0;
   background: var(--paper);
-  box-shadow: 5px 7px 0 rgba(23, 20, 15, 0.13);
+  box-shadow: 3px 4px 0 rgba(53, 25, 27, 0.12);
   cursor: pointer;
-  transition: transform var(--micro-motion) ease;
+  transition: transform var(--micro-motion) ease, opacity var(--micro-motion) ease;
 }
 
 .laneButton::before,
@@ -335,68 +409,37 @@
 }
 
 .laneButton::before {
-  inset: 7px;
-  border: 1px solid var(--line-strong);
-  border-radius: 2px;
+  top: 50%;
+  left: 13px;
+  width: 8px;
+  height: 8px;
+  border: 1px solid currentColor;
+  transform: translateY(-50%) rotate(45deg);
 }
 
 .laneButton::after {
-  top: 13%;
-  right: 16%;
-  bottom: 13%;
-  left: 16%;
-  border-block: 1px solid var(--line);
+  top: 50%;
+  right: 13px;
+  width: 8px;
+  height: 8px;
+  border: 1px solid currentColor;
+  transform: translateY(-50%) rotate(45deg);
 }
 
 .laneButton span {
   position: relative;
   z-index: 1;
-  display: grid;
-  width: 68%;
-  aspect-ratio: 1;
-  place-items: center;
-  border: 1px solid var(--ink);
-  border-radius: 50%;
-  background: var(--paper);
-  font-family: "Iowan Old Style", Baskerville, "Times New Roman", serif;
-  font-size: clamp(20px, 3vw, 29px);
+  font-family: var(--display);
+  font-size: clamp(18px, 3vw, 24px);
   font-weight: 600;
-  letter-spacing: 0.12em;
-  text-indent: 0.12em;
+  letter-spacing: 0.2em;
+  text-indent: 0.2em;
 }
 
 .laneButton:hover {
-  box-shadow: 8px 11px 0 rgba(23, 20, 15, 0.16);
-}
-
-.laneClassic {
-  top: 50%;
-  left: 2%;
-  transform: translateY(-50%) rotate(-3deg);
-}
-
-.laneClassic:hover {
-  transform: translateY(calc(-50% - 7px)) rotate(-2deg);
-}
-
-.laneWild {
-  top: 50%;
-  right: 2%;
-  transform: translateY(-50%) rotate(3deg);
-}
-
-.laneWild:hover {
-  transform: translateY(calc(-50% - 7px)) rotate(2deg);
-}
-
-.lanePersonal {
-  bottom: 0;
-  left: 50%;
-  transform: translateX(-50%);
-}
-
-.lanePersonal:hover {
-  transform: translate(-50%, -7px);
+  background: var(--wine);
+  color: var(--paper);
+  transform: translateY(-2px);
 }
 
 .shell[data-phase="lane-opening"] .compass {
@@ -408,7 +451,9 @@
 }
 
 .shell[data-phase="lane-opening"] .laneButton {
+  opacity: 0;
   pointer-events: none;
+  transform: scale(0.94);
 }
 
 .roomCodeForm {
@@ -443,7 +488,7 @@
   width: 100%;
   min-width: 0;
   min-height: 46px;
-  border: 1px solid var(--ink);
+  border: 1px solid var(--wine-dark);
   border-radius: 0;
   background: var(--paper);
   padding: 0 13px;
@@ -464,8 +509,8 @@
 .requests button,
 .friendList button {
   min-height: 46px;
-  border: 1px solid var(--ink);
-  background: var(--ink);
+  border: 1px solid var(--wine-dark);
+  background: var(--wine);
   color: var(--paper);
   cursor: pointer;
   font-size: 13px;
@@ -491,7 +536,10 @@
   min-height: 100dvh;
   overflow-x: clip;
   overflow-y: auto;
-  background: var(--ground);
+  background:
+    radial-gradient(circle at 50% 18%, rgba(238, 228, 207, 0.6), transparent 43%),
+    repeating-linear-gradient(45deg, transparent 0 7px, rgba(53, 25, 27, 0.018) 7px 8px),
+    var(--ground);
   overscroll-behavior: contain;
   padding: 98px 20px 48px;
 }
@@ -500,7 +548,7 @@
 .laneScene::after {
   position: fixed;
   z-index: -1;
-  border: 1px solid var(--line);
+  border: 1px solid var(--brass);
   border-radius: 50%;
   content: "";
   pointer-events: none;
@@ -514,12 +562,7 @@
 }
 
 .laneScene::after {
-  right: -8vw;
-  bottom: 5%;
-  width: 24vw;
-  aspect-ratio: 1;
-  border-style: double;
-  border-width: 4px;
+  display: none;
 }
 
 .laneSceneOpening {
@@ -568,7 +611,7 @@
   align-items: center;
   gap: 9px;
   border: 0;
-  border-bottom: 1px solid var(--ink);
+  border-bottom: 1px solid var(--wine-dark);
   background: var(--ground);
   cursor: pointer;
   font-size: 13px;
@@ -598,7 +641,8 @@
 
 .laneTitle h2 {
   margin: 6px 0 8px;
-  font-family: "Iowan Old Style", Baskerville, "Times New Roman", serif;
+  color: var(--wine-dark);
+  font-family: var(--display);
   font-size: clamp(58px, 9vw, 94px);
   font-weight: 500;
   letter-spacing: 0.16em;
@@ -619,9 +663,9 @@
 .friendsPanel {
   position: relative;
   min-width: 0;
-  border: 1px solid var(--ink);
+  border: 1px solid var(--wine-dark);
   background: var(--paper);
-  box-shadow: 8px 10px 0 rgba(23, 20, 15, 0.1);
+  box-shadow: 8px 10px 0 rgba(53, 25, 27, 0.12);
 }
 
 .playCard {
@@ -636,7 +680,7 @@
 .friendsPanel::before {
   position: absolute;
   inset: 7px;
-  border: 1px solid var(--line-strong);
+  border: 1px solid var(--brass);
   content: "";
   pointer-events: none;
 }
@@ -644,7 +688,7 @@
 .playCard h3,
 .panelHeading h3 {
   margin: 0;
-  font-family: "Iowan Old Style", Baskerville, "Times New Roman", serif;
+  font-family: var(--display);
   font-size: 25px;
   font-weight: 600;
 }
@@ -674,7 +718,7 @@
 .secondaryAction {
   width: 100%;
   min-height: 50px;
-  border: 1px solid var(--ink);
+  border: 1px solid var(--wine-dark);
   cursor: pointer;
   font-size: 14px;
   font-weight: 760;
@@ -683,7 +727,7 @@
 }
 
 .primaryAction {
-  background: var(--ink);
+  background: var(--wine);
   color: var(--paper) !important;
 }
 
@@ -697,7 +741,7 @@
 }
 
 .secondaryAction:hover {
-  background: var(--ink);
+  background: var(--wine);
   color: var(--paper);
 }
 
@@ -858,21 +902,21 @@
   height: 5px;
   margin-top: 18px;
   overflow: hidden;
-  border: 1px solid var(--ink);
+  border: 1px solid var(--wine-dark);
   background: var(--paper);
 }
 
 .rankProgress span {
   display: block;
   height: 100%;
-  background: var(--ink);
+  background: var(--wine);
 }
 
 .signOutLink {
   display: inline-block;
   margin-top: 20px;
-  border-bottom: 1px solid var(--ink);
-  color: var(--ink);
+  border-bottom: 1px solid var(--wine-dark);
+  color: var(--wine-dark);
   font-size: 12px;
   font-weight: 720;
   text-decoration: none;
@@ -933,7 +977,7 @@
   width: 27px;
   aspect-ratio: 1;
   place-items: center;
-  border: 1px solid var(--ink);
+  border: 1px solid var(--wine-dark);
   border-radius: 50%;
   font-family: "Iowan Old Style", Baskerville, "Times New Roman", serif;
   font-weight: 700;
@@ -1020,7 +1064,7 @@
 .presence {
   width: 8px;
   height: 8px;
-  border: 1px solid var(--ink);
+  border: 1px solid var(--wine-dark);
   border-radius: 50%;
   background: var(--paper);
 }
@@ -1028,7 +1072,7 @@
 .presence[data-presence="online"],
 .presence[data-presence="searching"],
 .presence[data-presence="in_game"] {
-  background: var(--ink);
+  background: var(--wine);
 }
 
 .emptyRow {
@@ -1058,9 +1102,11 @@
   top: 50%;
   width: min(37vw, 420px);
   aspect-ratio: 836 / 941;
-  border: 1px solid var(--ink);
+  border: 1px solid var(--brass);
   border-radius: 4px;
+  background-color: var(--paper);
   background-image: url("/queen-vs-king.png");
+  background-blend-mode: multiply;
   background-repeat: no-repeat;
   background-size: 200% 100%;
   box-shadow: 0 18px 44px rgba(23, 20, 15, 0.13);
@@ -1071,7 +1117,7 @@
 .courtDoor::after {
   position: absolute;
   inset: 8px;
-  border: 1px solid var(--line-strong);
+  border: 1px solid var(--brass);
   content: "";
 }
 
@@ -1107,8 +1153,8 @@
   position: relative;
   z-index: 3;
   width: min(410px, calc(100% - 32px));
-  border-block: 1px solid var(--ink);
-  background: var(--ground);
+  border-block: 1px solid var(--brass);
+  background: var(--paper);
   padding: 42px 28px;
   text-align: center;
 }
@@ -1135,7 +1181,7 @@
 
 .entryInvitation h1 {
   margin: 9px 0 7px;
-  font-family: "Iowan Old Style", Baskerville, "Times New Roman", serif;
+  font-family: var(--display);
   font-size: clamp(38px, 7vw, 58px);
   font-weight: 500;
   letter-spacing: 0.08em;
@@ -1150,8 +1196,8 @@
 .entryInvitation button {
   min-width: 176px;
   min-height: 49px;
-  border: 1px solid var(--ink);
-  background: var(--ink);
+  border: 1px solid var(--wine-dark);
+  background: var(--wine);
   color: var(--paper);
   cursor: pointer;
   font-size: 14px;
@@ -1181,10 +1227,11 @@
   width: 58px;
   aspect-ratio: 1;
   place-items: center;
-  border: 1px solid var(--ink);
+  border: 3px double var(--brass);
   border-radius: 50%;
-  background: var(--paper);
-  font-family: "Iowan Old Style", Baskerville, "Times New Roman", serif;
+  background: var(--wine);
+  color: var(--paper);
+  font-family: var(--display);
   font-size: 23px;
   animation: loadingTurn 1.2s linear infinite;
 }
@@ -1219,8 +1266,8 @@
     height: 30px;
   }
 
-  .accountSummary span,
-  .accountSummary small {
+  .accountCopy strong,
+  .accountCopy small {
     max-width: 32vw;
   }
 
@@ -1228,35 +1275,12 @@
     width: calc(100% - 24px);
     min-height: calc(100dvh - 64px);
     padding: 20px 0 26px;
-    grid-template-rows: auto minmax(350px, 1fr) auto;
+    grid-template-rows: auto minmax(0, 1fr) auto;
   }
 
   .hubHeading h1 {
     font-size: 31px;
   }
-
-  .compassStage {
-    width: min(100%, 430px);
-  }
-
-  .compass {
-    width: 56%;
-  }
-
-  .tuckBox {
-    width: 21%;
-  }
-
-  .laneButton {
-    width: clamp(76px, 23%, 96px);
-  }
-
-  .laneButton span {
-    font-size: clamp(17px, 5vw, 23px);
-  }
-
-  .laneClassic { left: 0; }
-  .laneWild { right: 0; }
 
   .roomCodeForm {
     width: min(350px, 100%);
@@ -1322,13 +1346,18 @@
     white-space: nowrap;
   }
 
-  .accountSummary span,
-  .accountSummary small {
-    max-width: 112px;
+  .accountCrest {
+    width: 36px;
+    height: 36px;
+  }
+
+  .accountCopy strong,
+  .accountCopy small {
+    max-width: 94px;
   }
 
   .hub {
-    grid-template-rows: auto minmax(315px, 1fr) auto;
+    grid-template-rows: auto minmax(350px, 1fr) auto;
   }
 
   .hubHeading > span {
@@ -1339,31 +1368,6 @@
     margin-top: 4px;
     font-size: 27px;
   }
-
-  .compassStage {
-    width: min(100%, 350px);
-  }
-
-  .compass {
-    width: 53%;
-  }
-
-  .tuckBox {
-    width: 20%;
-  }
-
-  .laneButton {
-    width: 78px;
-  }
-
-  .laneButton::before { inset: 5px; }
-
-  .laneButton span {
-    width: 70%;
-    font-size: 18px;
-  }
-
-  .lanePersonal { bottom: -4px; }
 
   .roomCodeForm label {
     margin-bottom: 5px;
@@ -1418,9 +1422,7 @@
     grid-template-rows: auto minmax(390px, 1fr) auto;
   }
 
-  .compassStage {
-    width: min(480px, 80vh);
-  }
+  .compassStage { width: min(480px, max(360px, 72vmin), max(350px, calc(100dvh - 340px)), 100%); }
 }
 
 @media (prefers-reduced-motion: reduce) {

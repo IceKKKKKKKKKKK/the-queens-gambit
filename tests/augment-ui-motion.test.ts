@@ -105,6 +105,23 @@ test("lobby scenes return through a cancellable reducer while preserving focus p
   const returned = reduceLobbyScene(interrupted, { type: "LANE_CLOSED" });
   assert.deepEqual(returned, { phase: "hub", lane: null, lastLane: "wild" });
   assert.equal(reduceLobbyScene(returned, { type: "LANE_OPENED" }), returned);
+
+  const lobbySource = readFileSync(new URL("../app/components/LobbyExperience.tsx", import.meta.url), "utf8");
+  const lobbyCss = readFileSync(new URL("../app/components/LobbyExperience.module.css", import.meta.url), "utf8");
+  const laneMenuSource = lobbySource.match(/<nav className=\{styles\.laneMenu\}[\s\S]*?<\/nav>/)?.[0] ?? "";
+  assert.match(lobbySource, /<nav className=\{styles\.laneMenu\} aria-label="选择战局">/);
+  assert.match(lobbySource, /<span>经典<\/span>[\s\S]*?<span>狂野<\/span>[\s\S]*?<span>个人<\/span>/);
+  assert.match(lobbyCss, /--wine:\s*#54262a/);
+  assert.match(lobbyCss, /--brass:\s*#6e552d/);
+  assert.match(lobbyCss, /--muted:\s*#4b4136/);
+  assert.match(lobbyCss, /\.compass\s*\{[\s\S]*?width:\s*90%[\s\S]*?border:\s*1px solid var\(--brass\)/);
+  assert.match(lobbyCss, /\.compassStage\s*\{[\s\S]*?width:\s*min\(560px, max\(360px, 72vmin\), max\(350px, calc\(100dvh - 340px\)\), 100%\)/);
+  assert.match(lobbyCss, /\.laneMenu\s*\{[\s\S]*?top:\s*50%[\s\S]*?left:\s*50%[\s\S]*?width:\s*48%/);
+  assert.match(lobbyCss, /\.laneButton\s*\{[\s\S]*?transition:\s*transform var\(--micro-motion\) ease, opacity var\(--micro-motion\) ease/);
+  assert.doesNotMatch(lobbyCss, /width:\s*min\(500px, max\(360px, 72vmin\)/);
+  assert.doesNotMatch(lobbyCss, /width:\s*min\(100%, 360px\)/);
+  assert.doesNotMatch(lobbyCss, /\.laneClassic\s*\{|\.laneWild\s*\{|\.lanePersonal\s*\{/);
+  assert.doesNotMatch(laneMenuSource, /<small>/);
 });
 
 function projectedGameFixture(
