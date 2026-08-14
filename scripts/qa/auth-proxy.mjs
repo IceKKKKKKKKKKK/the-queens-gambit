@@ -1,6 +1,6 @@
 import http from "node:http";
 
-const targetHost = "localhost";
+const targetHost = "127.0.0.1";
 const targetPort = 4317;
 
 const identities = [
@@ -50,7 +50,7 @@ for (const identity of identities) {
     request.pipe(upstream);
   });
 
-  server.listen(identity.port, "localhost", () => {
-    console.log(`QA identity ${identity.id} listening at http://localhost:${identity.port}`);
+  server.listen(identity.port, "127.0.0.1", () => {
+    console.log(`QA identity ${identity.id} listening at http://127.0.0.1:${identity.port}`);
   });
 }
