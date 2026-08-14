@@ -61,6 +61,8 @@ npm run build
 
 仓库中的 `.openai/hosting.json` 指向作者当前的 ChatGPT Sites 项目，方便维护正式站点，但不授予第三方修改该项目的权限。Fork 后部署时，请在自己的 Sites 账户中新建站点与 D1 数据库，并让 Sites 生成或更新该配置；不要复用作者的项目 ID。生产环境必须使用托管平台提供的可信身份头，本地 QA 身份代理不能暴露到公网。
 
+截至 2026-08-14，`npm audit --omit=dev` 为 0。完整 `npm audit` 仍会报告 Vinext beta、Cloudflare 本地模拟器和 Drizzle Kit 所带的开发期告警；这些工具不进入生产依赖，但开发服务器和 QA 代理仍必须只监听本机。不要直接运行 `npm audit fix --force`：它当前会把 Vinext 或 Drizzle Kit 降级到与本项目不兼容的旧版本。
+
 ## 当前版本
 
 | 项目 | 当前值 |
