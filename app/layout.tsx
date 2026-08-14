@@ -8,7 +8,7 @@ export async function generateMetadata(): Promise<Metadata> {
   const protocol = requestHeaders.get("x-forwarded-proto") ?? (host.startsWith("localhost") ? "http" : "https");
   const imageUrl = `${protocol}://${host}/og.png`;
   const title = "军令 · 陆战棋";
-  const description = "在暖白纸牌桌上进入经典或狂野战局，与好友对弈或挑战排位。";
+  const description = "穿过羊皮纸、铁铠与城堡盾徽构成的战局大厅，进入经典或狂野对弈。";
   return {
     title,
     description,
@@ -16,7 +16,7 @@ export async function generateMetadata(): Promise<Metadata> {
       title,
       description,
       type: "website",
-      images: [{ url: imageUrl, width: 1731, height: 909, alt: "两位古代将领隔着军令罗盘对弈的中世纪极简线稿" }],
+      images: [{ url: imageUrl, width: 1731, height: 909, alt: "两位欧洲中世纪铠甲骑士隔着城堡圆盾对峙的极简版画" }],
     },
     twitter: {
       card: "summary_large_image",

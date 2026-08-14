@@ -273,8 +273,6 @@ export default function LobbyExperience({
   );
   const onlineFriends = friends.friends.filter((friend) => friend.presence !== "offline").length;
   const searching = matchmaking.state === "queued";
-  const accountMark = Array.from(account?.handle ?? "棋")[0]?.toUpperCase() ?? "棋";
-
   useEffect(() => {
     dispatch({
       type: "INITIALIZE",
@@ -362,13 +360,13 @@ export default function LobbyExperience({
 
       <header className={styles.header}>
         <div className={styles.wordmark} aria-label="军令陆战棋">
-          <span className={styles.wordmarkSeal} aria-hidden="true">令</span>
+          <span className={styles.wordmarkSeal} aria-hidden="true"><i /></span>
           <span>军令 · 陆战棋</span>
         </div>
         <div className={styles.accountSummary} aria-label="当前玩家">
-          <span className={styles.accountCrest} aria-hidden="true">{accountMark}</span>
+          <span className={styles.accountCrest} aria-hidden="true"><i /></span>
           <span className={styles.accountCopy}>
-            <strong>{account?.handle ?? "棋手"}</strong>
+            <strong>{account?.handle ?? "玩家"}</strong>
             <small>{account?.rank.label ?? "战绩同步中"}</small>
           </span>
         </div>
@@ -381,7 +379,7 @@ export default function LobbyExperience({
       >
         <div className={styles.hubHeading}>
           <span>选择你的战局</span>
-          <h1>三道军门</h1>
+          <h1>城堡大厅</h1>
         </div>
 
         <div className={styles.compassStage}>
@@ -392,7 +390,7 @@ export default function LobbyExperience({
           </div>
           <div className={styles.tuckBox} aria-hidden="true">
             <span className={styles.tuckFlap} />
-            <span className={styles.tuckFace}><i>令</i></span>
+            <span className={styles.tuckFace}><i /></span>
           </div>
           <nav className={styles.laneMenu} aria-label="选择战局">
             <button
@@ -456,7 +454,7 @@ export default function LobbyExperience({
             ref={backButtonRef}
             className={styles.backButton}
             type="button"
-            aria-label="返回三道军门"
+            aria-label="返回城堡大厅"
             onClick={() => dispatch({ type: "CLOSE_LANE" })}
           >
             <span aria-hidden="true">←</span>
@@ -692,12 +690,12 @@ export default function LobbyExperience({
           <div className={`${styles.courtDoor} ${styles.kingDoor}`} aria-hidden="true" />
           {scene.phase !== "checking" ? (
             <div className={styles.entryInvitation}>
-              <span>欢迎归阵，{account?.handle ?? "棋手"}</span>
+              <span>欢迎归阵，{account?.handle ?? "玩家"}</span>
               <h1>军令陆战棋</h1>
               <p>经典谋略与七十张军令，皆在门后。</p>
               <button type="button" onClick={enterLobby}>开始游戏</button>
             </div>
-          ) : <span className={styles.loadingMark} aria-label="正在准备大厅">令</span>}
+          ) : <span className={styles.loadingMark} role="status" aria-label="正在准备大厅" />}
         </section>
       ) : null}
 
